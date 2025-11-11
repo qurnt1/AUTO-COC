@@ -2533,14 +2533,29 @@ class App(ctk.CTk):
         meta = {n: read_macro_meta(p) for n, p in items}
         self.macro_list.set_meta(meta)
         
+        # Détermine le nom à sélectionner
         sel = self.current_macro_name if keep_selection else None
-        self.macro_list.refresh(self.all_macro_names, selected=sel)
-        self._filter_macro_list() # Appliquer filtre
         
-    def _filter_macro_list(self, event=None):
-        """Applique le filtre de recherche (Req 4)."""
+        # --- MODIFICATION ---
         term = self.search_entry.get()
-        self.macro_list.refresh(self.all_macro_names, self.current_macro_name, filter_term=term)
+        
+        # Si keep_selection=False (appelé par new, rename, delete),
+        # on efface le filtre pour s'assurer que la liste est complète
+        # et que le nouvel item (ou l'absence d'item) est visible.
+        if not keep_selection:
+            term = ""
+            # On efface aussi la barre de recherche pour l'UI
+            self.search_entry.delete(0, 'end') 
+        
+        # Fait le refresh
+        self.macro_list.refresh(self.all_macro_names, selected=sel, filter_term=term)
+
+
+    def _filter_macro_list(self, event=None):
+        """Applique le filtre de recherche (Req 4) - Appelé par KeyRelease."""
+        # --- MODIFICATION ---
+        self._refresh_macro_sidebar(keep_selection=True)
+        # --- FIN MODIFICATION ---
 
     def _show_macro_context_menu(self, event, name: str):
         """Affiche le menu clic-droit (Req 9)."""
@@ -2619,8 +2634,8 @@ class App(ctk.CTk):
                 
         self.model.name = name
         self.model.clear()
-        self.model.save(path) # Sauvegarde atomique
         
+        self.model.save(path, force_new_hash=True) # Forcer l'écriture        
         self.current_macro_name = name
         self.current_macro_path = path
         
