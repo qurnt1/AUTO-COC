@@ -1,135 +1,156 @@
-Macro COC (v2.1.0)
+# 🎮 **Macro COC v2.1.0**
 
-Macro COC est une application de macro-enregistrement (recording) et de lecture (playback) conçue pour automatiser des tâches dans Clash of Clans. Elle combine une interface graphique de bureau (UI) pour l'enregistrement et la gestion locale, avec un bot Telegram puissant pour le contrôle à distance.
+> Une application de bureau moderne pour enregistrer et rejouer des macros, avec contrôle à distance via Telegram — pensée pour *Clash of Clans* ⚔️  
 
-Lancez vos macros, démarrez le jeu, ou même éteignez votre PC depuis n'importe où via de simples commandes Telegram.
+---
 
-1. Installation
+## 🚀 Installation
 
-Prérequis
+### 🧩 **Prérequis**
+* **Python 3.x** installé sur votre système  
+* **pip** (installateur de paquets Python)
 
-Python 3.7+
+### 📦 **Installation des dépendances**
+Le projet inclut un fichier `requirements.txt` contenant toutes les dépendances nécessaires.  
+Exécutez simplement la commande suivante :
 
-Un fichier requirements.txt (que vous avez mentionné être dans votre projet)
-
-Étapes d'installation
-
-Clonez ce dépôt (ou dézippez vos fichiers) dans un dossier.
-
-Ouvrez un terminal ou une invite de commande dans ce dossier.
-
-Installez les dépendances Python nécessaires en utilisant le fichier requirements.txt :
-
+```bash
 pip install -r requirements.txt
+```
 
+### ▶️ **Lancement de l’application**
+Une fois les dépendances installées, lancez l’application via :
 
-Une fois l'installation terminée, lancez l'application :
+```bash
+python macro.py
+```
 
-python macro_coc_v2.py
+---
 
+## ✨ Fonctionnalités
 
-2. Présentation et Fonctionnement
+### 🧠 **Gestion complète des macros (UI)**
+* Créer, renommer, dupliquer, importer et exporter vos macros.  
+* Interface graphique moderne basée sur **CustomTkinter**.  
+* Sauvegarde automatique des macros en JSON local.  
 
-L'application vous permet d'enregistrer une séquence d'actions (clics de souris, mouvements, frappes au clavier) et de la sauvegarder en tant que "macro". Vous pouvez ensuite rejouer cette macro à volonté, soit depuis l'interface, soit depuis Telegram.
+### 🖱️ **Enregistrement et lecture**
+* Enregistre précisément vos actions clavier et souris.  
+* Lecture fidèle et ajustée au temps réel.  
+* Possibilité de **lecture en boucle** (activable dans l’UI et sur Telegram).  
 
-Fonctionnalités principales
+### 🔁 **Mode Boucle**
+* Un **toggle unique** permet d’activer/désactiver le mode boucle.  
+* L’état est synchronisé entre l’UI et Telegram.  
 
-Interface de bureau (UI): Une interface claire (basée sur CustomTkinter) pour créer, renommer, supprimer et gérer vos macros.
+### 🤖 **Contrôle à distance (Bot Telegram)**
+L’application peut être entièrement pilotée depuis votre téléphone :
+* **Démarrer / Stopper** la macro en cours.  
+* **Choisir** la macro à exécuter.  
+* **Basculer le mode boucle**.  
+* **Prendre une capture d’écran** avec `/capture`.  
+* **Éteindre le PC** à distance (`📴 Éteindre PC`).  
+* **Recharger le jeu** via la macro spéciale `🔃 Recharger COC`.  
 
-Enregistrement/Lecture: Enregistrement précis des événements pynput avec gestion des délais.
+Le clavier Telegram est dynamique et clair :
+```
+[Paramètres ⚙️] [Capture 📸]
+[Lancer COC]
+[Go ✅] [Stop ❌]
+```
 
-Mode Boucle: Un bouton unique (dans les Paramètres et sur Telegram) vous permet d'activer ou de désactiver la lecture en boucle de votre macro.
+### 🕹️ **Lancement automatique du jeu**
+* Un bouton dans l’UI permet de lancer **Clash of Clans** directement.  
+* Le bouton Telegram s’adapte automatiquement :  
+  `COC lancé ✅` si le processus du jeu est détecté.  
 
-Contrôle via Telegram: Un bot Telegram vous donne un contrôle total à distance.
+### 🧼 **Maintenance automatique**
+* À chaque démarrage, le bot **purge les anciens messages Telegram**.  
+* Les fichiers de logs de plus de **24 h** sont automatiquement supprimés.  
 
-Lancement de CoC: Un bouton dans l'UI et sur Telegram vous permet de lancer Clash of Clans. Le bouton Telegram se met à jour intelligemment pour afficher "COC lancé ✅" lorsque le jeu est détecté.
+---
 
-Actions à distance:
+## ⚙️ Configuration
 
-Démarrer / Stopper la macro.
+### 1️⃣ **Chemin de lancement CoC**
+* Renseignez le chemin vers l’exécutable ou le raccourci `.lnk` du jeu.  
+* Obligatoire pour que le bouton **Lancer COC** fonctionne.  
 
-Choisir quelle macro exécuter.
+### 2️⃣ **Connexion à Telegram**
+* Fournissez votre **Token de Bot** et votre **Chat ID**.  
+* L’application propose un **guide complet en HTML** :  
+  `Paramètres → Configurer Telegram... → Ouvrir le guide`.  
+  Ce guide explique pas à pas comment :
+  * Créer un bot avec `@BotFather`  
+  * Récupérer votre **Token**
+  * Trouver votre **Chat ID**
 
-Prendre une capture d'écran (/capture).
+---
 
-Éteindre votre PC (📴 Éteindre PC).
+## 🕹️ Utilisation
 
-Recharger le jeu (🔃 Recharger COC - lance une macro protégée).
+1. **Créer une macro :**
+   * Cliquez sur `Nouveau`, nommez-la, puis sur `Enregistrer`.  
+   * Attendez le décompte, effectuez vos actions, puis `Stopper`.  
 
-Gestion de la vie privée: L'application purge les anciens messages du bot dans votre conversation Telegram à chaque démarrage.
+2. **Lire une macro (localement) :**
+   * Sélectionnez une macro.
+   * Activez la boucle si nécessaire.
+   * Cliquez sur `Lire la macro`.  
 
-Maintenance: Les fichiers de logs de plus de 24 heures sont automatiquement supprimés au démarrage et à la fermeture.
+3. **Lire une macro (Telegram) :**
+   * Utilisez les boutons `Go ✅` et `Stop ❌` sur votre téléphone.  
 
-3. Configuration
+---
 
-Pour une utilisation complète, deux éléments doivent être configurés via le bouton Paramètres dans l'interface principale.
+## ⌨️ Raccourcis Clavier
 
-A. Chemin de lancement CoC
+| Raccourci | Action |
+|------------|--------|
+| `F1` | Démarrer / Stopper la macro |
+| `Ctrl + Shift + 1` | Démarrer la macro |
+| `Ctrl + Shift + 0` | Arrêt d’urgence (Stop immédiat) |
 
-Où : Paramètres -> Chemin de lancement CoC
+---
 
-Quoi : Indiquez le chemin complet vers l'exécutable (.exe) de Clash of Clans ou, de préférence, vers son raccourci (.lnk).
+## 📁 Structure du projet
 
-Pourquoi : Permet à l'application (et à Telegram) de lancer ou de relancer le jeu.
+```
+Macro_COC/
+├── app/
+│   ├── config/
+│   │   ├── macros.json
+│   │   ├── settings.json
+│   │   └── logs/
+│   ├── images/
+│   │   └── icon.ico
+│   └── telegram/
+├── requirements.txt
+└── macro_coc_v2.py
+```
 
-B. Connexion à Telegram
+---
 
-Pour connecter l'application à Telegram, vous avez besoin de deux choses : un Token de Bot et votre Chat ID.
+## 🧑‍💻 Contribuer
 
-La méthode la plus simple est d'utiliser le guide intégré à l'application :
+Les contributions sont les bienvenues !  
+1. Forkez le projet  
+2. Créez une branche :  
+   ```bash
+   git checkout -b feat/ma-fonctionnalite
+   ```
+3. Commitez vos changements :  
+   ```bash
+   git commit -m "feat: ajout de ma fonctionnalité"
+   ```
+4. Poussez la branche et créez une **Pull Request**.  
 
-Dans l'application de bureau, cliquez sur Paramètres.
+---
 
-Cliquez sur Configurer Telegram....
+## 🧾 Licence
 
-Dans la nouvelle fenêtre, cliquez sur Ouvrir le guide (page HTML locale).
+Projet open-source sous licence **MIT**.  
+Libre de l’utiliser, modifier et redistribuer.  
 
-Ce guide HTML (stocké localement dans votre dossier config/) vous expliquera pas à pas comment :
+---
 
-Parler à @BotFather sur Telegram pour créer votre propre bot et obtenir un Token (ex: 123456:ABC-DEF1234...).
-
-Envoyer un message à votre nouveau bot pour trouver votre Chat ID (ex: 987654321).
-
-Une fois ces deux informations obtenues, copiez-les dans les champs "Bot token" et "Chat ID" de la fenêtre de configuration et cliquez sur "Enregistrer".
-
-Si tout est correct, le statut dans les paramètres passera à "Connecté" et vous recevrez un message de démarrage (Macro COC v2.1.0 lancée.) sur votre téléphone.
-
-4. Utilisation
-
-Enregistrer une Macro:
-
-Lancez l'application.
-
-Cliquez sur Nouveau, donnez un nom à votre macro (ex: "Collecter ressources").
-
-Cliquez sur Enregistrer.
-
-... (Attendez le décompte de 3 secondes) ...
-
-Effectuez vos actions dans le jeu.
-
-Cliquez sur Stopper la macro (ou F1) pour terminer l'enregistrement.
-
-Jouer une Macro (Local):
-
-Assurez-vous que la macro est sélectionnée dans la liste de gauche.
-
-Activez la boucle si nécessaire (Paramètres -> Lecture en boucle).
-
-Cliquez sur Lire la macro (ou F1).
-
-Jouer une Macro (Telegram):
-
-Ouvrez la conversation avec votre bot sur Telegram.
-
-Utilisez les boutons Lancer ✅ ou Stop ❌.
-
-Pour changer de macro, allez dans Paramètres ⚙️ -> Choisir macro.
-
-5. Raccourcis Clavier
-
-F1 : Démarrer / Stopper la macro sélectionnée.
-
-Ctrl+Shift+1 : Démarrer la macro.
-
-Ctrl+Shift+0 : Stopper la macro (arrêt d'urgence).
