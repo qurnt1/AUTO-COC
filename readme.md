@@ -1,6 +1,6 @@
 # 🎮 **Macro COC v2.1.0**
 
-> Une application de bureau moderne pour enregistrer et rejouer des macros, avec contrôle à distance via Telegram — pensée pour *Clash of Clans* ⚔️  
+> Macro COC est une application de macro-enregistrement (recording) et de lecture (playback) conçue pour automatiser des tâches. Elle combine une interface graphique de bureau (UI) pour l'enregistrement et la gestion locale, avec un bot Telegram puissant pour le contrôle à distance. Lancez vos macros, démarrez le jeu, ou même éteignez votre PC depuis n'importe où via de simples commandes Telegram. 
 
 ---
 
@@ -107,9 +107,7 @@ Le clavier Telegram est dynamique et clair :
 
 | Raccourci | Action |
 |------------|--------|
-| `F1` | Démarrer / Stopper la macro |
-| `Ctrl + Shift + 1` | Démarrer la macro |
-| `Ctrl + Shift + 0` | Arrêt d’urgence (Stop immédiat) |
+| `F1` | Démarrer / Stopper la macro selectionnée|
 
 ---
 
@@ -117,40 +115,25 @@ Le clavier Telegram est dynamique et clair :
 
 ```
 Macro_COC/
-├── app/
-│   ├── config/
-│   │   ├── macros.json
-│   │   ├── settings.json
-│   │   └── logs/
-│   ├── images/
-│   │   └── icon.ico
-│   └── telegram/
+├── config/
+│   ├── macros/
+│   │   ├── macro1.json
+│   │   ├── macro2.json
+│   │   └── etc etc
+│   ├── data.csv
+│   ├── app.log
+│   ├── icon.ico
+│   └── image.png
+│    
 ├── requirements.txt
 └── macro_coc_v2.py
 ```
 
----
-
-## 🧑‍💻 Contribuer
-
-Les contributions sont les bienvenues !  
-1. Forkez le projet  
-2. Créez une branche :  
-   ```bash
-   git checkout -b feat/ma-fonctionnalite
-   ```
-3. Commitez vos changements :  
-   ```bash
-   git commit -m "feat: ajout de ma fonctionnalité"
-   ```
-4. Poussez la branche et créez une **Pull Request**.  
-
----
 
 ## 🧾 Licence
 
 Projet open-source sous licence **MIT**.  
-Libre de l’utiliser, modifier et redistribuer.  
+Libre de l’utiliser, modifier (sur votre pc) et redistribuer.  
 
 ---
 
