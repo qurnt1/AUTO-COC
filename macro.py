@@ -29,6 +29,7 @@ import shutil
 import ctypes
 import queue
 from io import BytesIO
+from glob import glob
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable, Any, Set
 from enum import Enum, auto
@@ -101,6 +102,16 @@ log = logging.getLogger("MacroApp")
 
 def setup_logging():
     """Configure le logger principal avec rotation."""
+    # TÂCHE 1: Nettoyage des anciens logs au démarrage
+    try:
+        # Assure que LOG_PATH.parent existe avant de lister
+        ensure_dirs()
+        # Utilise print car le logger n'est pas encore prêt
+        print(f"Nettoyage des logs > {24}h dans {LOG_PATH.parent}...")
+        clean_old_logs(LOG_PATH.parent, "app.log*", 24)
+    except Exception as e:
+        print(f"Erreur (pré-logging) clean_old_logs: {e}")
+    # ---
     ensure_dirs()
     log.setLevel(logging.INFO)
     
@@ -128,6 +139,28 @@ def setup_logging():
     handler_console.setFormatter(formatter)
     log.addHandler(handler_console)
 
+def clean_old_logs(log_dir: Path, pattern: str, max_age_hours: int = 24):
+    """Supprime les fichiers logs plus anciens que max_age_hours."""
+    try:
+        cutoff = time.time() - (max_age_hours * 3600)
+        # Utilise glob pour gérer les wildcards (ex: app.log*)
+        search_path = log_dir / pattern
+        # Note: glob.glob requiert un string, surtout pour les wildcards
+        for log_file in glob(str(search_path)):
+            try:
+                p = Path(log_file)
+                if not p.is_file():
+                    continue
+                
+                file_time = p.stat().st_mtime
+                if file_time < cutoff:
+                    # Log ici, car setup_logging a déjà été appelé
+                    log.info(f"Nettoyage ancien log: {p.name}")
+                    os.remove(p)
+            except Exception as e:
+                log.warning(f"Échec suppression ancien log {log_file}: {e}")
+    except Exception as e:
+        log.error(f"Erreur lors du nettoyage des logs: {e}")
 def log_uncaught_exception(exc_type, exc_value, exc_traceback):
     """Callback pour sys.excepthook pour logger les crashs."""
     if issubclass(exc_type, KeyboardInterrupt):
@@ -619,7 +652,7 @@ class TelegramBridge:
         # Gestion d'UI
         self._last_controls_id: Optional[int] = None
         self._last_menu_id: Optional[int] = None
-        self.last_photo_message_id: Optional[int] = None # Req 2
+        # TÂCHE 3: Suppression de last_photo_message_id
         
         # Map pour callbacks > 64 octets (Req 7)
         self._callback_data_map: Dict[str, str] = {}
@@ -755,7 +788,7 @@ class TelegramBridge:
         for up in res:
             self._offset = up.get("update_id", 0) + 1
             
-            # --- AJOUT: Suppression des messages ---
+            # --- TÂCHE 6: Purge des messages au démarrage ---
             msg = up.get("message") or up.get("edited_message") or up.get("callback_query", {}).get("message")
             # On vérifie le chat_id SEULEMENT s'il est déjà configuré
             if msg and self.chat_id and msg.get("chat", {}).get("id") == self.chat_id:
@@ -766,7 +799,7 @@ class TelegramBridge:
                         deleted_count += 1
                 except Exception as e:
                     log.warning(f"Erreur purge backlog (delete): {e}")
-            # --- FIN AJOUT ---
+            # --- FIN TÂCHE 6 ---
 
         log.info(f"TG Bridge: Backlog purgé ({deleted_count} messages supprimés), offset réglé à {self._offset}")
 
@@ -774,46 +807,14 @@ class TelegramBridge:
         if not self.ready(): return
         self._request("sendMessage", json={"chat_id": self.chat_id, "text": text})
 
-    def send_or_edit_photo(self, png_bytes: bytes, caption: str = ""):
-        """
-        Envoie une photo. Tente de modifier la dernière photo envoyée
-        si possible (editMessageMedia), sinon en envoie une nouvelle (Req 2).
-        """
+    # TÂCHE 3: Remplacement de send_or_edit_photo
+    def send_photo(self, png_bytes: bytes, caption: str = ""):
+        """Envoie une nouvelle photo (remplace send_or_edit_photo)."""
         if not self.ready() or not png_bytes:
             return
 
-        media_data = {
-            "type": "photo",
-            "media": "attach://screenshot.png",
-            "caption": caption
-        }
-        files = {"screenshot.png": ("screenshot.png", png_bytes, "image/png")}
-
-        # 1. Tenter editMessageMedia si on a un ID (Req 2)
-        if self.last_photo_message_id:
-            with BASE_LOCK:
-                # editMessageMedia utilise un ID stocké
-                edit_msg_id = self.last_photo_message_id
-            
-            resp = self._request(
-                "editMessageMedia",
-                data={"chat_id": str(self.chat_id), 
-                      "message_id": edit_msg_id, 
-                      "media": json.dumps(media_data)},
-                files=files,
-                timeout=30
-            )
-            
-            if resp.get("ok"):
-                log.info(f"TG: editMessageMedia réussi (ID: {edit_msg_id})")
-                return # Succès
-
-            # Échec de l'edit, on fallback en sendPhoto
-            log.warning(f"TG: échec editMessageMedia (ID: {edit_msg_id}), fallback vers sendPhoto. Réponse: {resp}")
-            with BASE_LOCK:
-                self.last_photo_message_id = None
-
-        # 2. Fallback: sendPhoto
+        files = {"photo": ("screenshot.png", png_bytes, "image/png")}
+        
         resp = self._request(
             "sendPhoto",
             data={"chat_id": str(self.chat_id), "caption": caption},
@@ -824,8 +825,6 @@ class TelegramBridge:
         new_msg_id = ((resp or {}).get("result") or {}).get("message_id")
         if new_msg_id:
             log.info(f"TG: sendPhoto réussi (Nouvel ID: {new_msg_id})")
-            with BASE_LOCK:
-                self.last_photo_message_id = new_msg_id
         else:
             log.error(f"TG: sendPhoto a échoué. Réponse: {resp}")
 
@@ -854,47 +853,64 @@ class TelegramBridge:
         })
 
     # ---------- Claviers (Req 7) ----------
-    def _controls_markup(self):
+    def _controls_markup(self, coc_launched: bool = False):
+        # TÂCHE 4: Bouton Lancer CoC dynamique
+        coc_button_row = []
+        if coc_launched:
+            # Libellé "COC lancé ✅"
+            coc_button_row = [{"text": "COC lancé ✅", "callback_data": "DUMMY_COC_STATUS"}]
+        else:
+            coc_button_row = [{"text": "Lancer CoC", "callback_data": "LAUNCH_COC"}]
+
         return {
             "inline_keyboard": [
                 [{"text": "Paramètres ⚙️", "callback_data": "MENU"},
                  {"text": "Capture 📸", "callback_data": "CAPTURE"}],
-                [{"text": "Lancer CoC", "callback_data": "LAUNCH_COC"}],
+                coc_button_row, # Ligne dynamique
                 [{"text": "Lancer ✅", "callback_data": "GO"},
                  {"text": "Stop ❌", "callback_data": "STOP"}],
             ]
         }
 
-    def replace_controls(self, text: str = "Commandes :"):
+    def replace_controls(self, text: str = "Commandes :", coc_launched: bool = False):
         if not self.ready(): return
         with BASE_LOCK:
             if self._last_controls_id:
                 self.delete_message(self._last_controls_id)
             resp = self._request("sendMessage", json={"chat_id": self.chat_id, "text": text,
-                                                   "reply_markup": self._controls_markup()})
+                                                               "reply_markup": self._controls_markup(coc_launched=coc_launched)})
             self._last_controls_id = (resp or {}).get("result", {}).get("message_id")
 
-    def _menu_markup(self):
+    def _menu_markup(self, loop_state: bool):
+        # TÂCHE 2: Bouton loop unique
+        if loop_state:
+            loop_text = "Désactiver loop"
+            loop_cb = "TOGGLE_LOOP"
+        else:
+            loop_text = "Activer loop"
+            loop_cb = "TOGGLE_LOOP"
+
         return {
             "inline_keyboard": [
                 [{"text": "⬅️ Retour", "callback_data": "BACK"}],
-                [{"text": "Éteindre PC", "callback_data": "SHUTDOWN_ASK"}],
+                # TÂCHE 5: Emoji
+                [{"text": "📴 Éteindre PC", "callback_data": "SHUTDOWN_ASK"}],
                 [{"text": "Choisir macro", "callback_data": "SELECT_MACRO_LIST"}],
-                [{"text": "Recharger CoC", "callback_data": "RELOAD_COC"}],
-                [{"text": "AutoCap ON", "callback_data": "AUTO_CAP_ON"},
-                 {"text": "AutoCap OFF", "callback_data": "AUTO_CAP_OFF"}],
-                [{"text": "Loop ON", "callback_data": "LOOP_ON"},
-                 {"text": "Loop OFF", "callback_data": "LOOP_OFF"}]
+                # TÂCHE 5: Emoji
+                [{"text": "🔃 Recharger COC", "callback_data": "RELOAD_COC"}],
+                # TÂCHE 2: Bouton loop unique
+                [{"text": loop_text, "callback_data": loop_cb}]
+                # TÂCHE 3: Suppression AutoCap
             ]
         }
 
-    def replace_menu(self, title: str = "Paramètres"):
+    def replace_menu(self, title: str = "Paramètres", loop_state: bool = False):
         if not self.ready(): return
         with BASE_LOCK:
             if self._last_menu_id:
                 self.delete_message(self._last_menu_id)
             resp = self._request("sendMessage", json={"chat_id": self.chat_id, "text": title,
-                                                   "reply_markup": self._menu_markup()})
+                                                               "reply_markup": self._menu_markup(loop_state=loop_state)})
             self._last_menu_id = (resp or {}).get("result", {}).get("message_id")
 
     def _hash_callback_data(self, data: str) -> str:
@@ -1061,7 +1077,13 @@ class TelegramBridge:
         KNOWN_CALLBACKS = {
             "STOP", "GO", "MENU", "BACK", "SHUTDOWN_ASK", "SHUTDOWN_CONFIRM",
             "SHUTDOWN_CANCEL", "CAPTURE", "LAUNCH_COC", "RELOAD_COC",
-            "AUTO_CAP_ON", "AUTO_CAP_OFF", "LOOP_ON", "LOOP_OFF",
+            # TÂCHE 3: Suppression AutoCapture
+            # "AUTO_CAP_ON", "AUTO_CAP_OFF", 
+            # TÂCHE 2: Remplacement loop
+            # "LOOP_ON", "LOOP_OFF",
+            "TOGGLE_LOOP",
+            # TÂCHE 4: Bouton CoC
+            "DUMMY_COC_STATUS",
             "SELECT_MACRO_LIST", "CANCEL_SELECTION"
         }
         if s in KNOWN_CALLBACKS:
@@ -1648,7 +1670,7 @@ class SettingsDialog(BaseToplevel):
                         command=self._open_diag).pack(side="left")
                         
         # Bouton Shutdown (Req 5)
-        ctk.CTkButton(row4, text="Éteindre le PC", width=160,
+        ctk.CTkButton(row4, text="📴 Éteindre le PC", width=160, # TÂCHE 5: Emoji
                         fg_color=Theme.BTN_STOP_BG, hover_color=Theme.BTN_STOP_HOVER,
                         command=self.master.request_local_shutdown).pack(side="right", padx=(8,0))
 
@@ -1905,8 +1927,8 @@ class App(ctk.CTk):
 
         # Flags
         self._coc_launched_once = False
-        self._auto_cap_running = False
-        self._auto_cap_thread: Optional[threading.Thread] = None
+        self._coc_is_running_tg = False
+
 
         # Timer de lecture UI (Req 1)
         self._play_timer_running = False
@@ -2397,8 +2419,10 @@ class App(ctk.CTk):
             self.tg.start()
             if self.tg.ready():
                 log.info("TG Bridge prêt, envoi du message de démarrage.")
+                # TÂCHE 6: Message de démarrage
                 self.tg.send(f"Macro COC v{APP_VERSION} lancée.")
-                self.tg.replace_controls(self._compose_status_for_tg("Prêt"))
+                # TÂCHE 4: État CoC
+                self.tg.replace_controls(self._compose_status_for_tg("Prêt"), coc_launched=self._coc_is_running_tg)
             self.after(0, self._update_tg_status_vars) # Mettre à jour l'UI
         except Exception as e:
             log.error(f"Échec du bootstrap Telegram: {e}")
@@ -2768,23 +2792,32 @@ class App(ctk.CTk):
         # Commandes exécutées dans le thread UI (via self.after)
         # pour éviter les conflits avec ctk
         
+        # Helper pour Tâches 2, 3, 4
+        def cleanup_menu_and_replace_controls(status_text: str):
+            """Supprime le msg menu et remplace le msg de contrôles."""
+            if self.tg._last_menu_id:
+                self.tg.delete_message(self.tg._last_menu_id)
+                self.tg._last_menu_id = None
+            self.tg.replace_controls(self._compose_status_for_tg(status_text), coc_launched=self._coc_is_running_tg) # TÂCHE 4
+
         if cmd == "STOP":
             self.after(0, lambda: self.force_stop_all(notify_tg=False))
-            self.tg.replace_controls(self._compose_status_for_tg("Lecture arrêtée"))
+            self.tg.replace_controls(self._compose_status_for_tg("Lecture arrêtée"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
                 
         elif cmd == "GO":
             self.after(0, lambda: self.on_play(notify_tg=False))
-            self.tg.replace_controls(self._compose_status_for_tg("Lecture démarrée"))
+            self.tg.replace_controls(self._compose_status_for_tg("Lecture démarrée"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
                 
         elif cmd == "MENU":
-            self.tg.replace_menu("Paramètres")
+            # TÂCHE 2: Passer l'état loop
+            self.tg.replace_menu("Paramètres", loop_state=self._auto_loop_enabled())
 
         elif cmd == "BACK":
             # Supprime le message "Paramètres"
             if self.tg._last_menu_id:
                 self.tg.delete_message(self.tg._last_menu_id)
                 self.tg._last_menu_id = None
-            self.tg.replace_controls(self._compose_status_for_tg("Prêt"))
+            self.tg.replace_controls(self._compose_status_for_tg("Prêt"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
 
         elif cmd == "SHUTDOWN_ASK":
             self.tg.push_shutdown_confirm(origin_msg_id=meta.get("message_id"))
@@ -2801,40 +2834,40 @@ class App(ctk.CTk):
             
         elif cmd == "SHUTDOWN_CANCEL":
             self.tg.send("Extinction annulée.")
-            cleanup_menu_and_replace_controls("Prêt")     
+            cleanup_menu_and_replace_controls("Prêt")
 
         # Commandes exécutées en thread pour ne pas bloquer l'UI
         elif cmd == "CAPTURE":
             threading.Thread(target=self._send_capture_to_telegram, daemon=True, name="TGCapture").start()
 
         elif cmd == "LAUNCH_COC":
-            cleanup_menu_and_replace_controls("Lancement CoC...")
+            # TÂCHE 4: Lancer la vérification
+            self.after(0, self.launch_coc_for_telegram)
+            # (le message "Lancement..." est géré dans la fonction)
+
+        elif cmd == "DUMMY_COC_STATUS":
+            # TÂCHE 4: Clic sur le bouton "Déjà lancé", ne rien faire
+            pass 
 
         elif cmd == "RELOAD_COC":
             self.after(0, lambda: self.play_macro_once(RECHARGER_MACRO_NAME, notify_tg=True))
             cleanup_menu_and_replace_controls("Rechargement CoC...")
 
-        elif cmd == "AUTO_CAP_ON":
-            self.after(0, lambda: self.autocap_start(interval_sec=10))
+        # TÂCHE 3: Suppression AutoCapture
+        # ... Handlers AUTO_CAP_ON/OFF supprimés ...
 
-        elif cmd == "AUTO_CAP_ON":
-            self.after(0, lambda: self.autocap_start(interval_sec=10))
-            cleanup_menu_and_replace_controls("AutoCap ON")
-        elif cmd == "AUTO_CAP_OFF":
-            self.after(0, self.autocap_stop)
-            cleanup_menu_and_replace_controls("AutoCap OFF")
-
-        elif cmd == "LOOP_ON":
-            self.params["auto_loop"] = "1"
+        # TÂCHE 2: Remplacement Loop
+        # ... Handlers LOOP_ON/OFF supprimés ...
+        
+        elif cmd == "TOGGLE_LOOP":
+            # TÂCHE 2: Nouveau handler
+            current_state = self._auto_loop_enabled()
+            new_state = not current_state
+            self.params["auto_loop"] = "1" if new_state else "0"
             self._save_params()
-            self.tg.send("Loop ON.")
-            cleanup_menu_and_replace_controls("Prêt")
-
-        elif cmd == "LOOP_OFF":
-            self.params["auto_loop"] = "0"
-            self._save_params()
-            self.tg.send("Loop OFF.")
-            cleanup_menu_and_replace_controls("Prêt")
+            self.tg.send(f"Loop {'ON' if new_state else 'OFF'}.")
+            # Rafraîchir le menu pour mettre à jour le libellé
+            self.tg.replace_menu("Paramètres", loop_state=new_state)
 
         elif cmd == "SELECT_MACRO_LIST":
             all_macros = [name for name, path in list_macros()]
@@ -2851,26 +2884,19 @@ class App(ctk.CTk):
             macro_name = cmd[13:]
             self.after(0, lambda n=macro_name: self._select_macro_by_name_from_tg(n))
 
-        def cleanup_menu_and_replace_controls(status_text: str):
-            """Supprime le msg menu et remplace le msg de contrôles."""
-            if self.tg._last_menu_id:
-                self.tg.delete_message(self.tg._last_menu_id)
-                self.tg._last_menu_id = None
-            self.tg.replace_controls(self._compose_status_for_tg(status_text))
-
     def _select_macro_by_name_from_tg(self, name: str):
         """Change la macro sélectionnée depuis Telegram."""
         if self.current_state != State.IDLE:
             self.tg.send(f"Impossible de changer de macro: opération en cours.")
-            self.tg.replace_controls(self._compose_status_for_tg("Erreur"))
+            self.tg.replace_controls(self._compose_status_for_tg("Erreur"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
             return
             
         if name in self.all_macro_names:
             self.macro_list.select(name, fire=True) # fire=True déclenche _select_macro_by_name
-            self.tg.replace_controls(self._compose_status_for_tg(f"Prêt (Macro: {name})"))
+            self.tg.replace_controls(self._compose_status_for_tg(f"Prêt (Macro: {name})"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
         else:
             self.tg.send(f"Erreur : Macro « {name} » introuvable.")
-            self.tg.replace_controls(self._compose_status_for_tg("Erreur"))
+            self.tg.replace_controls(self._compose_status_for_tg("Erreur"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
 
     def _send_capture_to_telegram(self):
         """Prend et envoie une capture (thread-safe)."""
@@ -2881,23 +2907,16 @@ class App(ctk.CTk):
         png = grab_screenshot_png_bytes()
         if png:
             caption = f"📸 Capture — {self._macro_label()}"
-            # Utilise send_or_edit_photo, qui gère editMessageMedia (Req 2)
-            # MAIS, pour une capture manuelle, on en veut une nouvelle.
-            # On utilise donc un envoi simple.
-            # self.tg.send_or_edit_photo(png, caption=caption) <- Pour l'autocap
             
-            # Pour CAPTURE manuelle, on force une nouvelle photo
-            temp_id = self.tg.last_photo_message_id
-            self.tg.last_photo_message_id = None # Force sendPhoto
-            self.tg.send_or_edit_photo(png, caption=caption)
-            self.tg.last_photo_message_id = temp_id # Restaure l'ID de l'autocap
-            
+            # TÂCHE 3: Remplacement send_or_edit_photo par send_photo
+            self.tg.send_photo(png, caption=caption)
+
             self.after(0, lambda: self.toast("Capture envoyée sur Telegram."))
-            self.tg.replace_controls(self._compose_status_for_tg("Capture envoyée"))
+            self.tg.replace_controls(self._compose_status_for_tg("Capture envoyée"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
         else:
             self.tg.send("Échec de la capture d’écran.")
             self.after(0, lambda: self.toast("Impossible de capturer l’écran."))
-            
+
     def _send_gif_to_telegram(self, duration_sec: int = 4, fps: int = 5):
         """Crée et envoie un GIF (Req 6)."""
         if not self.tg.ready():
@@ -3013,54 +3032,6 @@ class App(ctk.CTk):
             self.toast(msg)
             if self.tg.ready(): self.tg.send(f"❌ {msg}")
 
-    # ---------- Auto capture (Req 2, 6) ----------
-    def _auto_capture_loop(self, base_interval_sec: int = 10):
-        self._auto_cap_running = True
-        log.info("AutoCap démarré.")
-        
-        while self._auto_cap_running:
-            # Req 6: Détecter inactivité (IDLE) et réduire la fréquence
-            current_interval = base_interval_sec
-            if self.current_state == State.IDLE:
-                current_interval = 30.0 # 30s si IDLE
-            
-            png = grab_screenshot_png_bytes()
-            if png and self.tg.ready():
-                # Req 2: Utilise send_or_edit_photo (editMessageMedia)
-                self.tg.send_or_edit_photo(png, caption=f"Auto capture | {self._macro_label()}")
-            
-            # Attente fractionnée
-            sleep_start = time.perf_counter()
-            while time.perf_counter() - sleep_start < current_interval:
-                if not self._auto_cap_running:
-                    break
-                time.sleep(0.1)
-                
-        log.info("AutoCap arrêté.")
-        # Nettoyage UI
-        if self.tg.ready():
-            self.tg.replace_controls(self._compose_status_for_tg("AutoCap arrêté"))
-
-    def autocap_start(self, interval_sec: int = 10):
-        if self._auto_cap_running:
-            if self.tg.ready(): self.tg.send("AutoCap déjà actif.")
-            return
-        self._auto_cap_thread = threading.Thread(
-            target=self._auto_capture_loop,
-            args=(interval_sec,), 
-            daemon=True,
-            name="AutoCap"
-        )
-        self._auto_cap_thread.start()
-        if self.tg.ready():
-            self.tg.send(f"AutoCap ON (Intervalle: {interval_sec}s / 30s si IDLE)")
-
-    def autocap_stop(self):
-        self._auto_cap_running = False
-        if self.tg.ready():
-            self.tg.send("AutoCap OFF.")
-            # Ne supprime pas la dernière capture (demandé par l'ancien code)
-
     # ---------- Lecture (Req 1) ----------
     def on_play(self, notify_tg: bool = True):
         """Démarre la lecture (protégé par la machine à états)."""
@@ -3086,12 +3057,11 @@ class App(ctk.CTk):
         
         self.toast(f"Lecture démarrée. Boucle = {loop}.")
         if notify_tg and self.tg.ready():
-            self.tg.replace_controls(self._compose_status_for_tg(f"Lecture (Loop={loop})"))
+            self.tg.replace_controls(self._compose_status_for_tg(f"Lecture (Loop={loop})"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
             
         if self.current_macro_name:
             self.params["last_macro_played"] = self.current_macro_name
             self._save_params()
-
     # ---- Timer de lecture UI (Req 1) ----
     def _start_play_timer(self):
         self._play_timer_running = True
@@ -3218,7 +3188,7 @@ class App(ctk.CTk):
         if did_stop:
             self.toast("Opération arrêtée.")
             if notify_tg and self.tg.ready():
-                self.tg.replace_controls(self._compose_status_for_tg("Opération arrêtée"))
+                self.tg.replace_controls(self._compose_status_for_tg("Opération arrêtée"), coc_launched=self._coc_is_running_tg) # TÂCHE 4
         else:
             self.toast("Rien à arrêter.")
 
@@ -3273,11 +3243,30 @@ class App(ctk.CTk):
             self.force_stop_all(notify_tg=False)
         except Exception:
             pass
+        
+        # TÂCHE 6: Envoyer message de fermeture
+        if self.tg.ready():
+            try:
+                log.info("Envoi du message de fermeture Telegram...")
+                self.tg.send("Application fermée.")
+                # L'appel est synchrone mais non bloquant (utilise la session)
+                # Laisse 100ms pour être sûr que la requête parte
+                time.sleep(0.1) 
+            except Exception as e:
+                log.error(f"Échec envoi message fermeture: {e}")
+        
         try:
             self.tg.stop()
         except Exception:
             pass
             
+        # TÂCHE 1: Nettoyage logs à la fermeture
+        try:
+            log.info(f"Nettoyage des logs > {24}h lors de la fermeture...")
+            clean_old_logs(LOG_PATH.parent, "app.log*", 24)
+        except Exception as e:
+            log.error(f"Erreur clean_old_logs (shutdown): {e}")
+
         # Fermer les hotkeys (sinon le process peut rester)
         try:
             keyboard.remove_all_hotkeys()
@@ -3286,6 +3275,70 @@ class App(ctk.CTk):
             
         log.info("Application fermée.\n" + "="*30)
         self.destroy()
+
+    # --- TÂCHE 4: Helpers de vérification CoC ---
+    
+    def is_process_running(self, exe_name: str) -> bool:
+        """Vérifie si un processus est en cours via tasklist (Windows)."""
+        if os.name != 'nt' or not exe_name:
+            return False
+        try:
+            cmd = ["tasklist", "/NH", "/FI", f"IMAGENAME eq {exe_name}"]
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=3, 
+                creationflags=subprocess.CREATE_NO_WINDOW, 
+                encoding='utf-8'
+            )
+            if exe_name.lower() in result.stdout.lower():
+                return True
+        except Exception as e:
+            log.error(f"Erreur tasklist: {e}")
+        return False
+
+    def launch_coc_for_telegram(self):
+        """Lance CoC et vérifie son état pour Telegram."""
+        path = (self.params.get("coc_path", "") or "").strip()
+        if not path:
+            self.tg.send("❗ Chemin CoC manquant dans Paramètres.")
+            self.tg.replace_controls(self._compose_status_for_tg("Erreur"), coc_launched=self._coc_is_running_tg)
+            return
+        
+        exe_name = resolve_exe_from_path(path)
+        if not exe_name:
+            log.warning(f"Impossible de résoudre l'exe pour {path}. Lancement en aveugle.")
+            self._actually_launch_coc(path) # Legacy launch
+            self.tg.send("🚀 CoC lancé (validation impossible).")
+            # On met le bouton à jour en supposant que c'est bon
+            self._coc_is_running_tg = True
+            self.tg.replace_controls(self._compose_status_for_tg("Prêt"), coc_launched=True)
+            return
+
+        self.tg.replace_controls(self._compose_status_for_tg("Lancement CoC..."), coc_launched=False)
+        self._actually_launch_coc(path) # This uses os.startfile
+        
+        # Start checker thread
+        log.info(f"Lancement du thread de vérification pour {exe_name}")
+        threading.Thread(target=self._check_coc_process, args=(exe_name,), daemon=True, name="CoC-Checker").start()
+
+    def _check_coc_process(self, exe_name: str):
+        """Thread: attend et vérifie si le processus CoC est lancé."""
+        time.sleep(2.0) # Attente 2s (demandé)
+        is_running = self.is_process_running(exe_name)
+        log.info(f"Vérification CoC ({exe_name}): {'Lancé' if is_running else 'Échec'}")
+        # Notifier le thread UI
+        self.after(0, self._update_coc_status_on_tg, is_running)
+
+    def _update_coc_status_on_tg(self, is_running: bool):
+        """Mise à jour de l'UI Telegram depuis le thread principal."""
+        self._coc_is_running_tg = is_running
+        if is_running:
+            self.tg.replace_controls(self._compose_status_for_tg("Prêt"), coc_launched=True)
+        else:
+            self.tg.send("❌ Échec du lancement de CoC (processus non détecté).")
+            self.tg.replace_controls(self._compose_status_for_tg("Échec lancement"), coc_launched=False)
 
 
 # =========================
