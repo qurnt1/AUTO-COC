@@ -1,0 +1,6 @@
+customtkinter
+requests
+pynput
+keyboard
+Pillow
+mss

@@ -1,0 +1,37 @@
+# Fichiers de configuration et données utilisateur
+# (Comme demandé)
+config/data.csv
+
+# Données générées par l'utilisateur (Macros)
+# Il est recommandé d'ignorer les macros créées par l'utilisateur.
+# Si vous avez des macros par défaut (ex: "Recharger COC"),
+# vous pouvez les forcer avec: !config/macros/Recharger COC.json
+config/macros/
+config/macro.json
+
+# Fichiers générés par l'application
+config/app.log
+config/app.log.* # Logs en rotation
+config/guide_telegram.html
+config/selftest/
+
+# Fichiers temporaires (écriture atomique)
+config/*.tmp.*
+config/macros/*.tmp.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environnements virtuels
+venv/
+.venv/
+env/
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
