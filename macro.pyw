@@ -72,6 +72,7 @@ except ImportError:
 APP_VERSION = "2.1.0"
 PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 RECHARGER_MACRO_NAME = "Recharger COC"  # Macro protégée
+VALIDER_MACRO_NAME = "Valider arrivée" # NOUVELLE macro protégée
 
 # --- Chemins ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -576,7 +577,8 @@ def write_macro_file(path: Path, name: str, steps: List[dict],
         return False
 
 def list_macros() -> List[Tuple[str, Path]]:
-    """Liste les macros, triées par nom naturel (Req 4)."""
+    """Liste les macros, triées par nom naturel (Req 4).
+    Les macros protégées (Recharger, Valider) sont toujours en premier."""
     ensure_dirs()
     items: List[Tuple[str, Path]] = []
     
@@ -585,12 +587,38 @@ def list_macros() -> List[Tuple[str, Path]]:
         
     for p in MACROS_DIR.glob("*.json"):
         items.append((p.stem, p))
-        
-    # Tri naturel (Req 4)
-    items.sort(key=lambda item: natural_sort_key(item[0]))
+
+    # --- MODIFICATION: Séparer les macros protégées ---
+    recharger_item = None
+    valider_item = None
+    other_items = []
+    
+    protected_recharger_lower = RECHARGER_MACRO_NAME.strip().lower()
+    protected_valider_lower = VALIDER_MACRO_NAME.strip().lower()
+
+    for n, p in items:
+        n_lower = n.strip().lower()
+        if n_lower == protected_recharger_lower:
+            recharger_item = (n, p)
+        elif n_lower == protected_valider_lower:
+            valider_item = (n, p)
+        else:
+            other_items.append((n, p))
+
+    # Tri naturel (Req 4) seulement pour les autres items
+    other_items.sort(key=lambda item: natural_sort_key(item[0]))
+    
+    # Reconstruire la liste finale
+    final_items = []
+    if recharger_item:
+        final_items.append(recharger_item)
+    if valider_item:
+        final_items.append(valider_item)
+    final_items.extend(other_items)
+    # --- FIN MODIFICATION ---
     
     seen, out = set(), []
-    for n, p in items:
+    for n, p in final_items:
         if n not in seen:
             out.append((n, p))
             seen.add(n)
@@ -898,12 +926,17 @@ class TelegramBridge:
                 [{"text": "Choisir macro", "callback_data": "SELECT_MACRO_LIST"}],
                 # TÂCHE 5: Emoji
                 [{"text": "🔃 Recharger COC", "callback_data": "RELOAD_COC"}],
+                
+                # --- NOUVEAU BOUTON ---
+                [{"text": "Valider arrivée 👌", "callback_data": "VALIDATE_ARRIVAL"}],
+                # --- FIN NOUVEAU BOUTON ---
+                
                 # TÂCHE 2: Bouton loop unique
                 [{"text": loop_text, "callback_data": loop_cb}]
                 # TÂCHE 3: Suppression AutoCap
             ]
         }
-
+    
     def replace_menu(self, title: str = "Paramètres", loop_state: bool = False):
         if not self.ready(): return
         with BASE_LOCK:
@@ -1084,13 +1117,17 @@ class TelegramBridge:
             "TOGGLE_LOOP",
             # TÂCHE 4: Bouton CoC
             "DUMMY_COC_STATUS",
-            "SELECT_MACRO_LIST", "CANCEL_SELECTION"
+            "SELECT_MACRO_LIST", "CANCEL_SELECTION",
+            
+            # --- NOUVELLE COMMANDE ---
+            "VALIDATE_ARRIVAL"
+            # --- FIN NOUVELLE COMMANDE ---
         }
         if s in KNOWN_CALLBACKS:
             return s
             
         return None
-
+    
     def _parse_command_text(self, s: str) -> Optional[str]:
         """Parse un message texte (Whitelist stricte, Req 7)."""
         t = (s or "").strip().lower()
@@ -1157,11 +1194,20 @@ class MacroModel:
         with self._lock:
             return sum(max(0.0, ev.get("t", 0.0)) for ev in self.steps)
 
-    def save(self, path: Path) -> bool:
-        """Sauvegarde via écriture atomique/hash (Req 3)."""
+    def save(self, path: Path, force_new_hash: bool = False) -> bool:
+        """
+        Sauvegarde via écriture atomique/hash (Req 3).
+        
+        :param force_new_hash: Si True, ignore le hash actuel et force
+                               l'écriture. (Utile pour 'Renommer')
+        """
         with self._lock:
+            # Si force_new_hash, on passe None à write_macro_file
+            # pour sauter la vérification d'hash.
+            hash_to_check = None if force_new_hash else self.current_hash
+            
             # Passe le hash actuel pour éviter l'écriture si inchangé
-            return write_macro_file(path, self.name, self.steps, self.current_hash)
+            return write_macro_file(path, self.name, self.steps, hash_to_check)
 
     def load(self, path: Path) -> bool:
         """Charge depuis le fichier (Req 3)."""
@@ -1981,8 +2027,8 @@ class App(ctk.CTk):
         left.pack_propagate(False) # Empêche le panneau de gauche de rétrécir
         
         ctk.CTkLabel(left, text="Macros", font=ctk.CTkFont(size=16, weight="bold"),
-                       text_color=Theme.LEFT_HEADER_TEXT).pack(anchor="w", padx=12, pady=(12,4))
-                       
+                     text_color=Theme.LEFT_HEADER_TEXT).pack(anchor="w", padx=12, pady=(12,4))
+                     
         # Champ de recherche (Req 4)
         self.search_entry = ctk.CTkEntry(left, placeholder_text="Rechercher...")
         self.search_entry.pack(fill="x", padx=8, pady=(0, 8))
@@ -1995,22 +2041,28 @@ class App(ctk.CTk):
         actions = ctk.CTkFrame(left, fg_color=Theme.LEFT_ACTIONS_BG)
         actions.pack(fill="x", padx=8, pady=(0,12))
         
-        self.btn_macro_new = ctk.CTkButton(actions, text="Nouveau", width=80, command=self.macro_new)
+        # --- MODIFICATION: Bouton "Nouveau" en vert ---
+        self.btn_macro_new = ctk.CTkButton(
+            actions, text="Nouveau", width=80, command=self.macro_new,
+            fg_color=Theme.BTN_PRIMARY_BG, hover_color=Theme.BTN_PRIMARY_HOVER
+        )
+        # --- FIN MODIFICATION ---
+        
         self.btn_macro_new.pack(side="left", padx=4, pady=8)
         self.btn_macro_rename = ctk.CTkButton(actions, text="Renommer", width=90, command=self.macro_rename)
         self.btn_macro_rename.pack(side="left", padx=4, pady=8)
         self.btn_macro_delete = ctk.CTkButton(actions, text="Supprimer", width=90, fg_color=Theme.BTN_STOP_BG, hover_color=Theme.BTN_STOP_HOVER,
-                        command=self.macro_delete)
+                                command=self.macro_delete)
         self.btn_macro_delete.pack(side="left", padx=4, pady=8)
         
         # Menu contextuel pour macros (Req 9)
         self.macro_menu = ctk.CTkFrame(self, fg_color=Theme.LEFT_ACTIONS_BG, border_width=1, border_color=Theme.DIVIDER)
         ctk.CTkButton(self.macro_menu, text="Dupliquer", anchor="w", fg_color="transparent", hover_color=Theme.ROW_HOVER,
-                      command=self.macro_duplicate).pack(fill="x", padx=5, pady=2)
+                        command=self.macro_duplicate).pack(fill="x", padx=5, pady=2)
         ctk.CTkButton(self.macro_menu, text="Exporter...", anchor="w", fg_color="transparent", hover_color=Theme.ROW_HOVER,
-                      command=self.macro_export).pack(fill="x", padx=5, pady=2)
+                        command=self.macro_export).pack(fill="x", padx=5, pady=2)
         ctk.CTkButton(self.macro_menu, text="Importer...", anchor="w", fg_color="transparent", hover_color=Theme.ROW_HOVER,
-                      command=self.macro_import).pack(fill="x", padx=5, pady=2)
+                        command=self.macro_import).pack(fill="x", padx=5, pady=2)
         self.bind("<Button-1>", lambda e: self.macro_menu.place_forget()) # Cacher si on clique ailleurs
 
 
@@ -2070,7 +2122,7 @@ class App(ctk.CTk):
         footer = ctk.CTkFrame(root, fg_color=Theme.APP_BG); footer.pack(fill="x", side="bottom")
         footer.grid_columnconfigure(0, weight=1)
         hint = ctk.CTkLabel(footer, text="F1 = Basculer lecture | Ctrl+Shift+1 = Play | Ctrl+Shift+0 = Stop",
-                              anchor="center", text_color="#94a3b8")
+                            anchor="center", text_color="#94a3b8")
         hint.grid(row=0, column=0, sticky="ew", pady=(6, 0))
         status = ctk.CTkFrame(footer, height=28, fg_color=Theme.STATUS_BG)
         status.grid(row=1, column=0, sticky="ew")
@@ -2181,7 +2233,13 @@ class App(ctk.CTk):
 
     def _is_protected_macro(self, name: Optional[str]) -> bool:
         if not name: return False
-        return name.strip().casefold() == RECHARGER_MACRO_NAME.strip().casefold()
+        # --- MODIFICATION ---
+        name_lower = name.strip().lower()
+        return name_lower in (
+            RECHARGER_MACRO_NAME.strip().lower(),
+            VALIDER_MACRO_NAME.strip().lower()
+        )
+        # --- FIN MODIFICATION ---
 
     def _load_steps_from_path(self, path: Path) -> List[dict]:
         try:
@@ -2331,11 +2389,44 @@ class App(ctk.CTk):
             self.after(0, self._update_tg_status_vars)
         
     def purge_tg_backlog(self):
-        log.info("Purge manuelle du backlog Telegram...")
-        self.tg.discard_backlog()
-        self.toast("Backlog Telegram purgé.")
-        if self.tg.ready():
-            self.tg.send("Backlog purgé manuellement.")
+        log.info("Purge manuelle du backlog Telegram demandée...")
+        # Lance la purge dans un thread pour ne pas geler l'UI
+        # et pour gérer l'attente du poller.
+        threading.Thread(target=self._threaded_purge, daemon=True, name="TG-Purge").start()
+        self.toast("Purge du backlog en cours...")
+        
+    def _threaded_purge(self):
+        """Effectue la purge dans un thread pour éviter les conflits 409."""
+        try:
+            # 1. Signale au poller de s'arrêter
+            self.pause_telegram_poller() # self.tg.stop()
+            
+            # 2. Attend que le thread du poller meure
+            # C'est crucial : il faut attendre la fin de son long-poll (timeout 30s)
+            old_thread = self.tg._poll_thread
+            if old_thread and old_thread.is_alive():
+                log.info(f"Purge: Attente de la fin du poller (TID: {old_thread.ident})...")
+                old_thread.join(timeout=30.0) # Attente max 30s
+                if old_thread.is_alive():
+                    log.warning("Purge: Timeout en attente de l'arrêt du poller.")
+            
+            # 3. Le poller est (normalement) mort. On peut purger.
+            log.info("Purge: Poller arrêté, exécution de discard_backlog().")
+            self.tg.discard_backlog()
+            
+            # 4. Notifier l'UI (via self.after)
+            self.after(0, lambda: self.toast("Backlog Telegram purgé."))
+            
+        except Exception as e:
+            log.error(f"Erreur durant la purge threadée: {e}")
+            self.after(0, lambda: self.toast("Échec de la purge."))
+            
+        finally:
+            # 5. Redémarre le poller quoi qu'il arrive
+            log.info("Purge: Redémarrage du poller...")
+            self.resume_telegram_poller()
+            if self.tg.ready():
+                 self.tg.send("Backlog purgé manuellement.")
 
     def open_settings(self):
         def _on_save_general(p: dict):
@@ -2396,6 +2487,11 @@ class App(ctk.CTk):
         # pour ne pas geler l'interface (UI)
         if self.tg.is_configured():
             threading.Thread(target=self._bootstrap_telegram, daemon=True, name="TG-Bootstrap").start()
+
+        # --- NOUVELLE LIGNE ---
+        # S'assurer que les fichiers JSON des macros protégées existent
+        self._ensure_protected_macros()
+        # --- FIN NOUVELLE LIGNE ---
 
         # Le chargement des macros (local) peut rester ici
         self._refresh_macro_sidebar()
@@ -2560,7 +2656,12 @@ class App(ctk.CTk):
                 
         try:
             self.model.name = new_name
-            self.model.save(new_path) # Écrit le nouveau fichier
+            
+            # --- MODIFICATION: Forcer l'écriture ---
+            # force_new_hash=True ignore le hash du contenu et force
+            # la création du nouveau fichier avant de supprimer l'ancien.
+            self.model.save(new_path, force_new_hash=True)
+            # --- FIN MODIFICATION ---
             
             # Supprime l'ancien SEULEMENT s'il est différent
             if self.current_macro_path.exists() and self.current_macro_path.resolve() != new_path.resolve():
@@ -2789,9 +2890,6 @@ class App(ctk.CTk):
     def _on_tg_command(self, cmd: str, meta: dict):
         """Handler central pour les commandes reçues de Telegram."""
         
-        # Commandes exécutées dans le thread UI (via self.after)
-        # pour éviter les conflits avec ctk
-        
         # Helper pour Tâches 2, 3, 4
         def cleanup_menu_and_replace_controls(status_text: str):
             """Supprime le msg menu et remplace le msg de contrôles."""
@@ -2852,6 +2950,12 @@ class App(ctk.CTk):
         elif cmd == "RELOAD_COC":
             self.after(0, lambda: self.play_macro_once(RECHARGER_MACRO_NAME, notify_tg=True))
             cleanup_menu_and_replace_controls("Rechargement CoC...")
+
+        # --- NOUVEAU HANDLER ---
+        elif cmd == "VALIDATE_ARRIVAL":
+            self.after(0, lambda: self.play_macro_once(VALIDER_MACRO_NAME, notify_tg=True))
+            cleanup_menu_and_replace_controls(f"Lancement {VALIDER_MACRO_NAME}...")
+        # --- FIN NOUVEAU HANDLER ---
 
         # TÂCHE 3: Suppression AutoCapture
         # ... Handlers AUTO_CAP_ON/OFF supprimés ...
@@ -2976,20 +3080,23 @@ class App(ctk.CTk):
 
     # ---------- Lancer / Recharger CoC (Req 5) ----------
     def launch_coc_once(self):
-        if self._coc_launched_once:
-            self.toast("CoC déjà lancé (depuis cette session).")
-            if self.tg.ready(): self.tg.send("ℹ️ CoC déjà lancé.")
-            return
-        
-        path = (self.params.get("coc_path", "") or "").strip()
-        if not path:
-            msg = "Chemin CoC manquant dans Paramètres."
-            self.toast(msg)
-            if self.tg.ready(): self.tg.send(f"❗ {msg}")
-            return
+            if self._coc_launched_once:
+                self.toast("CoC déjà lancé (depuis cette session).")
+                if self.tg.ready(): self.tg.send("ℹ️ CoC déjà lancé.")
+                return
             
-        self._actually_launch_coc(path)
-        self._coc_launched_once = True # Marqué pour cette session
+            path = (self.params.get("coc_path", "") or "").strip()
+            if not path:
+                msg = "Chemin CoC manquant dans Paramètres."
+                self.toast(msg)
+                if self.tg.ready(): self.tg.send(f"❗ {msg}")
+                return
+                
+            # --- MODIFICATION (Appel simple) ---
+            # Laisse notify_tg=True (par défaut)
+            self._actually_launch_coc(path)
+            # --- FIN MODIFICATION ---
+            self._coc_launched_once = True # Marqué pour cette session
 
     def restart_coc(self):
         """Tente de tuer le processus puis de le relancer (Req 5)."""
@@ -3012,15 +3119,24 @@ class App(ctk.CTk):
         self._actually_launch_coc(path)
         self._coc_launched_once = True
 
-    def _actually_launch_coc(self, path: str):
+    def _actually_launch_coc(self, path: str, notify_tg: bool = True):
+        """
+        Exécute le lancement.
+        notify_tg=False est utilisé par launch_coc_for_telegram
+        pour éviter les messages en double.
+        """
         try:
             self.toast(f"Lancement de « {path} »...")
             if os.name == 'nt':
                 os.startfile(path)
             else:
                 subprocess.Popen([path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if self.tg.ready():
+            
+            # --- MODIFICATION ---
+            if notify_tg and self.tg.ready():
                 self.tg.send("🚀 CoC lancé.")
+            # --- FIN MODIFICATION ---
+            
         except FileNotFoundError:
             msg = f"Erreur : Fichier/chemin non trouvé {path}"
             log.error(msg)
@@ -3309,7 +3425,9 @@ class App(ctk.CTk):
         exe_name = resolve_exe_from_path(path)
         if not exe_name:
             log.warning(f"Impossible de résoudre l'exe pour {path}. Lancement en aveugle.")
-            self._actually_launch_coc(path) # Legacy launch
+            # --- MODIFICATION ---
+            self._actually_launch_coc(path, notify_tg=False) # notify_tg=False
+            # --- FIN MODIFICATION ---
             self.tg.send("🚀 CoC lancé (validation impossible).")
             # On met le bouton à jour en supposant que c'est bon
             self._coc_is_running_tg = True
@@ -3317,7 +3435,9 @@ class App(ctk.CTk):
             return
 
         self.tg.replace_controls(self._compose_status_for_tg("Lancement CoC..."), coc_launched=False)
-        self._actually_launch_coc(path) # This uses os.startfile
+        # --- MODIFICATION ---
+        self._actually_launch_coc(path, notify_tg=False) # notify_tg=False
+        # --- FIN MODIFICATION ---
         
         # Start checker thread
         log.info(f"Lancement du thread de vérification pour {exe_name}")
@@ -3340,6 +3460,20 @@ class App(ctk.CTk):
             self.tg.send("❌ Échec du lancement de CoC (processus non détecté).")
             self.tg.replace_controls(self._compose_status_for_tg("Échec lancement"), coc_launched=False)
 
+    def _ensure_protected_macros(self):
+        """Vérifie que les macros système (protégées) existent sur le disque."""
+        log.info("Vérification des macros protégées...")
+        protected_macros = [RECHARGER_MACRO_NAME, VALIDER_MACRO_NAME]
+        
+        for name in protected_macros:
+            path = macro_path_from_name(name)
+            if not path.exists():
+                try:
+                    log.warning(f"Macro protégée '{name}' manquante. Création du fichier vide.")
+                    # Crée un fichier de macro vide
+                    write_macro_file(path, name, steps=[]) 
+                except Exception as e:
+                    log.error(f"Échec de la création de la macro protégée '{name}': {e}")
 
 # =========================
 #     Selftest (Req 8)
