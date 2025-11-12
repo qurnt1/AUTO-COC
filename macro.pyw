@@ -1607,242 +1607,44 @@ class TelegramAutomationDialog(BaseToplevel):
 
         # Bouton guide HTML (Req 2: pause poller)
         btns2 = ctk.CTkFrame(root, fg_color="transparent"); btns2.grid(row=1, column=0, sticky="ew", pady=(10,8))
+        
+        # --- CORRECTION ---
+        # Le command pointe maintenant vers la fonction renommée _open_local_guide
         ctk.CTkButton(btns2, text="Ouvrir le guide (page HTML locale)", width=260,
-                        command=self._open_local_guide).pack(side="left", padx=(0,8))
+                      command=self._open_local_guide).pack(side="left", padx=(0,8))
+        # --- FIN CORRECTION ---
 
         # Bas
         bottom = ctk.CTkFrame(root, fg_color="transparent"); bottom.grid(row=2, column=0, sticky="ew")
         ctk.CTkButton(bottom, text="Fermer", width=120, fg_color="#374151", hover_color="#4b5563",
-                        command=self.destroy).pack(side="right")
+                      command=self.destroy).pack(side="right")
         ctk.CTkButton(bottom, text="Enregistrer", width=130, command=self._save).pack(side="right", padx=(0,8))
 
-    def _open_local_guide_and_quit(self):
+    # --- CORRECTION ---
+    # 1. Renommage de la fonction en _open_local_guide
+    # 2. Suppression du HTML en dur
+    # 3. Ajout d'une vérification de l'existence du fichier
+    def _open_local_guide(self):
         """
-        Crée/ouvre le guide HTML local PUIS ferme proprement l’application entière.
+        Ouvre le guide HTML local (qui doit exister) PUIS ferme proprement l’application entière.
         """
         try:
             ensure_dirs()
-            html = """<!doctype html>
-    <html lang="fr">
-    <head>
-    <meta charset="utf-8">
-    <title>Guide — Connexion Telegram (Macro COC)</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-    :root{
-      --bg:#0b1220;--card:#0e1624;--muted:#94a3b8;--text:#e5e7eb;--accent:#80b7f7;--ok:#22c55e;--warn:#eab308;--danger:#ef4444;
-      --border:#273244;--chip:#1f2937;--shadow:0 6px 20px rgba(0,0,0,.25);
-    }
-    *{box-sizing:border-box}
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;margin:0;padding:24px}
-    h1,h2,h3{color:#fff;margin:0 0 12px}
-    p,li{color:var(--text)}
-    a{color:var(--accent);text-decoration:none}
-    a:hover{text-decoration:underline}
-    .container{max-width:1100px;margin:0 auto}
-    .card{background:var(--card);border-radius:12px;padding:16px;margin:16px 0;box-shadow:var(--shadow)}
-    .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:var(--chip);color:#cbd5e1;margin-left:8px}
-    .note{background:#132033;padding:12px;border-radius:10px}
-    kbd{background:#1f2937;padding:2px 6px;border-radius:4px;border:1px solid #374151}
-    pre{background:#111827;color:#e5e7eb;padding:12px;border-radius:10px;overflow:auto}
-    code{background:#111827;color:#e5e7eb;padding:2px 6px;border-radius:6px}
-    ul{margin:8px 0 8px 22px}
-    ol{margin:8px 0 8px 22px}
-    .table{width:100%;border-collapse:collapse}
-    .table th,.table td{border:1px solid var(--border);padding:8px 10px;text-align:left}
-    .small{color:var(--muted);font-size:14px}
-    .hero{display:flex;gap:14px;align-items:center;margin-bottom:10px}
-    .hero .dot{width:10px;height:10px;border-radius:50%;background:var(--ok)}
-    .t-ok{color:var(--ok)} .t-warn{color:var(--warn)} .t-danger{color:var(--danger)}
-    .chips{display:flex;flex-wrap:wrap;gap:8px}
-    .chip{background:var(--chip);color:#cbd5e1;border:1px solid #314055;border-radius:999px;padding:2px 8px;font-size:12px}
-    .toc a{display:block;padding:6px 10px;border-radius:8px;background:#0e1524;color:#d1d5db;margin:6px 0}
-    .toc a:hover{background:#12213a}
-    .section h2{scroll-margin-top:18px}
-    .hr{height:1px;background:var(--border);margin:18px 0}
-    .footer{opacity:.8;margin-top:28px}
-    </style>
-    </head>
-    <body>
-    <div class="container">
-    
-      <div class="hero">
-        <div class="dot"></div>
-        <h1>Connexion Telegram — guide complet</h1>
-        <span class="badge">Macro COC</span>
-      </div>
-    
-      <div class="note">
-        <b>Important :</b> un seul consommateur de <code>getUpdates</code> à la fois. Ferme l’application <i>Macro COC</i> avant d’ouvrir l’URL <code>getUpdates</code>, sinon Telegram renverra souvent une erreur <b>409</b> (conflit entre webhook et polling ou pollers concurrents).
-      </div>
-    
-      <div class="card toc">
-        <h2>Sommaire</h2>
-        <a href="#concepts">1. Concepts clés</a>
-        <a href="#creation-bot">2. Créer le bot avec <b>@BotFather</b></a>
-        <a href="#chatid">3. Récupérer votre <b>chat_id</b></a>
-        <a href="#config-app">4. Configurer l’application Macro COC</a>
-        <a href="#commandes">5. Commandes et boutons disponibles</a>
-        <a href="#autocap">6. Auto-capture toutes les 10 s</a>
-        <a href="#tests">7. Tests API rapides (curl / PowerShell)</a>
-        <a href="#erreurs">8. Dépannage erreurs courantes</a>
-        <a href="#securite">9. Sécurité et bonnes pratiques</a>
-        <a href="#faq">10. FAQ courte</a>
-      </div>
-    
-      <div id="concepts" class="card section">
-        <h2>1. Concepts clés</h2>
-        <ul>
-          <li><b>Bot Telegram</b> : un compte automatisé que vous pilotez via l’API Bot.</li>
-          <li><b>Token</b> : secret donné par <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> pour authentifier votre bot.</li>
-          <li><b>chat_id</b> : identifiant numérique d’un chat privé ou d’un groupe où le bot enverra des messages.</li>
-          <li><b>Polling</b> : l’app interroge régulièrement l’API via <code>getUpdates</code>. Ne pas utiliser en même temps qu’un <b>webhook</b>.</li>
-        </ul>
-        <div class="chips">
-          <span class="chip">Bot API</span><span class="chip">getUpdates</span><span class="chip">sendMessage</span><span class="chip">sendPhoto</span><span class="chip">inline keyboard</span>
-        </div>
-      </div>
-    
-      <div id="creation-bot" class="card section">
-        <h2>2. Créer le bot avec @BotFather</h2>
-        <ol>
-          <li>Ouvrez <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer"><b>@BotFather</b></a> dans Telegram.</li>
-          <li>Envoyez <code>/newbot</code>, définissez un <b>nom</b> et un <b>username</b> se terminant par <code>bot</code>.</li>
-          <li>Copiez le <b>token</b> affiché. Conservez-le en sécurité.</li>
-          <li>Si besoin, régénérez le token avec <code>/revoke</code> puis <code>/token</code> sur BotFather.</li>
-        </ol>
-        <p class="small">Documentation : <a href="https://core.telegram.org/bots" target="_blank" rel="noopener noreferrer">core.telegram.org/bots</a> • API : <a href="https://core.telegram.org/bots/api" target="_blank" rel="noopener noreferrer">core.telegram.org/bots/api</a></p>
-      </div>
-    
-      <div id="chatid" class="card section">
-        <h2>3. Récupérer votre <code>chat_id</code></h2>
-        <ol>
-          <li>Parlez à votre bot : cliquez le lien fourni par BotFather puis envoyez <code>/start</code>.</li>
-          <li><b>Fermez</b> l’app Macro COC si elle tourne.</li>
-          <li>Dans votre navigateur, ouvrez :<br>
-            <code>https://api.telegram.org/bot&lt;VOTRE_TOKEN&gt;/getUpdates</code>
-          </li>
-          <li>Trouvez le champ <code><b>chat</b></code> dans la réponse JSON et copiez <code><b>id</b></code> (valeur numérique).</li>
-        </ol>
-        <pre>{
-      "ok": true,
-      "result": [{
-        "update_id": 123456789,
-        "message": {
-          "chat": { "id": <span class="t-ok">1234567890</span>, "type": "private", "first_name": "Vous" },
-          "text": "/start"
-        }
-      }]
-    }</pre>
-        <p class="small">Conflit 409 ? Supprimez un éventuel webhook : <code>https://api.telegram.org/bot&lt;TOKEN&gt;/deleteWebhook</code></p>
-      </div>
-    
-      <div id="config-app" class="card section">
-        <h2>4. Configurer l’application Macro COC</h2>
-        <ol>
-          <li>Ouvrez l’app → <b>Paramètres</b> → <b>Automatisation Telegram</b>.</li>
-          <li>Collez votre <b>token</b> et votre <b>chat_id</b>. Cliquez <b>Enregistrer</b>.</li>
-          <li>Au démarrage, l’app purge le backlog Telegram et affiche un clavier <i>inline</i> dans votre chat.</li>
-        </ol>
-        <div class="note">Astuce : activez ou non la <b>lecture en boucle</b> depuis Paramètres ou depuis Telegram (voir section 5).</div>
-      </div>
-    
-      <div id="commandes" class="card section">
-        <h2>5. Commandes et boutons disponibles</h2>
-        <table class="table">
-          <thead><tr><th>Action</th><th>Texte à envoyer</th><th>Bouton inline</th><th>Effet</th></tr></thead>
-          <tbody>
-            <tr><td>Lire</td><td><code>go</code></td><td>Go ✅</td><td>Lance la macro sélectionnée</td></tr>
-            <tr><td>Stop</td><td><code>stop</code></td><td>Stop ❌</td><td>Arrête enregistrement/lecture</td></tr>
-            <tr><td>Menu</td><td><code>menu</code></td><td>Paramètres ⚙️</td><td>Ouvre le sous-menu</td></tr>
-            <tr><td>Retour</td><td><code>back</code></td><td>⬅️ Retour</td><td>Revient aux commandes</td></tr>
-            <tr><td>Lancer CoC</td><td><code>launch</code> (bouton)</td><td>Lancer CoC</td><td>Démarre CoC une fois</td></tr>
-            <tr><td>Recharger CoC</td><td><code>reload</code> (bouton)</td><td>Recharger CoC</td><td>Joue la macro protégée <b>Recharger COC</b></td></tr>
-            <tr><td>Auto-capture</td><td><code>auto_cap_on</code>/<code>auto_cap_off</code></td><td>AutoCap ON/OFF</td><td>Capture toutes les 10 s</td></tr>
-            <tr><td>Loop</td><td><code>loop_on</code>/<code>loop_off</code></td><td>Loop ON/OFF</td><td>Bascule la lecture en boucle</td></tr>
-            <tr><td>Capture unique</td><td><code>capture</code></td><td>Capture 📸</td><td>Envoie une capture immédiate</td></tr>
-            <tr><td>Éteindre PC</td><td><code>shutdown</code></td><td>Éteindre → Confirmer</td><td>Demande confirmation puis éteint</td></tr>
-            <tr><td>Choisir macro</td><td>—</td><td>Choisir macro</td><td>Affiche la liste des macros en boutons</td></tr>
-          </tbody>
-        </table>
-        <div class="small">La liste exacte dépend de votre version. Les boutons <i>inline</i> sont régénérés après chaque action.</div>
-      </div>
-    
-      <div id="autocap" class="card section">
-        <h2>6. Auto-capture toutes les 10 s</h2>
-        <p>Quand l’Auto-capture est <b>ON</b>, l’app :</p>
-        <ul>
-          <li>prend une capture d’écran toutes les <b>10 s</b>,</li>
-          <li><b>supprime</b> la photo précédente,</li>
-          <li>envoie uniquement la plus récente pour garder le chat propre.</li>
-        </ul>
-        <p>Prérequis capture :</p>
-        <ul>
-          <li>Windows/macOS : <code>Pillow</code> <i>ImageGrab</i> fonctionne souvent par défaut.</li>
-          <li>Alternative multi-plateforme : installez <code>mss</code> (<code>pip install mss</code>).</li>
-        </ul>
-      </div>
-    
-      <div id="tests" class="card section">
-        <h2>7. Tests API rapides</h2>
-        <h3>curl</h3>
-    <pre>curl -s "https://api.telegram.org/bot&lt;TOKEN&gt;/getMe"
-    curl -s "https://api.telegram.org/bot&lt;TOKEN&gt;/sendMessage" -d "chat_id=&lt;CHAT_ID&gt;&text=Hello"</pre>
-        <h3>PowerShell</h3>
-    <pre>$uri = "https://api.telegram.org/bot&lt;TOKEN&gt;/sendMessage"
-    Invoke-RestMethod -Uri $uri -Method Post -Body @{ chat_id="&lt;CHAT_ID&gt;"; text="Hello" }</pre>
-        <h3>Envoyer une photo (multipart, curl)</h3>
-    <pre>curl -s -F "chat_id=&lt;CHAT_ID&gt;" -F "photo=@screenshot.png" \
-      "https://api.telegram.org/bot&lt;TOKEN&gt;/sendPhoto"</pre>
-        <p class="small">Référence officielle : <a href="https://core.telegram.org/bots/api#available-methods" target="_blank" rel="noopener noreferrer">méthodes Bot API</a></p>
-      </div>
-    
-      <div id="erreurs" class="card section">
-        <h2>8. Dépannage erreurs courantes</h2>
-        <table class="table">
-          <thead><tr><th>Symptôme</th><th>Cause probable</th><th>Remède</th></tr></thead>
-          <tbody>
-            <tr><td><b>401 Unauthorized</b></td><td>Token invalide</td><td>Régénérez le token sur <b>@BotFather</b> et mettez à jour l’app</td></tr>
-            <tr><td><b>403 Forbidden</b></td><td>Le bot est bloqué par l’utilisateur</td><td>Ouvrez la conversation et cliquez <b>Start</b></td></tr>
-            <tr><td><b>400 Bad Request</b></td><td><code>chat_id</code> erroné ou payload incomplet</td><td>Vérifiez l’ID et les champs requis</td></tr>
-            <tr><td><b>409 Conflict</b></td><td>Webhook actif ou second poller</td><td><a href="https://api.telegram.org/bot&lt;TOKEN&gt;/deleteWebhook" target="_blank" rel="noopener noreferrer">deleteWebhook</a> puis relancez</td></tr>
-            <tr><td><b>429 Too Many Requests</b></td><td>Limites API dépassées</td><td>Ralentir les envois, ajouter un backoff</td></tr>
-          </tbody>
-        </table>
-        <div class="note">Si aucune mise à jour ne remonte, envoyez un message au bot, attendez 2–3 s puis relancez <code>getUpdates</code>.</div>
-      </div>
-    
-      <div id="securite" class="card section">
-        <h2>9. Sécurité et bonnes pratiques</h2>
-        <ul>
-          <li>Ne partagez <b>jamais</b> votre token. Traitez-le comme un mot de passe.</li>
-          <li>En cas de doute, révoquez le token sur <b>@BotFather</b> et mettez à jour l’app.</li>
-          <li>Évitez de publier <code>data.csv</code> avec le token sur un dépôt public.</li>
-          <li>Si vous activez des captures automatiques, vérifiez ce qui peut apparaître à l’écran.</li>
-        </ul>
-      </div>
-    
-      <div id="faq" class="card section">
-        <h2>10. FAQ courte</h2>
-        <p><b>Q :</b> Le clavier inline n’apparaît pas.<br>
-           <b>R :</b> Vérifiez que l’app est lancée, que <code>token</code> et <code>chat_id</code> sont corrects, et envoyez <code>menu</code>.</p>
-        <p><b>Q :</b> Je veux utiliser ce bot dans un groupe.<br>
-           <b>R :</b> Ajoutez le bot au groupe, récupérez son <code>chat_id</code> de groupe via <code>getUpdates</code>, et mettez-le côté app.</p>
-        <p><b>Q :</b> L’Auto-capture spamme trop.<br>
-           <b>R :</b> Laissez <b>AutoCap OFF</b> ou réduisez la fréquence côté code si nécessaire.</p>
-      </div>
-    
-      <div class="footer small">
-        © Macro COC — Guide local • Docs officielles : <a href="https://core.telegram.org/bots/api" target="_blank" rel="noopener noreferrer">Bot API</a>
-      </div>
-    
-    </div>
-    </body>
-    </html>
-    """
-            GUIDE_HTML_PATH.write_text(html, encoding="utf-8")
+            
+            # Vérifie si le fichier HTML externe existe
+            if not GUIDE_HTML_PATH.exists():
+                log.error(f"Fichier guide introuvable: {GUIDE_HTML_PATH}")
+                messagebox.showerror("Guide introuvable",
+                                     f"Le fichier guide n'a pas été trouvé à l'emplacement:\n{GUIDE_HTML_PATH}\n\n"
+                                     "Veuillez créer ce fichier (voir instructions) et le placer "
+                                     "dans le dossier 'config'.")
+                return
+
+            # Ouvre le fichier existant
             ok = webbrowser.open(GUIDE_HTML_PATH.resolve().as_uri())
+            
             # Ferme l’application entière après ouverture du guide
+            # (Comportement original pour éviter conflits 409)
             try:
                 root_app = self.master
                 root_app.after(300, root_app.safe_quit)
@@ -1853,6 +1655,7 @@ class TelegramAutomationDialog(BaseToplevel):
                     pass
         except Exception as e:
             messagebox.showerror("Guide", f"Erreur: {e}")
+    # --- FIN CORRECTION ---
             
     def _save(self):
         self._params["telegram_bot_token"] = self._tg_token.get().strip()
@@ -1860,8 +1663,7 @@ class TelegramAutomationDialog(BaseToplevel):
         if callable(self._on_save):
             self._on_save(self._params)
         self.destroy()
-
-
+        
 class SettingsDialog(BaseToplevel):
     """Fenêtre de paramètres généraux (Req 4, 7)."""
     def __init__(self, master, params: Dict[str, str], on_save: Callable,
