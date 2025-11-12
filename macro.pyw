@@ -1174,12 +1174,14 @@ class MacroModel:
         self.name = "Macro"
         self.steps: List[dict] = []
         self.current_hash: Optional[str] = None
+        self.loaded_hash: Optional[str] = None # <--- AJOUTEZ CETTE LIGNE
         self._lock = threading.Lock() # Verrou spécifique au modèle
 
     def clear(self):
         with self._lock:
             self.steps = []
             self.current_hash = get_macro_hash(self.steps)
+            self.loaded_hash = self.current_hash # <--- AJOUTEZ CETTE LIGNE
 
     def set_steps(self, steps: List[dict]):
         with self._lock:
@@ -1199,15 +1201,23 @@ class MacroModel:
         Sauvegarde via écriture atomique/hash (Req 3).
         
         :param force_new_hash: Si True, ignore le hash actuel et force
-                               l'écriture. (Utile pour 'Renommer')
+                                l'écriture. (Utile pour 'Renommer')
         """
         with self._lock:
-            # Si force_new_hash, on passe None à write_macro_file
-            # pour sauter la vérification d'hash.
-            hash_to_check = None if force_new_hash else self.current_hash
+            # --- MODIFICATION ---
+            # On compare le nouveau hash (calculé par write_macro_file)
+            # avec l'ancien hash (self.loaded_hash).
+            # On ne passe PAS self.current_hash, car c'est le *nouveau* hash.
+            hash_to_check = None if force_new_hash else self.loaded_hash
             
-            # Passe le hash actuel pour éviter l'écriture si inchangé
-            return write_macro_file(path, self.name, self.steps, hash_to_check)
+            did_write = write_macro_file(path, self.name, self.steps, hash_to_check)
+            
+            # Si l'écriture a eu lieu, le hash sur le disque = le hash en mémoire.
+            if did_write:
+                self.loaded_hash = self.current_hash
+                
+            return did_write
+            # --- FIN MODIFICATION ---
 
     def load(self, path: Path) -> bool:
         """Charge depuis le fichier (Req 3)."""
@@ -1217,6 +1227,7 @@ class MacroModel:
                 self.name = name
                 self.steps = steps
                 self.current_hash = sha1
+                self.loaded_hash = sha1 # <--- AJOUTEZ CETTE LIGNE
             return True
         except Exception as e:
             log.error(f"Échec chargement macro {path.name}: {e}")
@@ -1513,7 +1524,6 @@ class BaseToplevel(ctk.CTkToplevel):
         
         super().__init__(master, *a, **k)
         apply_window_icon(self)
-        self.attributes("-topmost", True)
         self.protocol("WM_DELETE_WINDOW", self._on_wm_close)
         
         # Centrer sur le parent
@@ -1663,7 +1673,7 @@ class TelegramAutomationDialog(BaseToplevel):
         if callable(self._on_save):
             self._on_save(self._params)
         self.destroy()
-        
+
 class SettingsDialog(BaseToplevel):
     """Fenêtre de paramètres généraux (Req 4, 7)."""
     def __init__(self, master, params: Dict[str, str], on_save: Callable,
@@ -2306,8 +2316,7 @@ class App(ctk.CTk):
             win = self.open_windows[name]
             try:
                 if win.winfo_exists():
-                    win.lift()
-                    win.attributes("-topmost", True)
+                    win.lift()  
                     win.focus_force()
                     self.toast(f"La fenêtre « {name} » est déjà ouverte.")
                     return
@@ -2623,16 +2632,25 @@ class App(ctk.CTk):
             meta_txt = "Non enregistrée" if n <= 0 else f"Événements : {n} | Durée : {fmt_seconds(d)}"
         
         self.macro_events.set(str(n))
-        self.macro_duration.set(fmt_dur_for_list(d))
+        self.macro_duration.set(fmt_seconds(d))
         self.lbl_macro_name.configure(text=name_txt)
         self.lbl_macro_meta.configure(text=meta_txt)
         
         # Mettre à jour la liste
         if self.current_macro_name:
-            meta = getattr(self.macro_list, "_meta", {})
-            meta[self.current_macro_name] = (n, d)
-            self.macro_list.set_meta(meta)
+            
+            # --- MODIFICATION ---
+            # L'ancienne méthode (getattr/set_meta) était erronée.
+            # On met à jour le cache interne de la liste directement
+            # PUIS on appelle la fonction de mise à jour de la ligne.
+            
+            # 1. Met à jour le cache de métadonnées
+            if hasattr(self.macro_list, "_meta"):
+                 self.macro_list._meta[self.current_macro_name] = (n, d)
+            
+            # 2. Force la mise à jour de la ligne (qui lira le cache)
             self.macro_list.update_one(self.current_macro_name)
+            # --- FIN MODIFICATION ---
 
     def macro_new(self):           
         dlg = TextInputDialog(self, "Nouvelle macro", "Nom de la macro :", "Nouvelle Macro")
