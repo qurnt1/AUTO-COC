@@ -12,7 +12,6 @@ config/macro.json
 # Fichiers générés par l'application
 config/app.log
 config/app.log.* # Logs en rotation
-config/guide_telegram.html
 config/selftest/
 
 # Fichiers temporaires (écriture atomique)
