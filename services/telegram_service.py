@@ -179,24 +179,11 @@ class TelegramBotService:
         
         self._running.clear()
         
-        # Signaler l'arrêt à la boucle asyncio
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._shutdown_app(), self._loop)
-        
-        # Attendre la fin du thread
+        # Attendre la fin du thread (le cleanup se fait dans _run_bot)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
         
         self._log.info("TG Service: Arrêté.")
-    
-    async def _shutdown_app(self):
-        """Arrête l'application proprement."""
-        if self._app:
-            try:
-                await self._app.stop()
-                await self._app.shutdown()
-            except Exception as e:
-                self._log.error(f"Erreur shutdown app: {e}")
     
     def _run_async_loop(self):
         """Point d'entrée du thread asyncio."""
@@ -240,10 +227,24 @@ class TelegramBotService:
         while self._running.is_set():
             await asyncio.sleep(0.5)
         
-        # Cleanup
-        await self._app.updater.stop()
-        await self._app.stop()
-        await self._app.shutdown()
+        # Cleanup propre (dans l'ordre correct)
+        self._log.info("TG Service: Arrêt du polling...")
+        try:
+            if self._app.updater.running:
+                await self._app.updater.stop()
+        except Exception as e:
+            self._log.warning(f"Erreur arrêt updater: {e}")
+        
+        try:
+            if self._app.running:
+                await self._app.stop()
+        except Exception as e:
+            self._log.warning(f"Erreur arrêt app: {e}")
+        
+        try:
+            await self._app.shutdown()
+        except Exception as e:
+            self._log.warning(f"Erreur shutdown app: {e}")
     
     # =========================
     #     Handlers
