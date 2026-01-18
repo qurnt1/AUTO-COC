@@ -1,139 +1,177 @@
-# 🎮 **Macro COC v2.1.0**
+# 🎮 AUTO-COC v3.0
 
-> Macro COC est une application de macro-enregistrement (recording) et de lecture (playback) conçue pour automatiser des tâches. Elle combine une interface graphique de bureau (UI) pour l'enregistrement et la gestion locale, avec un bot Telegram puissant pour le contrôle à distance. Lancez vos macros, démarrez le jeu, ou même éteignez votre PC depuis n'importe où via de simples commandes Telegram. 
+<p align="center">
+  <img src="config/image.png" alt="AUTO-COC" width="120"/>
+</p>
+
+<p align="center">
+  <strong>Application d'automatisation macros avec contrôle Telegram</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" alt="Python"/>
+  <img src="https://img.shields.io/badge/CustomTkinter-5.2+-green" alt="CTk"/>
+  <img src="https://img.shields.io/badge/Telegram-Bot%20API-0088cc?logo=telegram" alt="Telegram"/>
+  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"/>
+</p>
+
+---
+
+## 📋 Description
+
+**AUTO-COC** est une application d'enregistrement et lecture de macros (clavier + souris) avec une interface moderne et un **contrôle à distance via Telegram**. Idéale pour automatiser des tâches répétitives sur Clash of Clans ou tout autre jeu/application.
+
+### ✨ Points forts
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| 🎯 **Précision temporelle** | Timing haute-précision avec `perf_counter` |
+| 🤖 **Contrôle Telegram** | Lancez, stoppez, capturez l'écran depuis votre téléphone |
+| 🔄 **Mode boucle** | Répétition automatique des macros |
+| 💾 **Sauvegarde atomique** | Aucune perte de données en cas de crash |
+| 🌙 **Interface sombre** | Design moderne avec CustomTkinter |
 
 ---
 
 ## 🚀 Installation
 
-### 🧩 **Prérequis**
-* **Python 3.x** installé sur votre système  
-* **pip** (installateur de paquets Python)
+### Prérequis
 
-### 📦 **Installation des dépendances**
-Le projet inclut un fichier `requirements.txt` contenant toutes les dépendances nécessaires.  
-Exécutez simplement la commande suivante :
+- **Python 3.10+** 
+- **Windows 10/11** (macOS/Linux non testé)
+
+### Installation rapide
 
 ```bash
+# Cloner ou télécharger le projet
+cd "AUTO-COC"
+
+# Installer les dépendances
 pip install -r requirements.txt
+
+# Lancer l'application
+python main.py
 ```
 
-### ▶️ **Lancement de l’application**
-Une fois les dépendances installées, lancez l’application via :
+### Dépendances principales
 
-```bash
-python macro.py
-```
+| Package | Utilisation |
+|---------|-------------|
+| `customtkinter` | Interface graphique moderne |
+| `python-telegram-bot` | API Telegram asynchrone |
+| `pynput` | Capture clavier/souris |
+| `keyboard` | Raccourcis globaux |
+| `Pillow` | Captures d'écran |
 
 ---
 
-## ✨ Fonctionnalités
+## 🎮 Utilisation
 
-### 🧠 **Gestion complète des macros (UI)**
-* Créer, renommer, dupliquer, importer et exporter vos macros.  
-* Interface graphique moderne basée sur **CustomTkinter**.  
-* Sauvegarde automatique des macros en JSON local.  
+### Interface locale
 
-### 🖱️ **Enregistrement et lecture**
-* Enregistre précisément vos actions clavier et souris.  
-* Lecture fidèle et ajustée au temps réel.  
-* Possibilité de **lecture en boucle** (activable dans l’UI et sur Telegram).  
+1. **Créer une macro** → Bouton `Nouveau`
+2. **Enregistrer** → Cliquez `Enregistrer`, attendez le bip, effectuez vos actions
+3. **Stopper** → Cliquez `Stopper` (les 3 dernières secondes sont auto-coupées)
+4. **Lire** → Sélectionnez la macro et cliquez `Lire`
 
-### 🔁 **Mode Boucle**
-* Un **toggle unique** permet d’activer/désactiver le mode boucle.  
-* L’état est synchronisé entre l’UI et Telegram.  
+### Raccourcis clavier
 
-### 🤖 **Contrôle à distance (Bot Telegram)**
-L’application peut être entièrement pilotée depuis votre téléphone :
-* **Démarrer / Stopper** la macro en cours.  
-* **Choisir** la macro à exécuter.  
-* **Basculer le mode boucle**.  
-* **Prendre une capture d’écran** avec `/capture`.  
-* **Éteindre le PC** à distance (`📴 Éteindre PC`).  
-* **Recharger le jeu** via la macro spéciale `🔃 Recharger COC`.  
+| Raccourci | Action |
+|-----------|--------|
+| `F1` | Toggle lecture/arrêt |
+| `Ctrl+Shift+1` | Lancer la macro |
+| `Ctrl+Shift+0` | Stopper |
 
-Le clavier Telegram est dynamique et clair :
+### Contrôle Telegram
+
 ```
-[Paramètres ⚙️] [Capture 📸]
-[Lancer COC]
-[Go ✅] [Stop ❌]
+┌─────────────────┬─────────────┐
+│ Paramètres ⚙️   │ Capture 📸  │
+├─────────────────┴─────────────┤
+│         Lancer CoC            │
+├───────────────┬───────────────┤
+│   Lancer ✅   │   Stop ❌     │
+└───────────────┴───────────────┘
 ```
 
-### 🕹️ **Lancement automatique du jeu**
-* Un bouton dans l’UI permet de lancer **Clash of Clans** directement.  
-* Le bouton Telegram s’adapte automatiquement :  
-  `COC lancé ✅` si le processus du jeu est détecté.  
-
-### 🧼 **Maintenance automatique**
-* À chaque démarrage, le bot **purge les anciens messages Telegram**.  
-* Les fichiers de logs de plus de **24 h** sont automatiquement supprimés.  
+**Commandes texte :** `stop`, `go`, `menu`, `capture`, `shutdown`
 
 ---
 
 ## ⚙️ Configuration
 
-### 1️⃣ **Chemin de lancement CoC**
-* Renseignez le chemin vers l’exécutable ou le raccourci `.lnk` du jeu.  
-* Obligatoire pour que le bouton **Lancer COC** fonctionne.  
+### 1. Configurer Telegram
 
-### 2️⃣ **Connexion à Telegram**
-* Fournissez votre **Token de Bot** et votre **Chat ID**.  
-* L’application propose un **guide complet en HTML** :  
-  `Paramètres → Configurer Telegram... → Ouvrir le guide`.  
-  Ce guide explique pas à pas comment :
-  * Créer un bot avec `@BotFather`  
-  * Récupérer votre **Token**
-  * Trouver votre **Chat ID**
+1. Créez un bot avec [@BotFather](https://t.me/BotFather)
+2. Copiez le **Token**
+3. Envoyez un message à votre bot, puis récupérez votre **Chat ID**
+4. Dans l'app : `Paramètres → Configurer Telegram...`
 
----
+> 💡 Un guide HTML détaillé est inclus : `Paramètres → Ouvrir le guide`
 
-## 🕹️ Utilisation
+### 2. Chemin CoC (optionnel)
 
-1. **Créer une macro :**
-   * Cliquez sur `Nouveau`, nommez-la, puis sur `Enregistrer`.  
-   * Attendez le décompte, effectuez vos actions, puis `Stopper`.  
-
-2. **Lire une macro (localement) :**
-   * Sélectionnez une macro.
-   * Activez la boucle si nécessaire.
-   * Cliquez sur `Lire la macro`.  
-
-3. **Lire une macro (Telegram) :**
-   * Utilisez les boutons `Go ✅` et `Stop ❌` sur votre téléphone.  
+Pour le bouton "Lancer CoC", renseignez le chemin vers :
+- L'exécutable `.exe` du jeu, **ou**
+- Un raccourci `.lnk`
 
 ---
 
-## ⌨️ Raccourcis Clavier
-
-| Raccourci | Action |
-|------------|--------|
-| `F1` | Démarrer / Stopper la macro selectionnée|
-
----
-
-## 📁 Structure du projet
+## 📁 Architecture v3.0
 
 ```
 Macro_COC/
-├── config/
-│   ├── macros/
-│   │   ├── macro1.json
-│   │   ├── macro2.json
-│   │   └── etc etc
-│   ├── data.csv
-│   ├── app.log
-│   ├── icon.ico
-│   └── image.png
-│    
+├── main.py                 # Point d'entrée
 ├── requirements.txt
-└── macro_coc_v2.py
+├── models/
+│   └── macro.py            # Dataclasses Step/Macro
+├── services/
+│   ├── telegram_service.py # Bot Telegram async
+│   ├── recorder_service.py # Recorder/Player
+│   └── vision_service.py   # Computer Vision (v3.1)
+├── gui/
+│   ├── app.py              # Fenêtre principale
+│   ├── dialogs.py          # Popups
+│   ├── components.py       # Widgets
+│   └── theme.py            # Couleurs
+├── utils/
+│   ├── logger.py           # Logging rotatif
+│   ├── config.py           # I/O CSV/JSON
+│   └── system.py           # Processus, shutdown
+└── config/
+    ├── macros/             # Fichiers JSON
+    ├── data.csv            # Configuration
+    └── app.log             # Logs
 ```
-
-
-## 🧾 Licence
-
-Projet open-source sous licence **MIT**.  
-Libre de l’utiliser, modifier (sur votre pc) et redistribuer.  
 
 ---
 
+## 🆕 Nouveautés v3.0
+
+- **Architecture modulaire** — Code séparé en packages maintenables
+- **Telegram async** — Migration vers `python-telegram-bot` v21+
+- **Dataclasses** — Modèles typés pour les macros
+- **Écriture atomique** — Sauvegarde sécurisée des fichiers
+- **Communication thread-safe** — Queue entre Telegram et GUI
+- **Selftests intégrés** — `python main.py --selftest`
+
+---
+
+## 🧪 Tests
+
+```bash
+# Lancer les tests internes
+python main.py --selftest
+```
+
+---
+
+## 📜 Licence
+
+**MIT** — Libre d'utilisation et modification.
+
+---
+
+<p align="center">
+  <sub>Made with ❤️ for automation enthusiasts</sub>
+</p>

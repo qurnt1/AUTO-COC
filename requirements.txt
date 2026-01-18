@@ -1,6 +1,21 @@
-customtkinter
-requests
-pynput
-keyboard
-Pillow
-mss
+# Macro COC v3.0 - Requirements
+
+# Core GUI
+customtkinter>=5.2.0
+
+# Telegram (async modern library - replaces requests polling)
+python-telegram-bot>=21.0
+
+# Input automation
+pynput>=1.7.6
+keyboard>=0.13.5
+
+# Image processing
+Pillow>=10.0.0
+
+# Optional: faster screenshots
+mss>=9.0.0
+
+# Optional: Computer Vision (v3.1+)
+# opencv-python>=4.8.0
+# pyautogui>=0.9.54
