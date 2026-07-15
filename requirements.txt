@@ -1,7 +1,7 @@
 # Macro COC v3.0 - Requirements
 
-# Core GUI
-customtkinter>=5.2.0
+# Core GUI (Material Design / Fluent)
+PyQt6-Fluent-Widgets>=1.11.0
 
 # Telegram (async modern library - replaces requests polling)
 python-telegram-bot>=21.0

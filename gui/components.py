@@ -2,190 +2,193 @@
 """
 Macro COC v3.0 — GUI / Components
 
-Widgets réutilisables pour l'interface (MacroRow, MacroList).
+Widgets reutilisables pour la liste des macros.
+Style adapte au theme Fluent sombre.
 """
 
 from typing import Callable, Dict, List, Optional, Tuple
 
-import customtkinter as ctk
+from PyQt6.QtWidgets import (
+    QFrame, QLabel, QHBoxLayout, QVBoxLayout, QScrollArea, QWidget,
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
+
+from qfluentwidgets import SearchLineEdit, BodyLabel, CaptionLabel
 
 from gui.theme import Theme
 from utils.config import fmt_duration_for_list
 
 
-class MacroRow:
+# Couleurs adaptees au theme Fluent sombre
+ROW_BG = "rgba(255, 255, 255, 0.04)"
+ROW_HOVER = "rgba(255, 255, 255, 0.08)"
+ROW_SELECTED = "rgba(34, 197, 94, 0.15)"
+ROW_BORDER_SELECTED = "#22c55e"
+TEXT_PRIMARY = "rgba(255, 255, 255, 0.93)"
+TEXT_SECONDARY = "rgba(255, 255, 255, 0.60)"
+
+
+class MacroRow(QFrame):
     """
-    Widget représentant une ligne de macro dans la liste.
-    Affiche le nom à gauche et la durée à droite.
+    Widget representant une ligne de macro dans la liste.
     """
-    
-    def __init__(
-        self,
-        parent: ctk.CTkFrame,
-        name: str,
-        duration_txt: str,
-        on_click: Callable[[str], None],
-        on_rclick: Callable,
-    ):
-        self.name = name
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, name: str, duration_txt: str, parent=None):
+        super().__init__(parent)
+        self._name = name
         self._selected = False
-        
-        # Frame principale
-        self.frame = ctk.CTkFrame(parent, corner_radius=8, fg_color=Theme.ROW_BG)
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.columnconfigure(1, weight=0)
-        
-        # Label nom
-        self.lbl_name = ctk.CTkLabel(
-            self.frame,
-            text=name,
-            anchor="w",
-            text_color=Theme.TEXT_COMPLIANT
-        )
-        self.lbl_name.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=8)
-        
-        # Label durée
-        self.lbl_dur = ctk.CTkLabel(
-            self.frame,
-            text=duration_txt,
-            anchor="e",
-            text_color=Theme.ROW_DUR_COLOR
-        )
-        self.lbl_dur.grid(row=0, column=1, sticky="e", padx=(6, 10))
-        
-        # Événements
-        def bind_all(widget):
-            widget.bind("<Button-1>", lambda e: on_click(self.name))
-            widget.bind("<Enter>", lambda e: self._hover(True))
-            widget.bind("<Leave>", lambda e: self._hover(False))
-            widget.bind("<Button-3>", lambda e: on_rclick(e, self.name))
-        
-        bind_all(self.frame)
-        bind_all(self.lbl_name)
-        bind_all(self.lbl_dur)
-    
-    def pack(self, **kwargs):
-        """Pack le widget."""
-        self.frame.pack(**kwargs)
-    
-    def destroy(self):
-        """Détruit le widget."""
-        self.frame.destroy()
-    
-    def set_selected(self, selected: bool):
-        """Change l'état de sélection."""
-        self._selected = selected
-        self.frame.configure(
-            fg_color=Theme.ROW_SELECTED if selected else Theme.ROW_BG
-        )
-    
-    def _hover(self, enter: bool):
-        """Gère le survol."""
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(46)
+        self._apply_style()
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setSpacing(8)
+
+        # Nom
+        self.lbl_name = BodyLabel(name)
+        layout.addWidget(self.lbl_name, stretch=1)
+
+        # Duree
+        self.lbl_dur = CaptionLabel(duration_txt)
+        layout.addWidget(self.lbl_dur)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def _apply_style(self):
+        """Applique le style selon l'etat de selection."""
         if self._selected:
-            return
-        self.frame.configure(
-            fg_color=Theme.ROW_HOVER if enter else Theme.ROW_BG
-        )
-    
+            bg = ROW_SELECTED
+            border = f"border-left: 3px solid {ROW_BORDER_SELECTED};"
+        else:
+            bg = ROW_BG
+            border = "border-left: 3px solid transparent;"
+
+        self.setStyleSheet(f"""
+            MacroRow {{
+                background-color: {bg};
+                border-radius: 6px;
+                {border}
+            }}
+        """)
+
+    def set_selected(self, selected: bool):
+        self._selected = selected
+        self._apply_style()
+
     def set_duration(self, dur_txt: str):
-        """Met à jour l'affichage de la durée."""
-        self.lbl_dur.configure(text=dur_txt)
+        self.lbl_dur.setText(dur_txt)
+
+    # --- Events ---
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._name)
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        if not self._selected:
+            self.setStyleSheet(f"""
+                MacroRow {{
+                    background-color: {ROW_HOVER};
+                    border-radius: 6px;
+                    border-left: 3px solid transparent;
+                }}
+            """)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._apply_style()
+        super().leaveEvent(event)
 
 
-class MacroList(ctk.CTkScrollableFrame):
+class MacroList(QScrollArea):
     """
     Liste scrollable des macros avec recherche.
+    API identique a la version precedente.
     """
-    
-    def __init__(
-        self,
-        master: ctk.CTkFrame,
-        on_select: Callable[[str], None],
-        on_rclick: Callable,
-    ):
-        super().__init__(master, corner_radius=12, fg_color=Theme.LEFT_CONTAINER_BG)
-        
-        self._on_select = on_select
-        self._on_rclick = on_rclick
+
+    macro_selected = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Container interne
+        self._container = QWidget()
+        self._layout = QVBoxLayout(self._container)
+        self._layout.setContentsMargins(4, 2, 4, 2)
+        self._layout.setSpacing(2)
+        self._layout.addStretch()
+        self.setWidget(self._container)
+
         self._rows: Dict[str, MacroRow] = {}
         self._selected: Optional[str] = None
         self._meta: Dict[str, Tuple[int, float]] = {}
-    
+
     def set_meta(self, meta: Dict[str, Tuple[int, float]]):
-        """Définit les métadonnées (nb_events, duration) pour chaque macro."""
         self._meta = dict(meta)
-    
+
     def refresh(
         self,
         names: List[str],
         selected: Optional[str],
         filter_term: Optional[str] = None
     ):
-        """
-        Rafraîchit la liste, en appliquant un filtre optionnel.
-        
-        Args:
-            names: Liste des noms de macros
-            selected: Nom de la macro à sélectionner
-            filter_term: Terme de recherche (optionnel)
-        """
         # Purge
-        for row in self._rows.values():
-            row.destroy()
+        for row in list(self._rows.values()):
+            row.setParent(None)
+            row.deleteLater()
         self._rows.clear()
-        
-        filter_term = filter_term.lower() if filter_term else None
-        
-        # Rebuild
+
+        # Enlever le stretch
+        if self._layout.count() > 0:
+            item = self._layout.takeAt(self._layout.count() - 1)
+            if item.spacerItem():
+                del item
+
+        filter_term = (filter_term or "").lower()
+
         for name in names:
-            # Filtre de recherche
             if filter_term and filter_term not in name.lower():
                 continue
-            
+
             _, d = self._meta.get(name, (0, 0.0))
-            row = MacroRow(
-                self,
-                name,
-                fmt_duration_for_list(d),
-                on_click=self.select,
-                on_rclick=self._on_rclick
-            )
-            row.pack(fill="x", padx=6, pady=4)
+            row = MacroRow(name, fmt_duration_for_list(d), self._container)
+            row.clicked.connect(self._on_row_clicked)
+            self._layout.addWidget(row)
             self._rows[name] = row
-        
+
+        self._layout.addStretch()
+
         if selected and selected in self._rows:
             self.select(selected, fire=False)
-    
+
     def update_one(self, name: str):
-        """Met à jour la durée d'une seule ligne."""
         if name in self._rows:
             _, d = self._meta.get(name, (0, 0.0))
             self._rows[name].set_duration(fmt_duration_for_list(d))
-    
+
     def select(self, name: str, fire: bool = True):
-        """
-        Sélectionne une macro dans la liste.
-        
-        Args:
-            name: Nom de la macro
-            fire: Si True, appelle le callback on_select
-        """
-        # Désélectionner l'ancien
         if self._selected and self._selected in self._rows:
             self._rows[self._selected].set_selected(False)
-        
+
         self._selected = name
-        
-        # Sélectionner le nouveau
+
         if name in self._rows:
             self._rows[name].set_selected(True)
-            if fire and callable(self._on_select):
-                try:
-                    self._on_select(name)
-                except Exception as e:
-                    from utils.logger import get_logger
-                    get_logger().error(f"Erreur on_select({name}): {e}")
-    
+            if fire:
+                self.macro_selected.emit(name)
+
     def get_selected(self) -> Optional[str]:
-        """Retourne le nom de la macro sélectionnée."""
         return self._selected
+
+    def _on_row_clicked(self, name: str):
+        self.select(name, fire=True)

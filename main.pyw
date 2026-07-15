@@ -4,13 +4,19 @@ Macro COC v3.0 — Main Entry Point
 
 Orchestrateur principal qui lie :
 - Le service Telegram (asyncio dans un thread)
-- L'application GUI (Tkinter mainloop)
+- L'application GUI (PyQt6 FluentWindow)
 """
 
 import argparse
+import ctypes
+import os
 import sys
 import threading
 from pathlib import Path
+
+from PyQt6.QtWidgets import QApplication
+import qfluentwidgets
+from qfluentwidgets import setTheme, setThemeColor, Theme as FluentTheme
 
 # Configuration des chemins
 BASE_DIR = Path(__file__).resolve().parent
@@ -194,21 +200,23 @@ def main():
     # Mode normal : lancer l'application
     try:
         # Initialiser le logging
+        print("[MAIN] Setup logger...", flush=True)
         from utils.logger import setup_logging, install_exception_hook
         log = setup_logging(LOG_PATH)
         install_exception_hook()
-        
-        log.info(f"=== Démarrage Macro COC v{APP_VERSION} ===")
+
+        log.info(f"=== Demarrage Macro COC v{APP_VERSION} ===")
+        print(f"[MAIN] Logger OK. v{APP_VERSION}, Python {PYTHON_VERSION}", flush=True)
         log.info(f"Python: {PYTHON_VERSION}")
         log.info(f"Base dir: {BASE_DIR}")
-        
+
         # Charger la configuration
         from utils.config import read_params_csv
         params = read_params_csv(PARAMS_PATH)
-        
+
         # Créer le service Telegram
         from services.telegram_service import TelegramBotService
-        
+
         token = params.get("telegram_bot_token", "")
         chat_id_str = params.get("telegram_chat_id", "")
         chat_id = None
@@ -216,19 +224,36 @@ def main():
             chat_id = int(chat_id_str) if chat_id_str else None
         except ValueError:
             pass
-        
+
         tg_service = TelegramBotService(token=token, chat_id=chat_id)
-        
+
+        # Creer l'application Qt AVANT les widgets
+        print("[MAIN] Creation QApplication + theme Fluent...", flush=True)
+        qt_app = QApplication(sys.argv)
+
+        # Appliquer le theme Material sombre Fluent
+        setTheme(FluentTheme.DARK)
+        setThemeColor("#22c55e")  # Vert COC
+        print("[MAIN] Theme Fluent OK.", flush=True)
+
+        # Windows App ID
+        if os.name == 'nt':
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MacroCOC.App.v3")
+            except Exception:
+                pass
+
         # Démarrer le service Telegram en arrière-plan
         if tg_service.is_configured:
-            log.info("Démarrage du service Telegram...")
+            log.info("Demarrage du service Telegram...")
             tg_service.start()
         else:
-            log.warning("Service Telegram non configuré (token manquant).")
-        
+            log.warning("Service Telegram non configure (token manquant).")
+
         # Lancer l'application GUI
+        print("[MAIN] Import + creation App...", flush=True)
         from gui.app import App
-        
+
         app = App(
             params=params,
             tg_service=tg_service,
@@ -245,20 +270,33 @@ def main():
             python_version=PYTHON_VERSION,
             protected_macro_names=[RECHARGER_MACRO_NAME, VALIDER_MACRO_NAME]
         )
-        
-        # Boucle principale Tkinter
-        app.mainloop()
-        
+
+        print("[MAIN] App cree, show()...", flush=True)
+        app.show()
+        print("[MAIN] Demarrage boucle evenementielle Qt...", flush=True)
+
+        # Boucle principale Qt
+        exit_code = qt_app.exec()
+
         # Cleanup
-        log.info("Arrêt du service Telegram...")
+        print("[MAIN] Nettoyage...", flush=True)
+        log.info("Arret du service Telegram...")
         tg_service.stop()
-        
-        log.info("Application fermée.\n" + "=" * 30)
-        
+
+        log.info("Application fermee.\n" + "=" * 30)
+        sys.exit(exit_code)
+
     except Exception as e:
         import traceback
-        print(f"Erreur fatale: {e}")
+        print(f"[MAIN] ERREUR FATALE: {e}", flush=True)
         traceback.print_exc()
+        # Tenter d'afficher une boite de dialogue
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Erreur Fatale",
+                f"{type(e).__name__}: {e}\n\nConsultez config/app.log pour les details.")
+        except Exception:
+            pass
         sys.exit(1)
 
 
