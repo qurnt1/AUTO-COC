@@ -428,6 +428,11 @@ class RuntimeController(QObject):
         if self.is_busy:
             self._error("Une autre opération est déjà en cours.", "Arrête la lecture avant de lancer cette macro.")
             return
+        if self.safeguard_enabled:
+            self.refresh_coc_presence()
+            if not self.coc_presence.present:
+                self._error("CoC n’est pas détecté.", "Le safeguard bloque la routine tant que CoC n’est pas présent.")
+                return
         path = macro_path_from_name(self.macros_dir, name)
         if not path.exists():
             self._error(f"La macro système « {name} » est introuvable.", "Réinstalle la macro protégée.")
@@ -440,6 +445,9 @@ class RuntimeController(QObject):
         self._playback_started_at = time.perf_counter()
         self._set_state(RuntimeState.PLAYING, f"Lecture · {name}")
         self.player.play(steps, loop=False)
+        if self.safeguard_enabled:
+            self._safeguard_triggered = False
+            self.coc_monitor.arm()
         self._replace_tg_controls(f"Lecture · {name}")
 
     def _ensure_protected_macros(self) -> None:
