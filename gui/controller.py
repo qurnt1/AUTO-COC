@@ -601,6 +601,7 @@ class RuntimeController(QObject):
 
     def shutdown(self) -> None:
         self._closing = True
+        self._coc_launch_timer.stop()
         self.coc_monitor.stop()
         try:
             if self.state == RuntimeState.RECORDING:
