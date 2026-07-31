@@ -7,22 +7,27 @@ config/data.csv
 # Si vous avez des macros par défaut (ex: "Recharger COC"),
 # vous pouvez les forcer avec: !config/macros/Recharger COC.json
 config/macros/
-config/macro.json
 
 # Fichiers générés par l'application
 config/app.log
 config/app.log.* # Logs en rotation
 config/selftest/
+config/screenshots/
 
 # Fichiers temporaires (écriture atomique)
 config/*.tmp.*
 config/macros/*.tmp.*
+*.tmp
+*.log
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
 
 # Environnements virtuels
 venv/

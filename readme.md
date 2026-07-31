@@ -1,177 +1,85 @@
-# 🎮 AUTO-COC v3.0
+# AUTO-COC v4
 
-<p align="center">
-  <img src="config/image.png" alt="AUTO-COC" width="120"/>
-</p>
+Application Windows d’enregistrement et de lecture de macros clavier/souris, avec contrôle Telegram.
 
-<p align="center">
-  <strong>Application d'automatisation macros avec contrôle Telegram</strong>
-</p>
+## Fonctionnalités
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" alt="Python"/>
-  <img src="https://img.shields.io/badge/CustomTkinter-5.2+-green" alt="CTk"/>
-  <img src="https://img.shields.io/badge/Telegram-Bot%20API-0088cc?logo=telegram" alt="Telegram"/>
-  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"/>
-</p>
+- Console opérateur PyQt6 sombre, épurée et orientée action.
+- Enregistrement clavier/souris avec délai de préparation.
+- Lecture à timing absolu et mode boucle.
+- Arrêt d’urgence local et global.
+- Macros utilisateur et routines système présentées dans deux espaces distincts.
+- Contrôle Telegram asynchrone.
+- Capture d’écran et lancement de CoC via un lanceur Windows configurable (`.exe` ou `.lnk`).
+- Détection CoC par processus, chemin d’exécutable et titre de fenêtre.
+- Safeguard optionnel : arrête automatiquement la lecture si CoC disparaît plusieurs contrôles de suite.
+- Diagnostics et journal d’activité intégrés.
+- Sauvegarde atomique des paramètres et macros.
 
----
+## Installation
 
-## 📋 Description
-
-**AUTO-COC** est une application d'enregistrement et lecture de macros (clavier + souris) avec une interface moderne et un **contrôle à distance via Telegram**. Idéale pour automatiser des tâches répétitives sur Clash of Clans ou tout autre jeu/application.
-
-### ✨ Points forts
-
-| Fonctionnalité | Description |
-|----------------|-------------|
-| 🎯 **Précision temporelle** | Timing haute-précision avec `perf_counter` |
-| 🤖 **Contrôle Telegram** | Lancez, stoppez, capturez l'écran depuis votre téléphone |
-| 🔄 **Mode boucle** | Répétition automatique des macros |
-| 💾 **Sauvegarde atomique** | Aucune perte de données en cas de crash |
-| 🌙 **Interface sombre** | Design moderne avec CustomTkinter |
-
----
-
-## 🚀 Installation
-
-### Prérequis
-
-- **Python 3.10+** 
-- **Windows 10/11** (macOS/Linux non testé)
-
-### Installation rapide
+Prérequis : Python 3.10+ et Windows 10/11.
 
 ```bash
-# Cloner ou télécharger le projet
-cd "AUTO-COC"
-
-# Installer les dépendances
 pip install -r requirements.txt
-
-# Lancer l'application
-python main.py
+python main.pyw
 ```
 
-### Dépendances principales
+## Utilisation
 
-| Package | Utilisation |
-|---------|-------------|
-| `customtkinter` | Interface graphique moderne |
-| `python-telegram-bot` | API Telegram asynchrone |
-| `pynput` | Capture clavier/souris |
-| `keyboard` | Raccourcis globaux |
-| `Pillow` | Captures d'écran |
+La console est organisée autour de trois informations immédiates : la macro active, l’état de CoC et l’état de lecture. Les routines intégrées comme `Recharger COC` et `Valider arrivée` apparaissent dans une zone dédiée et restent non éditables. Les actions de création, renommage et suppression ne concernent que les macros personnelles.
 
----
+Dans `Paramètres` :
 
-## 🎮 Utilisation
+- configure le chemin du lanceur CoC ;
+- renseigne les noms de processus séparés par `|` si nécessaire ;
+- renseigne les fragments de titres de fenêtre séparés par `|` ;
+- active `Safeguard CoC` pour arrêter une macro si CoC n’est plus détecté.
 
-### Interface locale
+Le bouton `Ouvrir CoC` demande le lancement, puis l’interface attend une confirmation de présence. Aucun lancement n’est considéré comme validé uniquement parce que le processus du lanceur a démarré.
 
-1. **Créer une macro** → Bouton `Nouveau`
-2. **Enregistrer** → Cliquez `Enregistrer`, attendez le bip, effectuez vos actions
-3. **Stopper** → Cliquez `Stopper` (les 3 dernières secondes sont auto-coupées)
-4. **Lire** → Sélectionnez la macro et cliquez `Lire`
+## Selftests
 
-### Raccourcis clavier
+Les tests headless vérifient les modèles, la persistance, le timing du lecteur, le contraste du thème et le profil de détection CoC.
+
+```bash
+python main.pyw --selftest
+```
+
+## Raccourcis
 
 | Raccourci | Action |
-|-----------|--------|
-| `F1` | Toggle lecture/arrêt |
-| `Ctrl+Shift+1` | Lancer la macro |
-| `Ctrl+Shift+0` | Stopper |
+|---|---|
+| `F1` | Lancer ou arrêter |
+| `Ctrl+Shift+1` | Lancer la macro sélectionnée |
+| `Ctrl+Shift+0` | Arrêter immédiatement |
+| `Ctrl+N` | Créer une macro |
+| `Ctrl+F` | Rechercher une macro |
+| `Ctrl+Entrée` | Lancer la macro sélectionnée |
+| `Échap` | Arrêter ou fermer l’action courante |
 
-### Contrôle Telegram
+## Organisation
 
-```
-┌─────────────────┬─────────────┐
-│ Paramètres ⚙️   │ Capture 📸  │
-├─────────────────┴─────────────┤
-│         Lancer CoC            │
-├───────────────┬───────────────┤
-│   Lancer ✅   │   Stop ❌     │
-└───────────────┴───────────────┘
-```
-
-**Commandes texte :** `stop`, `go`, `menu`, `capture`, `shutdown`
-
----
-
-## ⚙️ Configuration
-
-### 1. Configurer Telegram
-
-1. Créez un bot avec [@BotFather](https://t.me/BotFather)
-2. Copiez le **Token**
-3. Envoyez un message à votre bot, puis récupérez votre **Chat ID**
-4. Dans l'app : `Paramètres → Configurer Telegram...`
-
-> 💡 Un guide HTML détaillé est inclus : `Paramètres → Ouvrir le guide`
-
-### 2. Chemin CoC (optionnel)
-
-Pour le bouton "Lancer CoC", renseignez le chemin vers :
-- L'exécutable `.exe` du jeu, **ou**
-- Un raccourci `.lnk`
-
----
-
-## 📁 Architecture v3.0
-
-```
-Macro_COC/
-├── main.py                 # Point d'entrée
-├── requirements.txt
-├── models/
-│   └── macro.py            # Dataclasses Step/Macro
-├── services/
-│   ├── telegram_service.py # Bot Telegram async
-│   ├── recorder_service.py # Recorder/Player
-│   └── vision_service.py   # Computer Vision (v3.1)
-├── gui/
-│   ├── app.py              # Fenêtre principale
-│   ├── dialogs.py          # Popups
-│   ├── components.py       # Widgets
-│   └── theme.py            # Couleurs
-├── utils/
-│   ├── logger.py           # Logging rotatif
-│   ├── config.py           # I/O CSV/JSON
-│   └── system.py           # Processus, shutdown
-└── config/
-    ├── macros/             # Fichiers JSON
-    ├── data.csv            # Configuration
-    └── app.log             # Logs
+```text
+main.pyw                  # Bootstrap QApplication et selftests
+gui/
+  app.py                  # QMainWindow et navigation
+  controller.py           # État, actions et signaux Qt
+  components.py           # Widgets réutilisables
+  dialogs.py              # Dialogues PyQt6
+  theme.py                # Palette et feuille de style QSS
+  pages/                  # Console, bibliothèque, Telegram, diagnostics
+models/                   # Modèles de macros
+services/                 # Enregistrement, lecture, Telegram, système
+  coc/                    # Profil, lancement, détection et safeguard CoC
+utils/                    # Persistance, logging et utilitaires
+config/macros/            # Macros JSON
 ```
 
----
+## Données et sécurité
 
-## 🆕 Nouveautés v3.0
+Les macros et paramètres restent locaux dans `config/`. Le token Telegram ne doit pas être partagé ni versionné. Le champ de configuration masque le token dans l’interface et conserve la valeur actuelle lorsqu’il est laissé vide.
 
-- **Architecture modulaire** — Code séparé en packages maintenables
-- **Telegram async** — Migration vers `python-telegram-bot` v21+
-- **Dataclasses** — Modèles typés pour les macros
-- **Écriture atomique** — Sauvegarde sécurisée des fichiers
-- **Communication thread-safe** — Queue entre Telegram et GUI
-- **Selftests intégrés** — `python main.py --selftest`
+## Licence
 
----
-
-## 🧪 Tests
-
-```bash
-# Lancer les tests internes
-python main.py --selftest
-```
-
----
-
-## 📜 Licence
-
-**MIT** — Libre d'utilisation et modification.
-
----
-
-<p align="center">
-  <sub>Made with ❤️ for automation enthusiasts</sub>
-</p>
+MIT.
