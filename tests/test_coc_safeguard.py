@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from services.coc.launcher import CocLauncher
 from services.coc.models import CocPresence
 from services.coc.safeguard import CocPresenceMonitor
 
@@ -16,6 +19,13 @@ class _MissingDetector:
 
 
 class CocSafeguardTests(unittest.TestCase):
+    def test_launcher_resolves_extension_hidden_shortcut(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            configured = Path(temp_dir) / "Clash of Clans"
+            shortcut = Path(f"{configured}.lnk")
+            shortcut.touch()
+            self.assertEqual(CocLauncher._resolve_target(configured), shortcut)
+
     def test_lost_callback_requires_configured_tolerance(self) -> None:
         lost = threading.Event()
         snapshots: list[CocPresence] = []
