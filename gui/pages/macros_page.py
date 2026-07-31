@@ -74,8 +74,15 @@ class MacrosPage(QWidget):
         if not macro or not getattr(macro, "name", ""):
             self.summary.setText("Select a macro to preview its events.")
             return
-        self.summary.setText(f"{macro.name} · {macro.event_count():,} events · {macro.duration():.2f}s")
         preview_steps = macro.steps[:120]
+        preview_note = (
+            f" · showing {len(preview_steps):,} of {macro.event_count():,}"
+            if macro.event_count() > len(preview_steps)
+            else ""
+        )
+        self.summary.setText(
+            f"{macro.name} · {macro.event_count():,} events · {macro.duration():.2f}s{preview_note}"
+        )
         self.events.setRowCount(len(preview_steps))
         for row, step in enumerate(preview_steps):
             values = [str(row + 1), step.step_type.to_string(), f"{step.time_delta:.3f}s", str(step.data)]

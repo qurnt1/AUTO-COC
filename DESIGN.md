@@ -4,9 +4,9 @@
 
 AUTO-COC is a calm, readable operator console. It shows what will happen, what is detected and how to stop automation.
 
-The visual language uses warm graphite surfaces, a soft lime action accent, amber for attention and coral for stop or recording. All macros share one library; role assignments are shown through the action they power, not through a locked visual category.
+The visual language uses warm graphite surfaces, a soft lime action accent, amber for attention and coral for stop or recording. User macros stay in the library. Telegram-only routines live in Telegram settings under an explicit `TELEGRAM ACTION` tag.
 
-The first view keeps the selected macro, CoC status, safeguard state and primary controls visible. Secondary information belongs in `Macros`, `Remote` and `Diagnostics`.
+The first view keeps one CoC status, a launch button, a compact macro selector, recording and a single Run/Stop control visible. Secondary information belongs in `Macros`, `Telegram` and `Diagnostics`.
 
 ## Tokens
 

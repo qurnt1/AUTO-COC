@@ -146,14 +146,27 @@ def read_macro_file(path: Path) -> Tuple[str, List[dict], str, str]:
     Returns:
         Tuple (nom, steps, sha1, updated_at)
     """
+    log = get_logger()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("macro root must be an object")
         name = data.get("name", path.stem)
         steps = data.get("steps", [])
-        sha1 = data.get("sha1", get_macro_hash(steps))
-        updated_at = data.get("updated_at", get_iso_utc_now())
-        return name, steps, sha1, updated_at
-    except Exception:
+        if not isinstance(name, str) or not isinstance(steps, list) or any(not isinstance(step, dict) for step in steps):
+            raise ValueError("macro name or steps have an invalid type")
+        for step in steps:
+            float(step.get("t", 0.0))
+            if not isinstance(step.get("data", {}), dict):
+                raise ValueError("macro event data must be an object")
+        actual_hash = get_macro_hash(steps)
+        stored_hash = str(data.get("sha1", ""))
+        if stored_hash and stored_hash != actual_hash:
+            log.warning("Macro '%s' hash mismatch; using the computed value.", path.name)
+        updated_at = str(data.get("updated_at", get_iso_utc_now()))
+        return name, steps, actual_hash, updated_at
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        log.error("Could not read macro '%s': %s", path.name, exc)
         return path.stem, [], "", ""
 
 
@@ -240,7 +253,7 @@ def sanitize_macro_name(name: str) -> str:
     """Nettoie un nom de macro pour le système de fichiers."""
     name = name.strip()
     name = _SAFE_NAME_RE.sub("_", name)
-    return name or "Macro"
+    return name
 
 
 def list_macros(macros_dir: Path) -> List[Tuple[str, Path]]:

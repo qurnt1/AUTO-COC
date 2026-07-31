@@ -258,6 +258,8 @@ class Player:
         
         self._thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
+        self._lifecycle_lock = threading.RLock()
+        self._stopped_callback_sent = True
         self._loop = False
         
         # Callbacks
@@ -270,49 +272,35 @@ class Player:
     
     def is_playing(self) -> bool:
         """Vérifie si une lecture est en cours."""
-        return self._thread is not None and self._thread.is_alive()
+        with self._lifecycle_lock:
+            thread = self._thread
+        return thread is not None and thread.is_alive()
     
     def stop(self):
         """Arrête la lecture et relâche toutes les touches/boutons."""
-        self._stop_flag.set()
-        
-        if self._thread:
-            try:
-                self._thread.join(timeout=2.0)
-            except Exception:
-                pass
-        
-        self._thread = None
-        self._recorder.mark_self_play(False)
-        
-        # Relâcher les inputs (failsafe)
+        with self._lifecycle_lock:
+            thread = self._thread
+            if thread is None:
+                return
+            self._stop_flag.set()
+
+        if thread is threading.current_thread():
+            return
+
         try:
-            for k in list(self._pressed_keys):
-                try:
-                    self._keys.release(k)
-                except Exception:
-                    pass
-            self._pressed_keys.clear()
-            
-            for b in list(self._pressed_buttons):
-                try:
-                    self._mouse.release(b)
-                except Exception:
-                    pass
-            self._pressed_buttons.clear()
-            
-        except Exception as e:
-            self._log.error(f"Erreur release inputs: {e}")
-        
-        self._stop_flag.clear()
-        
-        if self.on_stopped:
-            try:
-                self.on_stopped()
-            except Exception as e:
-                self._log.error(f"Erreur callback on_stopped: {e}")
+            thread.join(timeout=2.0)
+        except Exception:
+            pass
+
+        if thread.is_alive():
+            self._log.warning("Arrêt Player différé : le worker est encore actif après le timeout.")
+            return
+
+        # Le worker nettoie les inputs et notifie on_stopped dans son finally.
+        # Le flag reste positionné jusqu'au prochain play(), après confirmation
+        # que ce worker n'est plus vivant.
     
-    def play(self, steps: List[dict], loop: bool = False):
+    def play(self, steps: List[dict], loop: bool = False) -> bool:
         """
         Démarre la lecture d'une macro.
         
@@ -320,19 +308,30 @@ class Player:
             steps: Liste des événements (format dict)
             loop: Si True, boucle indéfiniment
         """
-        if self.is_playing():
-            return
-        
-        self._loop = loop
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(steps,),
-            daemon=True,
-            name="MacroPlayer"
-        )
-        self._thread.start()
-    
-    def play_steps(self, steps: List[Step], loop: bool = False):
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+
+            self._stop_flag.clear()
+            self._loop = loop
+            self._stopped_callback_sent = False
+            thread = threading.Thread(
+                target=self._run,
+                args=(steps,),
+                daemon=True,
+                name="MacroPlayer"
+            )
+            self._thread = thread
+            try:
+                thread.start()
+            except Exception:
+                self._thread = None
+                self._stopped_callback_sent = True
+                self._stop_flag.set()
+                raise
+            return True
+
+    def play_steps(self, steps: List[Step], loop: bool = False) -> bool:
         """
         Démarre la lecture d'une macro (format Step).
         
@@ -340,7 +339,7 @@ class Player:
             steps: Liste des Step
             loop: Si True, boucle indéfiniment
         """
-        self.play([s.to_dict() for s in steps], loop)
+        return self.play([s.to_dict() for s in steps], loop)
     
     def _wait(self, seconds: float):
         """Attente interruptible."""
@@ -389,9 +388,8 @@ class Player:
     
     def _run(self, steps: List[dict]):
         """Thread principal de lecture."""
-        self._recorder.mark_self_play(True)
-        
         try:
+            self._recorder.mark_self_play(True)
             while not self._stop_flag.is_set():
                 cycle_completed = self._run_one_cycle(steps)
                 
@@ -408,14 +406,43 @@ class Player:
                     break
                     
         finally:
-            self._recorder.mark_self_play(False)
-            if not self._stop_flag.is_set():
-                # S'est terminé naturellement
-                if self.on_stopped:
-                    try:
-                        self.on_stopped()
-                    except Exception as e:
-                        self._log.error(f"Erreur callback on_stopped (fin naturelle): {e}")
+            try:
+                self._recorder.mark_self_play(False)
+            except Exception as e:
+                self._log.error(f"Erreur arrêt état self-play: {e}")
+            self._release_inputs()
+            self._notify_stopped_once()
+
+    def _release_inputs(self) -> None:
+        """Relâche les entrées uniquement depuis un worker terminé."""
+        try:
+            for k in list(self._pressed_keys):
+                try:
+                    self._keys.release(k)
+                except Exception:
+                    pass
+            self._pressed_keys.clear()
+
+            for b in list(self._pressed_buttons):
+                try:
+                    self._mouse.release(b)
+                except Exception:
+                    pass
+            self._pressed_buttons.clear()
+        except Exception as e:
+            self._log.error(f"Erreur release inputs: {e}")
+
+    def _notify_stopped_once(self) -> None:
+        with self._lifecycle_lock:
+            if self._stopped_callback_sent:
+                return
+            self._stopped_callback_sent = True
+            callback = self.on_stopped
+        if callback:
+            try:
+                callback()
+            except Exception as e:
+                self._log.error(f"Erreur callback on_stopped: {e}")
     
     def _apply(self, ev: dict):
         """Applique un événement."""

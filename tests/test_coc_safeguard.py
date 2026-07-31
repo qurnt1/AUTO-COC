@@ -41,6 +41,16 @@ class CocSafeguardTests(unittest.TestCase):
             )
             self.assertFalse(result.started)
 
+    def test_launcher_discovers_coc_shortcut_in_windows_locations(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            nested = root / "Games"
+            nested.mkdir()
+            shortcut = nested / "Clash of Clans.lnk"
+            shortcut.touch()
+
+            self.assertEqual(CocLauncher.discover_target([root]), shortcut)
+
     def test_lost_callback_requires_configured_tolerance(self) -> None:
         lost = threading.Event()
         snapshots: list[CocPresence] = []

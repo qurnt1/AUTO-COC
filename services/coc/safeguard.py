@@ -43,18 +43,27 @@ class CocPresenceMonitor:
             return self._armed
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="CocPresenceMonitor")
-        self._thread.start()
+        with self._state_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True, name="CocPresenceMonitor")
+            self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        thread = self._thread
-        if thread and thread.is_alive():
+        with self._state_lock:
+            thread = self._thread
+        if thread is None or thread is threading.current_thread():
+            return
+        if thread.is_alive():
             thread.join(timeout=2.0)
-        self._thread = None
+        if thread.is_alive():
+            self.log.warning("Arrêt du monitor CoC différé : le worker est encore actif après le timeout.")
+            return
+        with self._state_lock:
+            if self._thread is thread:
+                self._thread = None
 
     def arm(self) -> None:
         with self._state_lock:
@@ -81,14 +90,17 @@ class CocPresenceMonitor:
             else:
                 self._last_error = ""
                 self._update_presence(snapshot)
-            self._stop.wait(self.interval)
+            with self._state_lock:
+                interval = self.interval
+            self._stop.wait(interval)
 
     def _update_presence(self, snapshot: CocPresence) -> None:
         lost = False
         with self._state_lock:
+            tolerance = self.missing_tolerance
             if self._armed and not snapshot.present:
                 self._missing_count += 1
-                if self._missing_count >= self.missing_tolerance:
+                if self._missing_count >= tolerance:
                     self._armed = False
                     self._missing_count = 0
                     lost = True

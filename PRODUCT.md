@@ -20,21 +20,22 @@ The application runs on Windows while the user interacts with Clash of Clans or 
 
 - Keyboard and mouse recording through `pynput`.
 - Absolute-timing playback, optional looping and emergency stop.
-- A single editable macro library. System actions are role assignments, not a separate locked macro type.
+- A user macro library plus editable Telegram-only routines, separated by intent.
 - Global shortcuts: `F1`, `Ctrl+Shift+1` and `Ctrl+Shift+0`.
 - Asynchronous Telegram control in a dedicated thread.
 - Screenshots, CoC launch and Windows shutdown.
-- Configurable CoC launch profile using path, process names and window titles.
+- CoC shortcut auto-discovery with an optional explicit path, plus process and window detection.
 - Presence detection and safeguard that stops playback after repeated missing checks.
 - PyQt6-only interface.
 
 ## Design principles
 
 1. Execution state and CoC presence must be understandable in under one second.
-2. Stop must remain visible, immediate and unambiguous.
+2. Run and stop share one contextual control whose label always includes `F1`.
 3. Remote and local actions must use the same runtime state.
 4. Existing macro data must remain readable.
-5. Every macro is user-editable. System actions point to macros by role and follow rename/delete operations safely.
+5. Telegram routines remain editable from Telegram settings but never look like user-launchable macros.
+6. Telegram keeps one active panel and one latest screenshot whenever deletion is permitted by Telegram.
 
 ## Accessibility
 

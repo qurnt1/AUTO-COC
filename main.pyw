@@ -15,8 +15,7 @@ LOG_PATH = CONFIG_DIR / "app.log"
 ICON_PATH = CONFIG_DIR / "icon.ico"
 GUIDE_HTML_PATH = CONFIG_DIR / "guide_telegram.html"
 
-RECHARGER_MACRO_NAME = "Recharger COC"
-VALIDER_MACRO_NAME = "Valider arrivée"
+RELOAD_COC_MACRO_NAME = "Reload CoC"
 
 
 def setup_environment() -> None:
@@ -102,13 +101,12 @@ def build_window():
     window = MainWindow(
         params=params,
         telegram=telegram,
-        base_dir=BASE_DIR,
         macros_dir=MACROS_DIR,
         params_path=PARAMS_PATH,
         log_path=LOG_PATH,
         icon_path=ICON_PATH,
         guide_path=GUIDE_HTML_PATH,
-        system_names=[RECHARGER_MACRO_NAME, VALIDER_MACRO_NAME],
+        system_names=[RELOAD_COC_MACRO_NAME],
     )
     return window
 

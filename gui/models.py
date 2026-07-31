@@ -12,3 +12,8 @@ class MacroSummary:
     events: int
     duration: float
     updated_at: str = ""
+    role: str = ""
+
+    @property
+    def is_telegram_action(self) -> bool:
+        return bool(self.role)

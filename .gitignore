@@ -2,11 +2,10 @@
 # (Comme demandé)
 config/data.csv
 
-# Macros créées par l'utilisateur. Les deux routines système distribuées
-# restent suivies pour qu'un clone propre soit immédiatement fonctionnel.
+# Macros créées par l'utilisateur. La routine Telegram distribuée reste
+# suivie pour qu'un clone propre soit immédiatement fonctionnel.
 config/macros/*
-!config/macros/Recharger COC.json
-!config/macros/Valider arrivée.json
+!config/macros/Reload CoC.json
 
 # Fichiers générés par l'application
 config/app.log

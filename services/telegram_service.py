@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 import queue
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Coroutine, Dict, List, Optional, Tuple
 
 # python-telegram-bot v21+
 from telegram import (
@@ -48,7 +48,6 @@ TEXT_COMMAND_MAP = {
     "shutdown": "SHUTDOWN_ASK", "/shutdown": "SHUTDOWN_ASK", "eteindre": "SHUTDOWN_ASK",
     "éteindre": "SHUTDOWN_ASK", "poweroff": "SHUTDOWN_ASK",
     "capture": "CAPTURE", "/capture": "CAPTURE", "screenshot": "CAPTURE", "screen": "CAPTURE",
-    "gif": "CAPTURE_GIF",
     "menu": "MENU", "/menu": "MENU",
     "relancer": "RELOAD_COC", "/relancer": "RELOAD_COC",
     "launch": "LAUNCH_COC", "/launch": "LAUNCH_COC",
@@ -59,7 +58,7 @@ KNOWN_CALLBACKS = frozenset([
     "STOP", "GO", "MENU", "BACK", "SHUTDOWN_ASK", "SHUTDOWN_CONFIRM",
     "SHUTDOWN_CANCEL", "CAPTURE", "LAUNCH_COC", "RELOAD_COC",
     "TOGGLE_LOOP", "DUMMY_COC_STATUS", "SELECT_MACRO_LIST",
-    "CANCEL_SELECTION", "VALIDATE_ARRIVAL",
+    "CANCEL_SELECTION",
 ])
 
 
@@ -101,12 +100,21 @@ class TelegramBotService:
         # Queue pour communiquer avec la GUI (thread-safe)
         self._command_queue: queue.Queue[TelegramCommand] = queue.Queue()
         
-        # IDs des messages pour gestion UI
-        self._last_controls_id: Optional[int] = None
-        self._last_menu_id: Optional[int] = None
+        # Un seul panneau Telegram actif à la fois.
+        self._active_panel_id: Optional[int] = None
+        self._last_screenshot_id: Optional[int] = None
+        self._pending_delete_ids: set[int] = set()
+        self._panel_lock: Optional[asyncio.Lock] = None
         
         # Map pour callback_data > 64 octets
         self._callback_data_map: Dict[str, str] = {}
+
+    def _reset_message_state(self) -> None:
+        """Réinitialise les références locales aux messages Telegram."""
+        self._active_panel_id = None
+        self._last_screenshot_id = None
+        self._pending_delete_ids.clear()
+        self._callback_data_map.clear()
     
     # =========================
     #     Properties
@@ -120,7 +128,16 @@ class TelegramBotService:
     @property
     def is_ready(self) -> bool:
         """Vérifie si le service est prêt (token + chat_id)."""
-        return bool(self._token and self._chat_id)
+        loop = self._loop
+        return bool(
+            self._token
+            and self._chat_id
+            and self._running.is_set()
+            and self._bot is not None
+            and loop is not None
+            and loop.is_running()
+            and not loop.is_closed()
+        )
     
     @property
     def is_running(self) -> bool:
@@ -134,9 +151,12 @@ class TelegramBotService:
 
     def configure(self, token: str, chat_id: Optional[int] = None) -> None:
         """Met à jour les identifiants sans exposer l’état interne à l’interface."""
-        was_running = self.is_running
-        if was_running:
+        if self.is_running or (self._thread and self._thread.is_alive()):
             self.stop()
+        if self._thread and self._thread.is_alive():
+            self._log.error("TG Service: ancienne boucle encore active, reconfiguration annulée.")
+            return
+        self._reset_message_state()
         self._token = (token or "").strip()
         self._chat_id = chat_id
         if self._token:
@@ -153,7 +173,7 @@ class TelegramBotService:
             return "Token missing", "#FF6B6B"
         if not self._chat_id:
             return "Chat ID missing", "#F6C45D"
-        if not self.is_running:
+        if not self.is_ready:
             return "Poller stopped", "#F6C45D"
         return "Connected", "#63E6A4"
     
@@ -170,7 +190,15 @@ class TelegramBotService:
         if not self.is_configured:
             self._log.warning("TG Service: Token non configuré, démarrage annulé.")
             return
+
+        if self._thread and self._thread.is_alive():
+            self._log.error("TG Service: ancienne boucle encore active, démarrage annulé.")
+            return
         
+        self._reset_message_state()
+        self._loop = None
+        self._bot = None
+        self._app = None
         self._running.set()
         self._thread = threading.Thread(
             target=self._run_async_loop,
@@ -182,32 +210,47 @@ class TelegramBotService:
     
     def stop(self):
         """Arrête le service proprement."""
-        if not self._running.is_set():
+        thread = self._thread
+        if not self._running.is_set() and not (thread and thread.is_alive()):
+            self._reset_message_state()
             return
         
         self._running.clear()
         
         # Attendre la fin du thread (le cleanup se fait dans _run_bot)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5.0)
+        if thread and thread.is_alive():
+            thread.join(timeout=5.0)
+        if thread and thread.is_alive():
+            self._log.error("TG Service: arrêt expiré, boucle encore active.")
+            return
         
+        self._thread = None
+        self._reset_message_state()
         self._log.info("TG Service: Arrêté.")
     
     def _run_async_loop(self):
         """Point d'entrée du thread asyncio."""
+        loop = asyncio.new_event_loop()
         try:
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._run_bot())
+            self._loop = loop
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._run_bot())
         except Exception as e:
             self._log.error(f"TG Service: Erreur boucle asyncio: {e}")
         finally:
-            if self._loop:
-                self._loop.close()
+            if not loop.is_closed():
+                loop.close()
+            if self._loop is loop:
+                self._loop = None
+            self._panel_lock = None
+            self._app = None
+            self._bot = None
             self._running.clear()
+            self._reset_message_state()
     
     async def _run_bot(self):
         """Configure et lance le bot."""
+        self._panel_lock = asyncio.Lock()
         # Construire l'application
         self._app = (
             Application.builder()
@@ -358,16 +401,36 @@ class TelegramBotService:
     # =========================
     #     API (thread-safe)
     # =========================
-    
-    def send_message(self, text: str):
-        """Envoie un message texte."""
-        if not self.is_ready:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
-            self._async_send_message(text),
-            self._loop
+
+    def _submit(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        operation: str,
+    ) -> Optional[Future[Any]]:
+        """Planifie une coroutine sur la boucle Telegram et observe ses erreurs."""
+        if not self.is_ready or self._loop is None:
+            coroutine.close()
+            return None
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except (RuntimeError, TypeError) as error:
+            coroutine.close()
+            self._log.error(f"TG: impossible de planifier {operation}: {error}")
+            return None
+        future.add_done_callback(
+            lambda completed: self._observe_future(completed, operation)
         )
+        return future
+
+    def _observe_future(self, future: Future[Any], operation: str) -> None:
+        try:
+            future.result()
+        except Exception as error:
+            self._log.error(f"TG: échec asynchrone {operation}: {error}")
+
+    def send_message(self, text: str) -> Optional[Future[Any]]:
+        """Envoie un message texte."""
+        return self._submit(self._async_send_message(text), "send_message")
     
     async def _async_send_message(self, text: str):
         """Envoie un message (async)."""
@@ -376,195 +439,226 @@ class TelegramBotService:
         except TelegramError as e:
             self._log.error(f"TG: Échec envoi message: {e}")
     
-    def send_photo(self, png_bytes: bytes, caption: str = ""):
-        """Envoie une photo."""
-        if not self.is_ready or not png_bytes:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
-            self._async_send_photo(png_bytes, caption),
-            self._loop
-        )
-    
     async def _async_send_photo(self, png_bytes: bytes, caption: str):
         """Envoie une photo (async)."""
         try:
-            await self._bot.send_photo(
+            message = await self._bot.send_photo(
                 chat_id=self._chat_id,
                 photo=BytesIO(png_bytes),
                 caption=caption
             )
-            self._log.info("TG: Photo envoyée.")
+            return message
         except TelegramError as e:
             self._log.error(f"TG: Échec envoi photo: {e}")
     
-    def delete_message(self, message_id: int):
-        """Supprime un message."""
-        if not self.is_ready or not message_id:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
-            self._async_delete_message(message_id),
-            self._loop
+    def send_latest_screenshot(
+        self,
+        png_bytes: bytes,
+        caption: str,
+        controls_text: str,
+        coc_launched: bool,
+    ) -> Optional[Future[Any]]:
+        """Envoie la capture et remplace le panneau Telegram actif."""
+        if not png_bytes:
+            return None
+        return self._submit(
+            self._async_send_latest_screenshot(
+                png_bytes,
+                caption,
+                controls_text,
+                coc_launched,
+            ),
+            "send_latest_screenshot",
         )
+
+    async def _async_send_latest_screenshot(
+        self,
+        png_bytes: bytes,
+        caption: str,
+        controls_text: str,
+        coc_launched: bool,
+    ) -> Optional[int]:
+        if self._panel_lock is None:
+            self._log.error("TG: verrou absent pour send_latest_screenshot.")
+            return None
+
+        async with self._panel_lock:
+            previous_screenshot_id = self._last_screenshot_id
+            previous_panel_id = self._active_panel_id
+            photo = await self._async_send_photo(png_bytes, caption)
+            if photo is None:
+                return None
+
+            photo_id = photo.message_id
+            try:
+                panel_id = await self._async_send_panel(
+                    controls_text,
+                    self._controls_keyboard(coc_launched),
+                )
+            except TelegramError as error:
+                self._log.error(f"TG: échec remplacement après capture: {error}")
+                await self._cleanup_message_ids({photo_id})
+                return None
+
+            self._last_screenshot_id = photo_id
+            self._active_panel_id = panel_id
+            await self._cleanup_message_ids({previous_screenshot_id, previous_panel_id})
+            return photo_id
+
+    def delete_message(self, message_id: int) -> Optional[Future[Any]]:
+        """Supprime un message."""
+        if not message_id:
+            return None
+        return self._submit(self._async_delete_message(message_id), "delete_message")
     
-    async def _async_delete_message(self, message_id: int):
+    async def _async_delete_message(self, message_id: int) -> bool:
         """Supprime un message (async)."""
         try:
             await self._bot.delete_message(chat_id=self._chat_id, message_id=message_id)
-        except TelegramError:
-            pass  # Ignore les erreurs de suppression
+        except TelegramError as error:
+            self._log.error(f"TG: échec suppression message {message_id}: {error}")
+            return False
+        return True
+
+    async def _cleanup_message_ids(self, message_ids: set[int | None]) -> None:
+        """Delete stale bot messages and retain transient failures for retry."""
+        protected_ids = {self._active_panel_id, self._last_screenshot_id, None}
+        candidates = self._pending_delete_ids.union(message_ids).difference(protected_ids)
+        for message_id in sorted(candidates):
+            if await self._async_delete_message(message_id):
+                self._pending_delete_ids.discard(message_id)
+            else:
+                self._pending_delete_ids.add(message_id)
     
     # =========================
     #     Claviers inline
     # =========================
     
-    def replace_controls(self, text: str = "Commandes :", coc_launched: bool = False):
+    def _controls_keyboard(self, coc_launched: bool) -> InlineKeyboardMarkup:
+        coc_btn = (
+            [InlineKeyboardButton("CoC running ✅", callback_data="DUMMY_COC_STATUS")]
+            if coc_launched
+            else [InlineKeyboardButton("Launch CoC", callback_data="LAUNCH_COC")]
+        )
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Settings ⚙️", callback_data="MENU"),
+                InlineKeyboardButton("Screenshot 📸", callback_data="CAPTURE"),
+            ],
+            coc_btn,
+            [
+                InlineKeyboardButton("Run ✅", callback_data="GO"),
+                InlineKeyboardButton("Stop ❌", callback_data="STOP"),
+            ],
+        ])
+
+    async def _async_send_panel(
+        self,
+        text: str,
+        keyboard: InlineKeyboardMarkup,
+    ) -> Optional[int]:
+        """Envoie le panneau avant de supprimer l'ancien."""
+        message = await self._bot.send_message(
+            chat_id=self._chat_id,
+            text=text,
+            reply_markup=keyboard,
+        )
+        return message.message_id
+
+    async def _async_replace_panel(
+        self,
+        text: str,
+        keyboard: InlineKeyboardMarkup,
+        operation: str,
+    ) -> Optional[int]:
+        """Remplace le panneau actif sous un verrou de boucle unique."""
+        if self._panel_lock is None:
+            self._log.error(f"TG: verrou absent pour {operation}.")
+            return None
+        async with self._panel_lock:
+            previous_id = self._active_panel_id
+            try:
+                new_id = await self._async_send_panel(text, keyboard)
+            except TelegramError as error:
+                self._log.error(f"TG: échec {operation}: {error}")
+                return None
+            self._active_panel_id = new_id
+            await self._cleanup_message_ids({previous_id})
+            return new_id
+
+    def replace_controls(self, text: str = "Commandes :", coc_launched: bool = False) -> Optional[Future[Any]]:
         """Remplace le message de contrôles."""
-        if not self.is_ready:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
+        return self._submit(
             self._async_replace_controls(text, coc_launched),
-            self._loop
+            "replace_controls",
         )
     
     async def _async_replace_controls(self, text: str, coc_launched: bool):
         """Remplace le message de contrôles (async)."""
-        try:
-            # Supprimer l'ancien
-            if self._last_controls_id:
-                await self._async_delete_message(self._last_controls_id)
-            
-            # Créer le nouveau clavier
-            coc_btn = (
-                [InlineKeyboardButton("CoC running ✅", callback_data="DUMMY_COC_STATUS")]
-                if coc_launched
-                else [InlineKeyboardButton("Launch CoC", callback_data="LAUNCH_COC")]
-            )
-            
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Settings ⚙️", callback_data="MENU"),
-                    InlineKeyboardButton("Screenshot 📸", callback_data="CAPTURE")
-                ],
-                coc_btn,
-                [
-                    InlineKeyboardButton("Run ✅", callback_data="GO"),
-                    InlineKeyboardButton("Stop ❌", callback_data="STOP")
-                ],
-            ])
-            
-            msg = await self._bot.send_message(
-                chat_id=self._chat_id,
-                text=text,
-                reply_markup=keyboard
-            )
-            self._last_controls_id = msg.message_id
-            
-        except TelegramError as e:
-            self._log.error(f"TG: Échec replace_controls: {e}")
-    
-    def replace_menu(self, title: str = "Settings", loop_state: bool = False):
-        """Remplace le message de menu."""
-        if not self.is_ready:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
-            self._async_replace_menu(title, loop_state),
-            self._loop
+        return await self._async_replace_panel(
+            text,
+            self._controls_keyboard(coc_launched),
+            "replace_controls",
         )
+    
+    def replace_menu(self, title: str = "Settings", loop_state: bool = False) -> Optional[Future[Any]]:
+        """Remplace le message de menu."""
+        return self._submit(self._async_replace_menu(title, loop_state), "replace_menu")
     
     async def _async_replace_menu(self, title: str, loop_state: bool):
         """Remplace le message de menu (async)."""
-        try:
-            if self._last_menu_id:
-                await self._async_delete_message(self._last_menu_id)
+        loop_text = "Disable loop" if loop_state else "Enable loop"
             
-            loop_text = "Disable loop" if loop_state else "Enable loop"
-            
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Back", callback_data="BACK")],
-                [InlineKeyboardButton("📴 Shut down PC", callback_data="SHUTDOWN_ASK")],
-                [InlineKeyboardButton("Choose macro", callback_data="SELECT_MACRO_LIST")],
-                [InlineKeyboardButton("🔃 Reload CoC", callback_data="RELOAD_COC")],
-                [InlineKeyboardButton("Validate arrival 👌", callback_data="VALIDATE_ARRIVAL")],
-                [InlineKeyboardButton(loop_text, callback_data="TOGGLE_LOOP")],
-            ])
-            
-            msg = await self._bot.send_message(
-                chat_id=self._chat_id,
-                text=title,
-                reply_markup=keyboard
-            )
-            self._last_menu_id = msg.message_id
-            
-        except TelegramError as e:
-            self._log.error(f"TG: Échec replace_menu: {e}")
-    
-    def push_macro_selection(self, macro_names: List[str]):
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back", callback_data="BACK")],
+            [InlineKeyboardButton("📴 Shut down PC", callback_data="SHUTDOWN_ASK")],
+            [InlineKeyboardButton("Choose macro", callback_data="SELECT_MACRO_LIST")],
+            [InlineKeyboardButton("🔃 Reload CoC", callback_data="RELOAD_COC")],
+            [InlineKeyboardButton(loop_text, callback_data="TOGGLE_LOOP")],
+        ])
+        return await self._async_replace_panel(title, keyboard, "replace_menu")
+
+    def push_macro_selection(self, macro_names: List[str]) -> Optional[Future[Any]]:
         """Affiche la sélection de macros."""
-        if not self.is_ready:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
+        return self._submit(
             self._async_push_macro_selection(macro_names),
-            self._loop
+            "push_macro_selection",
         )
     
     async def _async_push_macro_selection(self, macro_names: List[str]):
         """Affiche la sélection de macros (async)."""
-        try:
-            buttons = []
-            row = []
-            
-            for name in macro_names:
-                callback_data = self._hash_callback_data(f"SELECT_MACRO:{name}")
-                row.append(InlineKeyboardButton(name, callback_data=callback_data))
-                if len(row) >= 2:
-                    buttons.append(row)
-                    row = []
-            
-            if row:
+        buttons = []
+        row = []
+        for name in macro_names:
+            callback_data = self._hash_callback_data(f"SELECT_MACRO:{name}")
+            row.append(InlineKeyboardButton(name, callback_data=callback_data))
+            if len(row) >= 2:
                 buttons.append(row)
-            
-            buttons.append([InlineKeyboardButton("Cancel ↩️", callback_data="CANCEL_SELECTION")])
-            
-            await self._bot.send_message(
-                chat_id=self._chat_id,
-                text="🗂️ Which macro should run?",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-            
-        except TelegramError as e:
-            self._log.error(f"TG: Échec push_macro_selection: {e}")
-    
-    def push_shutdown_confirm(self):
-        """Demande de confirmation d'extinction."""
-        if not self.is_ready:
-            return
-        
-        asyncio.run_coroutine_threadsafe(
-            self._async_push_shutdown_confirm(),
-            self._loop
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([InlineKeyboardButton("Cancel ↩️", callback_data="CANCEL_SELECTION")])
+        return await self._async_replace_panel(
+            "🗂️ Which macro should run?",
+            InlineKeyboardMarkup(buttons),
+            "push_macro_selection",
         )
+    
+    def push_shutdown_confirm(self) -> Optional[Future[Any]]:
+        """Demande de confirmation d'extinction."""
+        return self._submit(self._async_push_shutdown_confirm(), "push_shutdown_confirm")
     
     async def _async_push_shutdown_confirm(self):
         """Demande de confirmation d'extinction (async)."""
-        try:
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Cancel", callback_data="SHUTDOWN_CANCEL")],
-                [InlineKeyboardButton("✅ Confirm shutdown", callback_data="SHUTDOWN_CONFIRM")],
-            ])
-            
-            await self._bot.send_message(
-                chat_id=self._chat_id,
-                text="⚠️ Confirm shutdown?",
-                reply_markup=keyboard
-            )
-            
-        except TelegramError as e:
-            self._log.error(f"TG: Échec push_shutdown_confirm: {e}")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Cancel", callback_data="SHUTDOWN_CANCEL")],
+            [InlineKeyboardButton("✅ Confirm shutdown", callback_data="SHUTDOWN_CONFIRM")],
+        ])
+        return await self._async_replace_panel(
+            "⚠️ Confirm shutdown?",
+            keyboard,
+            "push_shutdown_confirm",
+        )
     
     def _hash_callback_data(self, data: str) -> str:
         """Tronque et hashe le callback_data s'il dépasse 64 octets."""
@@ -589,11 +683,3 @@ class TelegramBotService:
     def set_chat_id(self, chat_id: int):
         """Configure le chat_id."""
         self._chat_id = chat_id
-    
-    def get_last_menu_id(self) -> Optional[int]:
-        """Retourne l'ID du dernier message de menu."""
-        return self._last_menu_id
-    
-    def clear_last_menu_id(self):
-        """Réinitialise l'ID du dernier message de menu."""
-        self._last_menu_id = None

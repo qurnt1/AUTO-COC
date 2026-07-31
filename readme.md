@@ -7,9 +7,9 @@ AUTO-COC is a Windows desktop console for recording and playing keyboard/mouse m
 - PyQt6 operator console with a focused dark theme.
 - Keyboard and mouse recording with absolute-timing playback.
 - One-shot or looped playback, with immediate local and global stop controls.
-- One editable macro library. System actions are regular macros assigned to roles, so they can be renamed, edited or deleted.
-- Telegram control and screenshots.
-- Configurable CoC launcher (`.exe` or `.lnk`) with process, executable-path and window-title detection.
+- A focused user macro library, separate from Telegram-only routines.
+- Telegram control with one compact control panel and one replaceable latest screenshot.
+- Automatic CoC shortcut discovery, with an optional explicit `.exe` or `.lnk` override.
 - Optional safeguard that stops playback when CoC disappears for the configured number of checks.
 - Atomic persistence for macro JSON files and settings CSV.
 
@@ -24,11 +24,11 @@ python main.pyw
 
 ## Use
 
-Create or select a macro in `Macros`, then use `Record`, `Run macro`, `Stop`, or `Open CoC` from `Home`.
+Create or select a macro in `Macros`. `Home` provides a compact selector, `Record`, a single contextual `Run macro · F1` / `Stop macro · F1` button, and `Launch Clash of Clans`.
 
-In `Settings`, configure the CoC launcher and detection profile. Enable `Stop if CoC disappears` to arm the safeguard during playback. The launcher is considered ready only after CoC is detected, not merely after a process is started.
+In `Settings`, tune the CoC detection profile. Leave the launcher path empty to discover a `Clash of Clans` Windows shortcut automatically, or choose an explicit launcher. Enable `Stop if CoC disappears` to arm the safeguard during playback. A launch is confirmed only after CoC is detected.
 
-Telegram shortcuts use the assigned system roles. Renaming a role macro keeps its Telegram action linked. Deleting it clears the assignment, so the action becomes unavailable until a macro is assigned again.
+`Telegram` owns bot credentials, screenshots and the private `Reload CoC` routine. This routine is tagged `TELEGRAM ACTION` and never appears in the user macro selectors. Renaming or removing it keeps the role assignment consistent.
 
 ## Self-test
 
@@ -52,10 +52,10 @@ python main.pyw --selftest
 
 ```text
 main.pyw                  # QApplication bootstrap and self-tests
-gui/                      # Main window, controller, dialogs, theme and pages
+gui/                      # PyQt6 shell, controller, dialogs, theme and focused pages
 models/                   # Macro data models
 services/                 # Recording, playback, Telegram and CoC services
-  coc/                    # Launching, detection and safeguard
+  coc/                    # Auto-discovery, launching, detection and safeguard
 utils/                    # Persistence, logging and system helpers
 config/macros/            # Local macro JSON files
 ```

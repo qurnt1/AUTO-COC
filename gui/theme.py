@@ -75,6 +75,11 @@ def build_stylesheet() -> str:
         border: 1px solid {Theme.BORDER};
         border-radius: 12px;
     }}
+    QFrame#StatusPill {{
+        background: {Theme.BG};
+        border: 1px solid {Theme.BORDER};
+        border-radius: 10px;
+    }}
     QLabel#PageEyebrow {{
         color: {Theme.ACCENT};
         font-size: 11px;
@@ -90,6 +95,15 @@ def build_stylesheet() -> str:
     QLabel#CardTitle {{ color: {Theme.TEXT}; font-size: 15px; font-weight: 700; }}
     QLabel#SectionTitle {{ color: {Theme.TEXT}; font-size: 12px; font-weight: 700; }}
     QLabel#CardCaption {{ color: {Theme.TEXT_MUTED}; font-size: 12px; }}
+    QLabel#Tag {{
+        color: {Theme.INFO};
+        background: {Theme.INFO_SOFT};
+        border: 1px solid #51477F;
+        border-radius: 5px;
+        padding: 3px 7px;
+        font-size: 10px;
+        font-weight: 700;
+    }}
     QLabel#MetricValue {{ color: {Theme.TEXT}; font-size: 24px; font-weight: 700; }}
     QLabel#MetricLabel {{ color: {Theme.TEXT_MUTED}; font-size: 11px; }}
     QLabel#Mono {{ font-family: "Cascadia Mono"; color: {Theme.TEXT_MUTED}; }}
@@ -124,10 +138,13 @@ def build_stylesheet() -> str:
     QPushButton#PrimaryButton {{ background: {Theme.ACCENT}; color: #07131A; border: none; }}
     QPushButton#PrimaryButton:hover {{ background: #D9FF8A; }}
     QPushButton#PrimaryButton:pressed {{ background: {Theme.ACCENT_DARK}; color: {Theme.BG}; }}
+    QPushButton#PrimaryButton:focus {{ border: 2px solid {Theme.WHITE}; }}
     QPushButton#DangerButton {{ background: {Theme.DANGER_SOFT}; color: #FFD8DB; border-color: {Theme.DANGER_DARK}; }}
     QPushButton#DangerButton:hover {{ background: {Theme.DANGER_DARK}; color: {Theme.WHITE}; }}
+    QPushButton#DangerButton:focus {{ border: 2px solid {Theme.ACCENT}; }}
     QPushButton#QuietButton {{ background: transparent; border-color: transparent; color: {Theme.TEXT_MUTED}; }}
     QPushButton#QuietButton:hover {{ background: {Theme.SURFACE_HOVER}; color: {Theme.TEXT}; }}
+    QPushButton#QuietButton:focus {{ border: 1px solid {Theme.ACCENT}; }}
     QToolButton#NavButton {{
         text-align: left;
         background: transparent;

@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QUrl, Qt
+from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -22,14 +21,12 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from gui.theme import Theme
 from services.coc.models import CocLaunchProfile
 from utils.config import as_bool
 
@@ -79,7 +76,7 @@ class TextInputDialog(QDialog):
 
 
 class TelegramDialog(QDialog):
-    def __init__(self, params: dict[str, str], guide_path: Path | None, on_save: Callable[[dict[str, str]], None], parent=None):
+    def __init__(self, params: dict[str, str], guide_path: Path | None, on_save: Callable[[dict[str, str]], bool], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Telegram")
         self.setMinimumWidth(560)
@@ -141,20 +138,16 @@ class TelegramDialog(QDialog):
         if self.token.text().strip():
             self.params["telegram_bot_token"] = self.token.text().strip()
         self.params["telegram_chat_id"] = chat_text
-        self.on_save(self.params)
-        self.accept()
+        if self.on_save(self.params):
+            self.accept()
 
 
 class SettingsDialog(QDialog):
     def __init__(
         self,
         params: dict[str, str],
-        on_save: Callable[[dict[str, str]], None],
-        on_telegram: Callable[[], None],
-        on_diagnostics: Callable[[], None],
+        on_save: Callable[[dict[str, str]], bool],
         on_shutdown: Callable[[], None],
-        telegram_status: str,
-        telegram_color: str,
         parent=None,
     ):
         super().__init__(parent)
@@ -162,13 +155,11 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(620)
         self.params = params
         self.on_save = on_save
-        self.on_telegram = on_telegram
-        self.on_diagnostics = on_diagnostics
         self.on_shutdown = on_shutdown
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 20)
-        layout.addWidget(_title_block("Settings", "Playback, CoC and Telegram settings."))
+        layout.addWidget(_title_block("Settings", "Playback and Clash of Clans settings."))
 
         playback = QFrame()
         playback.setObjectName("Card")
@@ -187,21 +178,6 @@ class SettingsDialog(QDialog):
         playback_layout.addWidget(self.safeguard)
         layout.addWidget(playback)
 
-        telegram = QFrame()
-        telegram.setObjectName("Card")
-        tg_layout = QGridLayout(telegram)
-        tg_layout.setContentsMargins(16, 14, 16, 14)
-        tg_title = QLabel("Telegram")
-        tg_title.setObjectName("CardTitle")
-        tg_layout.addWidget(tg_title, 0, 0, 1, 2)
-        status = QLabel(f"●  {telegram_status}")
-        status.setStyleSheet(f"color: {telegram_color}; font-weight: 700;")
-        tg_layout.addWidget(status, 1, 0)
-        tg_button = QPushButton("Configure Telegram")
-        tg_button.clicked.connect(self.on_telegram)
-        tg_layout.addWidget(tg_button, 1, 1, alignment=Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(telegram)
-
         system = QFrame()
         system.setObjectName("Card")
         system_layout = QVBoxLayout(system)
@@ -210,10 +186,10 @@ class SettingsDialog(QDialog):
         system_title.setObjectName("CardTitle")
         system_layout.addWidget(system_title)
         path_row = QHBoxLayout()
-        path_label = QLabel("CoC launcher")
+        path_label = QLabel("CoC launcher (optional)")
         path_label.setObjectName("CardCaption")
         self.coc_path = QLineEdit(params.get("coc_path", ""))
-        self.coc_path.setPlaceholderText("Path to the CoC .exe or .lnk")
+        self.coc_path.setPlaceholderText("Auto-detect, or choose an .exe / .lnk")
         self.coc_path.setAccessibleName("CoC launcher path")
         browse = QPushButton("Browse")
         browse.clicked.connect(self._browse)
@@ -227,9 +203,11 @@ class SettingsDialog(QDialog):
         self.process_names = QLineEdit(params.get("coc_process_names", ""))
         self.process_names.setPlaceholderText("ex. wsaClient.exe|ClashOfClans.exe")
         self.process_names.setToolTip("Process names separated by |.")
+        self.process_names.setAccessibleName("Clash of Clans process names")
         self.window_titles = QLineEdit(params.get("coc_window_titles", "Clash of Clans"))
         self.window_titles.setPlaceholderText("ex. Clash of Clans|Google Play Games")
         self.window_titles.setToolTip("Window title fragments separated by |.")
+        self.window_titles.setAccessibleName("Clash of Clans window titles")
         self.process_path_hint = QLineEdit(params.get("coc_process_path_hint", ""))
         self.process_path_hint.setPlaceholderText("Optional .exe path fragment")
         self.process_path_hint.setAccessibleName("CoC process path fragment")
@@ -263,17 +241,14 @@ class SettingsDialog(QDialog):
         detection.addWidget(QLabel("Detection interval"), 5, 0)
         detection.addWidget(self.detection_interval, 5, 1)
         system_layout.addLayout(detection)
-        hint = QLabel("The launcher is considered ready only after CoC is detected.")
+        hint = QLabel("Leave the path empty to search Windows shortcuts automatically. A launch succeeds only after CoC is detected.")
         hint.setObjectName("CardCaption")
         hint.setWordWrap(True)
         system_layout.addWidget(hint)
         maintenance = QHBoxLayout()
-        diagnostics = QPushButton("Diagnostics")
-        diagnostics.clicked.connect(self.on_diagnostics)
         shutdown = QPushButton("Shut down PC")
         shutdown.setObjectName("DangerButton")
         shutdown.clicked.connect(self._confirm_shutdown)
-        maintenance.addWidget(diagnostics)
         maintenance.addStretch()
         maintenance.addWidget(shutdown)
         system_layout.addLayout(maintenance)
@@ -306,49 +281,5 @@ class SettingsDialog(QDialog):
         self.params["coc_startup_timeout"] = str(self.startup_timeout.value())
         self.params["coc_detection_interval"] = f"{self.detection_interval.value():g}"
         self.params["coc_missing_tolerance"] = str(self.missing_tolerance.value())
-        self.on_save(self.params)
-        self.accept()
-
-
-class DiagnosticsDialog(QDialog):
-    def __init__(self, *, telegram_status: str, pil_available: bool, mss_available: bool, log_path: Path, base_dir: Path, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Diagnostics")
-        self.resize(720, 560)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 20)
-        layout.addWidget(_title_block("Diagnostics", "Dependencies, environment and recent activity."))
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(22)
-        grid.setVerticalSpacing(10)
-        rows = [
-            ("Telegram", telegram_status, Theme.ACCENT if telegram_status == "Connected" else Theme.WARNING),
-            ("Pillow", "Available" if pil_available else "Unavailable", Theme.ACCENT if pil_available else Theme.DANGER),
-            ("MSS", "Available" if mss_available else "Fallback active", Theme.ACCENT if mss_available else Theme.WARNING),
-            ("Free disk", f"{shutil.disk_usage(base_dir).free / (1024 ** 3):.1f} GB free", Theme.TEXT),
-        ]
-        for row, (label, value, color) in enumerate(rows):
-            key = QLabel(label)
-            key.setObjectName("CardCaption")
-            value_label = QLabel(value)
-            value_label.setStyleSheet(f"color: {color}; font-weight: 700;")
-            grid.addWidget(key, row, 0)
-            grid.addWidget(value_label, row, 1)
-        layout.addLayout(grid)
-
-        logs_title = QLabel("Recent activity")
-        logs_title.setObjectName("CardTitle")
-        layout.addWidget(logs_title)
-        log_view = QPlainTextEdit()
-        log_view.setReadOnly(True)
-        log_view.setObjectName("Mono")
-        try:
-            lines = log_path.read_text(encoding="utf-8").splitlines()[-12:]
-            log_view.setPlainText("\n".join(lines) if lines else "No log available.")
-        except OSError as exc:
-            log_view.setPlainText(f"Could not read logs: {exc}")
-        layout.addWidget(log_view, 1)
-        close = QPushButton("Close")
-        close.clicked.connect(self.accept)
-        layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+        if self.on_save(self.params):
+            self.accept()

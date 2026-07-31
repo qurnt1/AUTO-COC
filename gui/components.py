@@ -42,7 +42,7 @@ class NavButton(QToolButton):
 class StatusPill(QFrame):
     def __init__(self, label: str, value: str = "—", color: str = Theme.TEXT_MUTED, parent=None):
         super().__init__(parent)
-        self.setObjectName("Card")
+        self.setObjectName("StatusPill")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(7)
@@ -92,7 +92,9 @@ class MacroListModel(QAbstractListModel):
         if not index.isValid() or not (0 <= index.row() < len(self._items)):
             return None
         item = self._items[index.row()]
-        if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.UserRole:
+        if role == Qt.ItemDataRole.DisplayRole:
+            return item.name
+        if role == Qt.ItemDataRole.UserRole:
             return item
         return None
 
@@ -245,66 +247,3 @@ class MacroLibrary(QFrame):
         user_selected = bool(self.view.selectionModel().selectedIndexes())
         self.rename_button.setEnabled(user_selected)
         self.delete_button.setEnabled(user_selected)
-
-
-class ActivityFeed(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("Card")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 10)
-        layout.setSpacing(8)
-        header = QHBoxLayout()
-        title = QLabel("Activity")
-        title.setObjectName("CardTitle")
-        self.clear_button = QPushButton("Clear")
-        self.clear_button.setObjectName("QuietButton")
-        self.clear_button.clicked.connect(self.clear)
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self.clear_button)
-        layout.addLayout(header)
-        self.list = QListView()
-        self.list.setObjectName("ActivityList")
-        self.list.setMaximumHeight(180)
-        self.list.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
-        layout.addWidget(self.list)
-        self._model = _ActivityModel(self)
-        self.list.setModel(self._model)
-
-    def add(self, message: str, level: str = "info") -> None:
-        self._model.add(message, level)
-        self.list.scrollToTop()
-
-    def clear(self) -> None:
-        self._model.clear()
-
-
-class _ActivityModel(QAbstractListModel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._items: list[tuple[str, str]] = []
-
-    def rowCount(self, parent=QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self._items)
-
-    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or index.row() >= len(self._items):
-            return None
-        text, level = self._items[index.row()]
-        if role == Qt.ItemDataRole.DisplayRole:
-            return text
-        if role == Qt.ItemDataRole.ForegroundRole:
-            return QColor({"success": Theme.ACCENT, "warning": Theme.WARNING, "error": Theme.DANGER}.get(level, Theme.TEXT_MUTED))
-        return None
-
-    def add(self, message: str, level: str) -> None:
-        self.beginResetModel()
-        self._items.insert(0, (message, level))
-        self._items = self._items[:30]
-        self.endResetModel()
-
-    def clear(self) -> None:
-        self.beginResetModel()
-        self._items.clear()
-        self.endResetModel()
