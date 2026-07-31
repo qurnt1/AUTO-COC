@@ -31,16 +31,16 @@ class CocLauncher:
         if configured_target is None:
             return CocLaunchResult(False, message="Aucun lanceur CoC configuré.")
         target = self._resolve_target(configured_target)
-        if not target.exists():
+        if not target.exists() or not target.is_file():
             return CocLaunchResult(False, message=f"Le lanceur CoC est introuvable : {configured_target}")
         try:
             if target.suffix.casefold() == ".exe":
                 process = subprocess.Popen([str(target)], cwd=str(target.parent), close_fds=True)
                 return CocLaunchResult(True, pid=process.pid, message="Lancement CoC demandé.")
-            if os.name == "nt":
+            if target.suffix.casefold() == ".lnk" and os.name == "nt":
                 os.startfile(str(target))
                 return CocLaunchResult(True, message="Lancement CoC demandé via le raccourci Windows.")
-            return CocLaunchResult(False, message="Le lancement CoC est disponible sur Windows uniquement.")
+            return CocLaunchResult(False, message="Le lanceur CoC doit être un fichier .exe ou un raccourci .lnk Windows.")
         except OSError as exc:
             return CocLaunchResult(False, message=str(exc))
 

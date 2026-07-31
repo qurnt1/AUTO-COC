@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -23,11 +24,13 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from gui.theme import Theme
+from services.coc.models import CocLaunchProfile
 from utils.config import as_bool
 
 
@@ -207,25 +210,58 @@ class SettingsDialog(QDialog):
         system_title.setObjectName("CardTitle")
         system_layout.addWidget(system_title)
         path_row = QHBoxLayout()
+        path_label = QLabel("Lanceur CoC")
+        path_label.setObjectName("CardCaption")
         self.coc_path = QLineEdit(params.get("coc_path", ""))
         self.coc_path.setPlaceholderText("Chemin vers le .exe ou .lnk de CoC")
+        self.coc_path.setAccessibleName("Chemin du lanceur CoC")
         browse = QPushButton("Parcourir")
         browse.clicked.connect(self._browse)
+        path_row.addWidget(path_label)
         path_row.addWidget(self.coc_path, 1)
         path_row.addWidget(browse)
         system_layout.addLayout(path_row)
         detection = QGridLayout()
         detection.setHorizontalSpacing(10)
+        coc_profile = CocLaunchProfile.from_params(params)
         self.process_names = QLineEdit(params.get("coc_process_names", ""))
         self.process_names.setPlaceholderText("ex. wsaClient.exe|ClashOfClans.exe")
         self.process_names.setToolTip("Noms de processus séparés par |. Laisser vide si le titre de fenêtre suffit.")
         self.window_titles = QLineEdit(params.get("coc_window_titles", "Clash of Clans"))
         self.window_titles.setPlaceholderText("ex. Clash of Clans|Google Play Games")
         self.window_titles.setToolTip("Fragments de titres séparés par |.")
+        self.process_path_hint = QLineEdit(params.get("coc_process_path_hint", ""))
+        self.process_path_hint.setPlaceholderText("Fragment de chemin .exe (optionnel)")
+        self.process_path_hint.setAccessibleName("Fragment de chemin du processus CoC")
+        self.startup_timeout = QSpinBox()
+        self.startup_timeout.setRange(5, 300)
+        self.startup_timeout.setValue(int(coc_profile.startup_timeout))
+        self.startup_timeout.setSuffix(" s")
+        self.startup_timeout.setAccessibleName("Délai de confirmation CoC")
+        self.detection_interval = QDoubleSpinBox()
+        self.detection_interval.setRange(0.25, 5.0)
+        self.detection_interval.setDecimals(2)
+        self.detection_interval.setSingleStep(0.25)
+        self.detection_interval.setValue(coc_profile.detection_interval)
+        self.detection_interval.setSuffix(" s")
+        self.detection_interval.setAccessibleName("Intervalle de détection CoC")
+        self.missing_tolerance = QSpinBox()
+        self.missing_tolerance.setRange(1, 10)
+        self.missing_tolerance.setValue(coc_profile.missing_tolerance)
+        self.missing_tolerance.setSuffix(" contrôles")
+        self.missing_tolerance.setAccessibleName("Tolérance d’absence CoC")
         detection.addWidget(QLabel("Processus CoC"), 0, 0)
         detection.addWidget(self.process_names, 0, 1)
         detection.addWidget(QLabel("Titres de fenêtre"), 1, 0)
         detection.addWidget(self.window_titles, 1, 1)
+        detection.addWidget(QLabel("Chemin processus"), 2, 0)
+        detection.addWidget(self.process_path_hint, 2, 1)
+        detection.addWidget(QLabel("Confirmation lancement"), 3, 0)
+        detection.addWidget(self.startup_timeout, 3, 1)
+        detection.addWidget(QLabel("Tolérance safeguard"), 4, 0)
+        detection.addWidget(self.missing_tolerance, 4, 1)
+        detection.addWidget(QLabel("Intervalle détection"), 5, 0)
+        detection.addWidget(self.detection_interval, 5, 1)
         system_layout.addLayout(detection)
         hint = QLabel("AUTO-COC vérifie d’abord la présence réelle de CoC. Le bouton de lancement ouvre l’application configurée, puis la détection confirme son arrivée.")
         hint.setObjectName("CardCaption")
@@ -266,6 +302,10 @@ class SettingsDialog(QDialog):
         self.params["coc_path"] = self.coc_path.text().strip()
         self.params["coc_process_names"] = self.process_names.text().strip()
         self.params["coc_window_titles"] = self.window_titles.text().strip() or "Clash of Clans"
+        self.params["coc_process_path_hint"] = self.process_path_hint.text().strip()
+        self.params["coc_startup_timeout"] = str(self.startup_timeout.value())
+        self.params["coc_detection_interval"] = f"{self.detection_interval.value():g}"
+        self.params["coc_missing_tolerance"] = str(self.missing_tolerance.value())
         self.on_save(self.params)
         self.accept()
 

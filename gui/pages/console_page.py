@@ -176,7 +176,9 @@ class ConsolePage(QWidget):
         self.library.setEnabled(not busy)
 
     def set_coc_presence(self, snapshot) -> None:
-        if snapshot.present:
+        if snapshot.error:
+            self.coc_status.set_status("Détection indisponible", Theme.WARNING)
+        elif snapshot.present:
             detail = "Processus détecté" if snapshot.process_found else "Fenêtre détectée"
             self.coc_status.set_status(detail, Theme.ACCENT)
         else:

@@ -81,3 +81,4 @@ class CocPresence:
     process_names: tuple[str, ...] = field(default_factory=tuple)
     window_titles: tuple[str, ...] = field(default_factory=tuple)
     reason: str = ""
+    error: str = ""

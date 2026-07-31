@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from ctypes import wintypes
 
 import psutil
 
@@ -20,13 +21,20 @@ class CocDetector:
         self.log = get_logger()
 
     def snapshot(self) -> CocPresence:
-        processes = self._matching_processes()
-        windows = self._matching_windows()
+        processes, process_error = self._matching_processes()
+        process_pids = {pid for pid, _ in processes}
+        pid_filter = process_pids if (self.profile.process_names or self.profile.process_path_hint) else None
+        windows, window_error = self._matching_windows(pid_filter)
         process_names = tuple(sorted({name for _, name in processes}))
         pids = tuple(sorted({pid for pid, _ in processes}))
         window_titles = tuple(title for title, _ in windows)
         present = bool(processes or windows)
-        reason = "Processus CoC détecté" if processes else "Fenêtre CoC détectée" if windows else "CoC introuvable"
+        errors = tuple(error for error in (process_error, window_error) if error)
+        error = " · ".join(errors)
+        if error and not present:
+            reason = "Détection CoC indisponible"
+        else:
+            reason = "Processus CoC détecté" if processes else "Fenêtre CoC détectée" if windows else "CoC introuvable"
         return CocPresence(
             present=present,
             process_found=bool(processes),
@@ -35,12 +43,14 @@ class CocDetector:
             process_names=process_names,
             window_titles=window_titles,
             reason=reason,
+            error=error,
         )
 
-    def _matching_processes(self) -> list[tuple[int, str]]:
+    def _matching_processes(self) -> tuple[list[tuple[int, str]], str]:
         expected_names = {name.casefold() for name in self.profile.process_names}
         path_hint = self.profile.process_path_hint.casefold()
         matches: list[tuple[int, str]] = []
+        error = ""
         try:
             for process in psutil.process_iter(["pid", "name", "exe"]):
                 try:
@@ -53,39 +63,66 @@ class CocDetector:
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
         except Exception as exc:
+            error = f"processus : {exc}"
             self.log.warning("Détection processus CoC impossible : %s", exc)
-        return matches
+        return matches, error
 
-    def _matching_windows(self) -> list[tuple[str, int]]:
+    def _matching_windows(self, allowed_pids: set[int] | None = None) -> tuple[list[tuple[str, int]], str]:
         if os.name != "nt" or not self.profile.window_titles:
-            return []
+            return [], ""
         patterns = tuple(pattern.casefold() for pattern in self.profile.window_titles)
         matches: list[tuple[str, int]] = []
-        user32 = ctypes.windll.user32
-        enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-        enum_windows = user32.EnumWindows
-        enum_windows.argtypes = [enum_proc_type, ctypes.c_void_p]
-        enum_windows.restype = ctypes.c_bool
-        get_window_text_length = user32.GetWindowTextLengthW
-        get_window_text = user32.GetWindowTextW
-        get_pid = user32.GetWindowThreadProcessId
+        errors: list[str] = []
+        try:
+            user32 = ctypes.windll.user32
+            enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            enum_windows = user32.EnumWindows
+            enum_windows.argtypes = [enum_proc_type, wintypes.LPARAM]
+            enum_windows.restype = wintypes.BOOL
+            get_window_text_length = user32.GetWindowTextLengthW
+            get_window_text_length.argtypes = [wintypes.HWND]
+            get_window_text_length.restype = ctypes.c_int
+            get_window_text = user32.GetWindowTextW
+            get_window_text.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            get_window_text.restype = ctypes.c_int
+            get_pid = user32.GetWindowThreadProcessId
+            get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            get_pid.restype = wintypes.DWORD
+            is_window_visible = user32.IsWindowVisible
+            is_window_visible.argtypes = [wintypes.HWND]
+            is_window_visible.restype = wintypes.BOOL
+        except Exception as exc:
+            error = f"fenêtres : {exc}"
+            self.log.warning("Détection fenêtre CoC impossible : %s", exc)
+            return [], error
 
         @enum_proc_type
         def callback(hwnd, _lparam):
-            length = get_window_text_length(hwnd)
-            if length <= 0:
-                return True
-            buffer = ctypes.create_unicode_buffer(length + 1)
-            get_window_text(hwnd, buffer, length + 1)
-            title = buffer.value.strip()
-            if title and any(pattern in title.casefold() for pattern in patterns):
-                pid = ctypes.c_ulong()
+            try:
+                if not is_window_visible(hwnd):
+                    return True
+                length = get_window_text_length(hwnd)
+                if length <= 0:
+                    return True
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                get_window_text(hwnd, buffer, length + 1)
+                title = buffer.value.strip()
+                if not title or not any(pattern in title.casefold() for pattern in patterns):
+                    return True
+                pid = wintypes.DWORD()
                 get_pid(hwnd, ctypes.byref(pid))
+                if allowed_pids is not None and int(pid.value) not in allowed_pids:
+                    return True
                 matches.append((title, int(pid.value)))
+            except Exception as exc:
+                errors.append(str(exc))
             return True
 
         try:
             enum_windows(callback, 0)
         except Exception as exc:
-            self.log.warning("Détection fenêtre CoC impossible : %s", exc)
-        return matches
+            errors.append(str(exc))
+        error = f"fenêtres : {'; '.join(errors)}" if errors else ""
+        if error:
+            self.log.warning("Détection fenêtre CoC impossible : %s", error)
+        return matches, error

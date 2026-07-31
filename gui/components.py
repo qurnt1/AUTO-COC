@@ -139,6 +139,41 @@ class MacroDelegate(QStyledItemDelegate):
         return QSize(260, 72)
 
 
+class SystemRoutineDelegate(QStyledItemDelegate):
+    """Render protected routines as operational capabilities, not macros."""
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        item: MacroSummary = index.data(Qt.ItemDataRole.UserRole)
+        rect = option.rect.adjusted(6, 4, -6, -4)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(Theme.SURFACE_RAISED))
+        painter.drawRoundedRect(rect, 9, 9)
+        painter.setPen(QColor(Theme.TEXT))
+        painter.drawText(
+            QRect(rect.left() + 13, rect.top() + 9, rect.width() - 120, 20),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            item.name,
+        )
+        painter.setPen(QColor(Theme.TEXT_MUTED))
+        painter.drawText(
+            QRect(rect.left() + 13, rect.bottom() - 25, rect.width() - 26, 17),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            item.description or "Routine intégrée à AUTO-COC",
+        )
+        painter.setPen(QColor(Theme.WARNING))
+        painter.drawText(
+            rect.adjusted(0, 0, -13, -1),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            "SYSTÈME",
+        )
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        return QSize(260, 64)
+
+
 class MacroLibrary(QFrame):
     macro_selected = pyqtSignal(str)
     create_requested = pyqtSignal()
@@ -170,7 +205,8 @@ class MacroLibrary(QFrame):
 
         self.model = MacroListModel(self)
         self.system_model = MacroListModel(self)
-        self._filter_callback: Callable[[], None] = lambda: None
+        self._all_items: list[MacroSummary] = []
+        self._filter_callback: Callable[[], None] | None = None
         self._updating = False
         self.view = QListView()
         self.view.setModel(self.model)
@@ -183,9 +219,9 @@ class MacroLibrary(QFrame):
         layout.addWidget(self.view, 1)
 
         system_header = QHBoxLayout()
-        system_title = QLabel("Routines intégrées")
+        system_title = QLabel("Routines système")
         system_title.setObjectName("SectionTitle")
-        system_caption = QLabel("Gérées par AUTO-COC")
+        system_caption = QLabel("Pilotées par AUTO-COC")
         system_caption.setObjectName("CardCaption")
         system_header.addWidget(system_title)
         system_header.addStretch()
@@ -195,10 +231,10 @@ class MacroLibrary(QFrame):
         self.system_view = QListView()
         self.system_view.setObjectName("SystemRoutineList")
         self.system_view.setModel(self.system_model)
-        self.system_view.setItemDelegate(MacroDelegate(self.system_view))
-        self.system_view.setSelectionMode(QListView.SelectionMode.SingleSelection)
-        self.system_view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
-        self.system_view.setMouseTracking(True)
+        self.system_view.setItemDelegate(SystemRoutineDelegate(self.system_view))
+        self.system_view.setSelectionMode(QListView.SelectionMode.NoSelection)
+        self.system_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.system_view.setCursor(Qt.CursorShape.ArrowCursor)
         self.system_view.setSpacing(3)
         self.system_view.setMaximumHeight(160)
         self.system_view.setAccessibleName("Liste des routines intégrées")
@@ -220,14 +256,14 @@ class MacroLibrary(QFrame):
 
         self.search.textChanged.connect(self._filter)
         self.view.selectionModel().currentChanged.connect(lambda current, _previous: self._select(current) if current.isValid() else None)
-        self.system_view.selectionModel().currentChanged.connect(lambda current, _previous: self._select_system(current) if current.isValid() else None)
         self.create_button.clicked.connect(self.create_requested)
         self.rename_button.clicked.connect(self.rename_requested)
         self.delete_button.clicked.connect(self.delete_requested)
 
     def set_items(self, items: Iterable[MacroSummary], selected_name: str | None = None) -> None:
         self._updating = True
-        all_items = list(items)
+        self._all_items = list(items)
+        all_items = list(self._all_items)
         query = self.search.text().strip().lower()
         if query:
             all_items = [item for item in all_items if query in item.name.lower() or query in item.description.lower()]
@@ -242,11 +278,6 @@ class MacroLibrary(QFrame):
                 if item and item.name == selected_name:
                     self.view.setCurrentIndex(self.model.index(row, 0))
                     break
-            for row in range(self.system_model.rowCount()):
-                item = self.system_model.item_at(row)
-                if item and item.name == selected_name:
-                    self.system_view.setCurrentIndex(self.system_model.index(row, 0))
-                    break
         self._updating = False
         self._update_actions()
 
@@ -255,12 +286,13 @@ class MacroLibrary(QFrame):
         item = self.model.item_at(user_indexes[0].row()) if user_indexes else None
         if item:
             return item.name
-        system_indexes = self.system_view.selectionModel().selectedIndexes()
-        item = self.system_model.item_at(system_indexes[0].row()) if system_indexes else None
-        return item.name if item else None
+        return None
 
     def _filter(self) -> None:
-        self._filter_callback()
+        if self._filter_callback:
+            self._filter_callback()
+        else:
+            self.set_items(self._all_items, self.selected_name())
 
     def set_filter_callback(self, callback: Callable[[], None]) -> None:
         self._filter_callback = callback
@@ -271,15 +303,6 @@ class MacroLibrary(QFrame):
         item = self.model.item_at(index.row())
         if item:
             self.system_view.clearSelection()
-            self.macro_selected.emit(item.name)
-        self._update_actions()
-
-    def _select_system(self, index: QModelIndex) -> None:
-        if self._updating:
-            return
-        item = self.system_model.item_at(index.row())
-        if item:
-            self.view.clearSelection()
             self.macro_selected.emit(item.name)
         self._update_actions()
 

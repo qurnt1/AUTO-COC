@@ -123,7 +123,7 @@ def build_stylesheet() -> str:
     QPushButton:disabled {{ color: {Theme.TEXT_SUBTLE}; background: {Theme.SURFACE}; border-color: {Theme.BORDER}; }}
     QPushButton#PrimaryButton {{ background: {Theme.ACCENT}; color: #07131A; border: none; }}
     QPushButton#PrimaryButton:hover {{ background: #D9FF8A; }}
-    QPushButton#PrimaryButton:pressed {{ background: {Theme.ACCENT_DARK}; color: {Theme.WHITE}; }}
+    QPushButton#PrimaryButton:pressed {{ background: {Theme.ACCENT_DARK}; color: {Theme.BG}; }}
     QPushButton#DangerButton {{ background: {Theme.DANGER_SOFT}; color: #FFD8DB; border-color: {Theme.DANGER_DARK}; }}
     QPushButton#DangerButton:hover {{ background: {Theme.DANGER_DARK}; color: {Theme.WHITE}; }}
     QPushButton#QuietButton {{ background: transparent; border-color: transparent; color: {Theme.TEXT_MUTED}; }}

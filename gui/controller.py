@@ -10,7 +10,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QTimer, QObject, Qt, pyqtSignal
 
 from gui.models import MacroSummary
 from models.macro import Macro, is_protected_macro
@@ -53,6 +53,11 @@ class RuntimeSignals(QObject):
     telegram_status = pyqtSignal(str, str)
     coc_presence_changed = pyqtSignal(object)
     safeguard_triggered = pyqtSignal(str)
+    coc_snapshot_observed = pyqtSignal(object)
+    coc_lost_observed = pyqtSignal(object)
+    coc_detection_error_observed = pyqtSignal(str)
+    player_cycle_observed = pyqtSignal()
+    player_stopped_observed = pyqtSignal()
 
 
 class RuntimeController(QObject):
@@ -101,16 +106,25 @@ class RuntimeController(QObject):
             self.coc_detector,
             self.coc_profile.detection_interval,
             self.coc_profile.missing_tolerance,
-            self._on_coc_snapshot,
-            self._on_coc_lost,
+            lambda snapshot: self.signals.coc_snapshot_observed.emit(snapshot),
+            lambda snapshot: self.signals.coc_lost_observed.emit(snapshot),
+            lambda detail: self.signals.coc_detection_error_observed.emit(detail),
         )
+        self._coc_launch_timer = QTimer(self)
+        self._coc_launch_timer.setSingleShot(True)
+        self._coc_launch_timer.timeout.connect(self._on_coc_launch_timeout)
         self._closing = False
         self._bootstrapped = False
 
         self.recorder = Recorder()
         self.player = Player(self.recorder)
-        self.player.on_cycle = self._player_cycle
-        self.player.on_stopped = self._player_stopped
+        self.player.on_cycle = lambda: self.signals.player_cycle_observed.emit()
+        self.player.on_stopped = lambda: self.signals.player_stopped_observed.emit()
+        self.signals.coc_snapshot_observed.connect(self._apply_coc_snapshot, Qt.ConnectionType.QueuedConnection)
+        self.signals.coc_lost_observed.connect(self._handle_coc_lost, Qt.ConnectionType.QueuedConnection)
+        self.signals.coc_detection_error_observed.connect(self._handle_coc_detection_error, Qt.ConnectionType.QueuedConnection)
+        self.signals.player_cycle_observed.connect(self._player_cycle, Qt.ConnectionType.QueuedConnection)
+        self.signals.player_stopped_observed.connect(self._player_stopped, Qt.ConnectionType.QueuedConnection)
 
     @property
     def is_busy(self) -> bool:
@@ -137,10 +151,11 @@ class RuntimeController(QObject):
         self.refresh_macros()
         self._emit_telegram_status()
         last = self.params.get("last_macro", "").strip()
-        if last and any(item.name == last for item in self._summaries):
+        editable_items = [item for item in self._summaries if item.editable]
+        if last and any(item.name == last for item in editable_items):
             self.select_macro(last)
-        elif self._summaries:
-            self.select_macro(self._summaries[0].name)
+        elif editable_items:
+            self.select_macro(editable_items[0].name)
         self._activity("Console prête", "success")
         if self.telegram.is_ready:
             self.telegram.send_message(f"Macro COC v{self.app_version} lancée.")
@@ -169,6 +184,9 @@ class RuntimeController(QObject):
 
     def select_macro(self, name: str) -> None:
         if self.is_busy:
+            return
+        if is_protected_macro(name):
+            self._error("Cette routine système n’est pas une macro utilisateur.", "Elle est pilotée par les commandes système dédiées.")
             return
         path = macro_path_from_name(self.macros_dir, name)
         if not path.exists():
@@ -290,20 +308,26 @@ class RuntimeController(QObject):
             return False
         self.refresh_coc_presence()
         if self.safeguard_enabled and not self.coc_presence.present:
-            self._error("CoC n’est pas détecté.", "Le safeguard bloque la macro tant que CoC n’est pas présent.")
+            detail = "La détection CoC est indisponible."
+            if not self.coc_presence.error:
+                detail = "Le safeguard bloque la macro tant que CoC n’est pas présent."
+            self._error("CoC non vérifié.", detail)
             return False
         try:
             self._cycles = 0
             self._playback_duration = self.current_macro.duration()
             self._playback_started_at = time.perf_counter()
-            self.player.play([step.to_dict() for step in self.current_macro.steps], loop=self.auto_loop)
+            self._safeguard_triggered = False
+            self._set_state(RuntimeState.PLAYING, "Lecture")
             if self.safeguard_enabled:
                 self.coc_monitor.arm()
-                self._safeguard_triggered = False
+            self.player.play([step.to_dict() for step in self.current_macro.steps], loop=self.auto_loop)
         except Exception as exc:
+            self.coc_monitor.disarm()
+            self._playback_started_at = None
+            self._set_state(RuntimeState.IDLE, "Prêt")
             self._error("Impossible de démarrer la lecture.", str(exc))
             return False
-        self._set_state(RuntimeState.PLAYING, "Lecture")
         self._activity(f"Lecture démarrée · {self.current_macro_name}", "success")
         self._replace_tg_controls("Lecture")
         return True
@@ -321,11 +345,26 @@ class RuntimeController(QObject):
     def set_safeguard(self, enabled: bool) -> None:
         self.params["coc_safeguard"] = "1" if enabled else "0"
         self.save_params()
+        self._apply_safeguard_state(enabled)
+        self._activity(f"Safeguard CoC · {'activé' if enabled else 'désactivé'}", "info")
+
+    def sync_safeguard_state(self) -> None:
+        """Apply a value loaded from the settings dialog without rewriting it."""
+        self._apply_safeguard_state(self.safeguard_enabled)
+
+    def _apply_safeguard_state(self, enabled: bool) -> None:
         if not enabled:
             self.coc_monitor.disarm()
-        elif self.state == RuntimeState.PLAYING and self.coc_presence.present:
+            return
+        if self.state != RuntimeState.PLAYING:
+            return
+        self.refresh_coc_presence()
+        if self.coc_presence.error:
+            self._activity("Safeguard en attente · détection CoC indisponible", "warning")
+        elif not self.coc_presence.present:
+            self.handle_safeguard_loss("CoC n’est plus détecté.")
+        else:
             self.coc_monitor.arm()
-        self._activity(f"Safeguard CoC · {'activé' if enabled else 'désactivé'}", "info")
 
     def refresh_coc_profile(self) -> None:
         self.coc_profile = CocLaunchProfile.from_params(self.params)
@@ -334,7 +373,7 @@ class RuntimeController(QObject):
         self.coc_monitor.missing_tolerance = self.coc_profile.missing_tolerance
 
     def refresh_coc_presence(self) -> None:
-        self._on_coc_snapshot(self.coc_detector.snapshot())
+        self._apply_coc_snapshot(self.coc_detector.snapshot())
 
     def update_metrics(self) -> None:
         now = time.perf_counter()
@@ -361,9 +400,23 @@ class RuntimeController(QObject):
         if not result.started:
             self._error("CoC n’a pas pu être lancé.", result.message)
             return False
+        self._coc_launch_timer.stop()
         self._coc_launched = result.already_present
-        self._activity("CoC déjà détecté" if result.already_present else "Lancement CoC demandé · vérification en cours", "success")
+        if result.already_present:
+            self._activity("CoC déjà détecté", "success")
+        else:
+            self._coc_launch_timer.start(int(self.coc_profile.startup_timeout * 1000))
+            self._activity("Lancement CoC demandé · vérification en cours", "success")
         return True
+
+    def _on_coc_launch_timeout(self) -> None:
+        if self.coc_presence.present:
+            return
+        self._coc_launched = False
+        detail = "Le lanceur a démarré, mais CoC n’a pas été détecté dans le délai configuré."
+        if self.coc_presence.error:
+            detail = f"La détection CoC est indisponible : {self.coc_presence.error}"
+        self._error("CoC non confirmé", detail)
 
     def capture_screen(self) -> None:
         if not self.telegram.is_ready:
@@ -406,7 +459,7 @@ class RuntimeController(QObject):
             self.set_auto_loop(not self.auto_loop)
             self._replace_tg_controls("Boucle mise à jour")
         elif command == "SELECT_MACRO_LIST":
-            self.telegram.push_macro_selection([item.name for item in self._summaries])
+            self.telegram.push_macro_selection([item.name for item in self._summaries if item.editable])
         elif command.startswith("SELECT_MACRO:"):
             self.select_macro(command.split(":", 1)[1])
         elif command == "RELOAD_COC":
@@ -431,7 +484,10 @@ class RuntimeController(QObject):
         if self.safeguard_enabled:
             self.refresh_coc_presence()
             if not self.coc_presence.present:
-                self._error("CoC n’est pas détecté.", "Le safeguard bloque la routine tant que CoC n’est pas présent.")
+                detail = "La détection CoC est indisponible."
+                if not self.coc_presence.error:
+                    detail = "Le safeguard bloque la routine tant que CoC n’est pas présent."
+                self._error("CoC non vérifié.", detail)
                 return
         path = macro_path_from_name(self.macros_dir, name)
         if not path.exists():
@@ -443,11 +499,18 @@ class RuntimeController(QObject):
             return
         self._playback_duration = sum(max(0.0, float(step.get("t", 0.0))) for step in steps)
         self._playback_started_at = time.perf_counter()
+        self._safeguard_triggered = False
         self._set_state(RuntimeState.PLAYING, f"Lecture · {name}")
-        self.player.play(steps, loop=False)
         if self.safeguard_enabled:
-            self._safeguard_triggered = False
             self.coc_monitor.arm()
+        try:
+            self.player.play(steps, loop=False)
+        except Exception as exc:
+            self.coc_monitor.disarm()
+            self._playback_started_at = None
+            self._set_state(RuntimeState.IDLE, "Prêt")
+            self._error("Impossible de lancer la routine système.", str(exc))
+            return
         self._replace_tg_controls(f"Lecture · {name}")
 
     def _ensure_protected_macros(self) -> None:
@@ -475,19 +538,29 @@ class RuntimeController(QObject):
             self._activity("Lecture terminée", "success")
             self._replace_tg_controls("Terminé")
 
-    def _on_coc_snapshot(self, snapshot: CocPresence) -> None:
+    def _apply_coc_snapshot(self, snapshot: CocPresence) -> None:
         self.coc_presence = snapshot
+        if snapshot.present and self._coc_launch_timer.isActive():
+            self._coc_launch_timer.stop()
+            self._activity("CoC détecté · lancement confirmé", "success")
         self._coc_launched = snapshot.present
         self._coc_running_for_tg = snapshot.present
         if self._bootstrapped and snapshot.present != self._coc_last_present:
-            self._activity(snapshot.reason, "success" if snapshot.present else "warning")
+            level = "success" if snapshot.present else "warning"
+            if snapshot.error:
+                level = "warning"
+            self._activity(snapshot.reason, level)
         self._coc_last_present = snapshot.present
         self.signals.coc_presence_changed.emit(snapshot)
 
-    def _on_coc_lost(self, snapshot: CocPresence) -> None:
+    def _handle_coc_lost(self, snapshot: CocPresence) -> None:
         if self.state == RuntimeState.PLAYING and self.safeguard_enabled:
             self.log.warning("Safeguard CoC déclenché : %s", snapshot.reason)
             self.signals.safeguard_triggered.emit("CoC n’est plus détecté.")
+
+    def _handle_coc_detection_error(self, detail: str) -> None:
+        self.log.warning("Détection CoC indisponible : %s", detail)
+        self.signals.activity.emit("Détection CoC indisponible · safeguard en attente", "warning")
 
     def handle_safeguard_loss(self, reason: str) -> None:
         if self.state != RuntimeState.PLAYING or not self.safeguard_enabled:

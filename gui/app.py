@@ -278,7 +278,9 @@ class MainWindow(QMainWindow):
 
     def _on_coc_presence(self, snapshot) -> None:
         self.console_page.set_coc_presence(snapshot)
-        if snapshot.present:
+        if snapshot.error:
+            self.coc_pill.set_status("Indisponible", Theme.WARNING)
+        elif snapshot.present:
             self.coc_pill.set_status("Détecté", Theme.ACCENT)
         else:
             self.coc_pill.set_status("Absent", Theme.WARNING)
@@ -342,6 +344,7 @@ class MainWindow(QMainWindow):
         self.controller.refresh_coc_profile()
         self.controller.refresh_coc_presence()
         self.controller.save_params()
+        self.controller.sync_safeguard_state()
         self._on_activity("Paramètres sauvegardés", "success")
 
     def open_telegram(self) -> None:
