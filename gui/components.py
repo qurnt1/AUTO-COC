@@ -1,191 +1,352 @@
 # -*- coding: utf-8 -*-
-"""
-Macro COC v3.0 — GUI / Components
+"""Reusable PyQt6 widgets for the AUTO-COC console."""
 
-Widgets réutilisables pour l'interface (MacroRow, MacroList).
-"""
+from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Iterable
 
-import customtkinter as ctk
+from PyQt6.QtCore import QAbstractListModel, QModelIndex, QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QPushButton,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from gui.theme import Theme
+from gui.models import MacroSummary
 from utils.config import fmt_duration_for_list
 
 
-class MacroRow:
-    """
-    Widget représentant une ligne de macro dans la liste.
-    Affiche le nom à gauche et la durée à droite.
-    """
-    
-    def __init__(
-        self,
-        parent: ctk.CTkFrame,
-        name: str,
-        duration_txt: str,
-        on_click: Callable[[str], None],
-        on_rclick: Callable,
-    ):
-        self.name = name
-        self._selected = False
-        
-        # Frame principale
-        self.frame = ctk.CTkFrame(parent, corner_radius=8, fg_color=Theme.ROW_BG)
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.columnconfigure(1, weight=0)
-        
-        # Label nom
-        self.lbl_name = ctk.CTkLabel(
-            self.frame,
-            text=name,
-            anchor="w",
-            text_color=Theme.TEXT_COMPLIANT
-        )
-        self.lbl_name.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=8)
-        
-        # Label durée
-        self.lbl_dur = ctk.CTkLabel(
-            self.frame,
-            text=duration_txt,
-            anchor="e",
-            text_color=Theme.ROW_DUR_COLOR
-        )
-        self.lbl_dur.grid(row=0, column=1, sticky="e", padx=(6, 10))
-        
-        # Événements
-        def bind_all(widget):
-            widget.bind("<Button-1>", lambda e: on_click(self.name))
-            widget.bind("<Enter>", lambda e: self._hover(True))
-            widget.bind("<Leave>", lambda e: self._hover(False))
-            widget.bind("<Button-3>", lambda e: on_rclick(e, self.name))
-        
-        bind_all(self.frame)
-        bind_all(self.lbl_name)
-        bind_all(self.lbl_dur)
-    
-    def pack(self, **kwargs):
-        """Pack le widget."""
-        self.frame.pack(**kwargs)
-    
-    def destroy(self):
-        """Détruit le widget."""
-        self.frame.destroy()
-    
-    def set_selected(self, selected: bool):
-        """Change l'état de sélection."""
-        self._selected = selected
-        self.frame.configure(
-            fg_color=Theme.ROW_SELECTED if selected else Theme.ROW_BG
-        )
-    
-    def _hover(self, enter: bool):
-        """Gère le survol."""
-        if self._selected:
+class NavButton(QToolButton):
+    def __init__(self, label: str, tooltip: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("NavButton")
+        self.setText(label)
+        self.setToolTip(tooltip)
+        self.setCheckable(True)
+        self.setAutoExclusive(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(42)
+
+
+class StatusPill(QFrame):
+    def __init__(self, label: str, value: str = "—", color: str = Theme.TEXT_MUTED, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Card")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(7)
+        self.dot = QLabel("●")
+        self.dot.setStyleSheet(f"color: {color}; font-size: 12px;")
+        self.label = QLabel(label.upper())
+        self.label.setStyleSheet(f"color: {Theme.TEXT_SUBTLE}; font-size: 10px; font-weight: 700;")
+        self.value = QLabel(value)
+        self.value.setStyleSheet(f"color: {Theme.TEXT}; font-weight: 600;")
+        layout.addWidget(self.dot)
+        layout.addWidget(self.label)
+        layout.addWidget(self.value)
+
+    def set_status(self, value: str, color: str) -> None:
+        self.value.setText(value)
+        self.dot.setStyleSheet(f"color: {color}; font-size: 12px;")
+
+
+class MetricCard(QFrame):
+    def __init__(self, label: str, value: str = "—", accent: str = Theme.ACCENT, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 13, 14, 13)
+        layout.setSpacing(4)
+        self.value = QLabel(value)
+        self.value.setObjectName("MetricValue")
+        self.value.setStyleSheet(f"color: {accent};")
+        caption = QLabel(label)
+        caption.setObjectName("MetricLabel")
+        layout.addWidget(self.value)
+        layout.addWidget(caption)
+
+    def set_value(self, value: str) -> None:
+        self.value.setText(value)
+
+
+class MacroListModel(QAbstractListModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items: list[MacroSummary] = []
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._items)
+
+    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._items)):
+            return None
+        item = self._items[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.UserRole:
+            return item
+        return None
+
+    def set_items(self, items: Iterable[MacroSummary]) -> None:
+        self.beginResetModel()
+        self._items = list(items)
+        self.endResetModel()
+
+    def item_at(self, row: int) -> MacroSummary | None:
+        return self._items[row] if 0 <= row < len(self._items) else None
+
+
+class MacroDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        item: MacroSummary = index.data(Qt.ItemDataRole.UserRole)
+        rect = option.rect.adjusted(6, 4, -6, -4)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        background = Theme.ACCENT_SOFT if selected else Theme.SURFACE_RAISED if hovered else Theme.SURFACE
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(background))
+        painter.drawRoundedRect(rect, 9, 9)
+        if selected:
+            painter.setPen(QPen(QColor(Theme.ACCENT), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 9, 9)
+        painter.setPen(QColor(Theme.TEXT))
+        painter.setFont(painter.font())
+        name_rect = QRect(rect.left() + 13, rect.top() + 10, rect.width() - 26, 21)
+        painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item.name)
+        meta = f"{item.events:,} événements  ·  {fmt_duration_for_list(item.duration)}"
+        painter.setPen(QColor(Theme.TEXT_MUTED))
+        painter.setFont(painter.font())
+        meta_rect = QRect(rect.left() + 13, rect.bottom() - 26, rect.width() - 26, 17)
+        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, meta)
+        if item.protected:
+            painter.setPen(QColor(Theme.WARNING))
+            painter.drawText(rect.adjusted(0, 0, -13, -1), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "INTÉGRÉE")
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        return QSize(260, 72)
+
+
+class MacroLibrary(QFrame):
+    macro_selected = pyqtSignal(str)
+    create_requested = pyqtSignal()
+    rename_requested = pyqtSignal()
+    delete_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        title = QLabel("Macros")
+        title.setObjectName("CardTitle")
+        self.count = QLabel("0 personnelles")
+        self.count.setObjectName("CardCaption")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.count)
+        layout.addLayout(header)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Rechercher dans tes macros…")
+        self.search.setClearButtonEnabled(True)
+        self.search.setAccessibleName("Rechercher une macro")
+        layout.addWidget(self.search)
+
+        self.model = MacroListModel(self)
+        self.system_model = MacroListModel(self)
+        self._filter_callback: Callable[[], None] = lambda: None
+        self._updating = False
+        self.view = QListView()
+        self.view.setModel(self.model)
+        self.view.setItemDelegate(MacroDelegate(self.view))
+        self.view.setSelectionMode(QListView.SelectionMode.SingleSelection)
+        self.view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        self.view.setMouseTracking(True)
+        self.view.setSpacing(3)
+        self.view.setAccessibleName("Liste des macros")
+        layout.addWidget(self.view, 1)
+
+        system_header = QHBoxLayout()
+        system_title = QLabel("Routines intégrées")
+        system_title.setObjectName("SectionTitle")
+        system_caption = QLabel("Gérées par AUTO-COC")
+        system_caption.setObjectName("CardCaption")
+        system_header.addWidget(system_title)
+        system_header.addStretch()
+        system_header.addWidget(system_caption)
+        layout.addLayout(system_header)
+
+        self.system_view = QListView()
+        self.system_view.setObjectName("SystemRoutineList")
+        self.system_view.setModel(self.system_model)
+        self.system_view.setItemDelegate(MacroDelegate(self.system_view))
+        self.system_view.setSelectionMode(QListView.SelectionMode.SingleSelection)
+        self.system_view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        self.system_view.setMouseTracking(True)
+        self.system_view.setSpacing(3)
+        self.system_view.setMaximumHeight(160)
+        self.system_view.setAccessibleName("Liste des routines intégrées")
+        layout.addWidget(self.system_view)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        self.create_button = QPushButton("Nouvelle")
+        self.create_button.setObjectName("PrimaryButton")
+        self.rename_button = QPushButton("Renommer")
+        self.delete_button = QPushButton("Supprimer")
+        self.delete_button.setObjectName("DangerButton")
+        for button in (self.create_button, self.rename_button, self.delete_button):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        actions.addWidget(self.create_button)
+        actions.addWidget(self.rename_button)
+        actions.addWidget(self.delete_button)
+        layout.addLayout(actions)
+
+        self.search.textChanged.connect(self._filter)
+        self.view.selectionModel().currentChanged.connect(lambda current, _previous: self._select(current) if current.isValid() else None)
+        self.system_view.selectionModel().currentChanged.connect(lambda current, _previous: self._select_system(current) if current.isValid() else None)
+        self.create_button.clicked.connect(self.create_requested)
+        self.rename_button.clicked.connect(self.rename_requested)
+        self.delete_button.clicked.connect(self.delete_requested)
+
+    def set_items(self, items: Iterable[MacroSummary], selected_name: str | None = None) -> None:
+        self._updating = True
+        all_items = list(items)
+        query = self.search.text().strip().lower()
+        if query:
+            all_items = [item for item in all_items if query in item.name.lower() or query in item.description.lower()]
+        user_items = [item for item in all_items if item.editable]
+        system_items = [item for item in all_items if item.protected]
+        self.model.set_items(user_items)
+        self.system_model.set_items(system_items)
+        self.count.setText(f"{len(user_items)} personnelle{'' if len(user_items) == 1 else 's'}")
+        if selected_name:
+            for row in range(self.model.rowCount()):
+                item = self.model.item_at(row)
+                if item and item.name == selected_name:
+                    self.view.setCurrentIndex(self.model.index(row, 0))
+                    break
+            for row in range(self.system_model.rowCount()):
+                item = self.system_model.item_at(row)
+                if item and item.name == selected_name:
+                    self.system_view.setCurrentIndex(self.system_model.index(row, 0))
+                    break
+        self._updating = False
+        self._update_actions()
+
+    def selected_name(self) -> str | None:
+        user_indexes = self.view.selectionModel().selectedIndexes()
+        item = self.model.item_at(user_indexes[0].row()) if user_indexes else None
+        if item:
+            return item.name
+        system_indexes = self.system_view.selectionModel().selectedIndexes()
+        item = self.system_model.item_at(system_indexes[0].row()) if system_indexes else None
+        return item.name if item else None
+
+    def _filter(self) -> None:
+        self._filter_callback()
+
+    def set_filter_callback(self, callback: Callable[[], None]) -> None:
+        self._filter_callback = callback
+
+    def _select(self, index: QModelIndex) -> None:
+        if self._updating:
             return
-        self.frame.configure(
-            fg_color=Theme.ROW_HOVER if enter else Theme.ROW_BG
-        )
-    
-    def set_duration(self, dur_txt: str):
-        """Met à jour l'affichage de la durée."""
-        self.lbl_dur.configure(text=dur_txt)
+        item = self.model.item_at(index.row())
+        if item:
+            self.system_view.clearSelection()
+            self.macro_selected.emit(item.name)
+        self._update_actions()
+
+    def _select_system(self, index: QModelIndex) -> None:
+        if self._updating:
+            return
+        item = self.system_model.item_at(index.row())
+        if item:
+            self.view.clearSelection()
+            self.macro_selected.emit(item.name)
+        self._update_actions()
+
+    def _update_actions(self) -> None:
+        user_selected = bool(self.view.selectionModel().selectedIndexes())
+        self.rename_button.setEnabled(user_selected)
+        self.delete_button.setEnabled(user_selected)
 
 
-class MacroList(ctk.CTkScrollableFrame):
-    """
-    Liste scrollable des macros avec recherche.
-    """
-    
-    def __init__(
-        self,
-        master: ctk.CTkFrame,
-        on_select: Callable[[str], None],
-        on_rclick: Callable,
-    ):
-        super().__init__(master, corner_radius=12, fg_color=Theme.LEFT_CONTAINER_BG)
-        
-        self._on_select = on_select
-        self._on_rclick = on_rclick
-        self._rows: Dict[str, MacroRow] = {}
-        self._selected: Optional[str] = None
-        self._meta: Dict[str, Tuple[int, float]] = {}
-    
-    def set_meta(self, meta: Dict[str, Tuple[int, float]]):
-        """Définit les métadonnées (nb_events, duration) pour chaque macro."""
-        self._meta = dict(meta)
-    
-    def refresh(
-        self,
-        names: List[str],
-        selected: Optional[str],
-        filter_term: Optional[str] = None
-    ):
-        """
-        Rafraîchit la liste, en appliquant un filtre optionnel.
-        
-        Args:
-            names: Liste des noms de macros
-            selected: Nom de la macro à sélectionner
-            filter_term: Terme de recherche (optionnel)
-        """
-        # Purge
-        for row in self._rows.values():
-            row.destroy()
-        self._rows.clear()
-        
-        filter_term = filter_term.lower() if filter_term else None
-        
-        # Rebuild
-        for name in names:
-            # Filtre de recherche
-            if filter_term and filter_term not in name.lower():
-                continue
-            
-            _, d = self._meta.get(name, (0, 0.0))
-            row = MacroRow(
-                self,
-                name,
-                fmt_duration_for_list(d),
-                on_click=self.select,
-                on_rclick=self._on_rclick
-            )
-            row.pack(fill="x", padx=6, pady=4)
-            self._rows[name] = row
-        
-        if selected and selected in self._rows:
-            self.select(selected, fire=False)
-    
-    def update_one(self, name: str):
-        """Met à jour la durée d'une seule ligne."""
-        if name in self._rows:
-            _, d = self._meta.get(name, (0, 0.0))
-            self._rows[name].set_duration(fmt_duration_for_list(d))
-    
-    def select(self, name: str, fire: bool = True):
-        """
-        Sélectionne une macro dans la liste.
-        
-        Args:
-            name: Nom de la macro
-            fire: Si True, appelle le callback on_select
-        """
-        # Désélectionner l'ancien
-        if self._selected and self._selected in self._rows:
-            self._rows[self._selected].set_selected(False)
-        
-        self._selected = name
-        
-        # Sélectionner le nouveau
-        if name in self._rows:
-            self._rows[name].set_selected(True)
-            if fire and callable(self._on_select):
-                try:
-                    self._on_select(name)
-                except Exception as e:
-                    from utils.logger import get_logger
-                    get_logger().error(f"Erreur on_select({name}): {e}")
-    
-    def get_selected(self) -> Optional[str]:
-        """Retourne le nom de la macro sélectionnée."""
-        return self._selected
+class ActivityFeed(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 10)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        title = QLabel("Activité récente")
+        title.setObjectName("CardTitle")
+        self.clear_button = QPushButton("Effacer")
+        self.clear_button.setObjectName("QuietButton")
+        self.clear_button.clicked.connect(self.clear)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.clear_button)
+        layout.addLayout(header)
+        self.list = QListView()
+        self.list.setObjectName("ActivityList")
+        self.list.setMaximumHeight(180)
+        self.list.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.list)
+        self._model = _ActivityModel(self)
+        self.list.setModel(self._model)
+
+    def add(self, message: str, level: str = "info") -> None:
+        self._model.add(message, level)
+        self.list.scrollToTop()
+
+    def clear(self) -> None:
+        self._model.clear()
+
+
+class _ActivityModel(QAbstractListModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items: list[tuple[str, str]] = []
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._items)
+
+    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._items):
+            return None
+        text, level = self._items[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return text
+        if role == Qt.ItemDataRole.ForegroundRole:
+            return QColor({"success": Theme.ACCENT, "warning": Theme.WARNING, "error": Theme.DANGER}.get(level, Theme.TEXT_MUTED))
+        return None
+
+    def add(self, message: str, level: str) -> None:
+        self.beginResetModel()
+        self._items.insert(0, (message, level))
+        self._items = self._items[:30]
+        self.endResetModel()
+
+    def clear(self) -> None:
+        self.beginResetModel()
+        self._items.clear()
+        self.endResetModel()

@@ -63,7 +63,7 @@ def read_params_csv(path: Path) -> Dict[str, str]:
             # Valider l'en-tête
             if not EXPECTED_HEADERS.issubset(headers):
                 log.warning(f"CSV {path.name} a un en-tête invalide. Attendu: {EXPECTED_HEADERS}")
-                f.seek(0)  # Réinitialiser pour lecture legacy
+                f.seek(0)  # Réinitialiser pour accepter un CSV sans en-tête
             
             # Lire les données
             for i, row in enumerate(reader, 1):
@@ -245,7 +245,6 @@ def sanitize_macro_name(name: str) -> str:
 
 def list_macros(
     macros_dir: Path,
-    legacy_macro: Optional[Path] = None,
     protected_names: Optional[List[str]] = None
 ) -> List[Tuple[str, Path]]:
     """
@@ -254,7 +253,6 @@ def list_macros(
     
     Args:
         macros_dir: Dossier contenant les macros JSON
-        legacy_macro: Chemin vers l'ancienne macro (compat)
         protected_names: Liste des noms de macros protégées
         
     Returns:
@@ -262,10 +260,7 @@ def list_macros(
     """
     macros_dir.mkdir(parents=True, exist_ok=True)
     items: List[Tuple[str, Path]] = []
-    
-    if legacy_macro and legacy_macro.exists():
-        items.append((legacy_macro.stem, legacy_macro))
-    
+
     for p in macros_dir.glob("*.json"):
         items.append((p.stem, p))
     

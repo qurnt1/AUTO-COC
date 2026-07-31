@@ -74,7 +74,7 @@ class TelegramBotService:
     """
     Service Telegram asynchrone utilisant python-telegram-bot.
     
-    Communication avec la GUI Tkinter via queue.Queue.
+    Communication avec l’interface via queue.Queue.
     """
     
     def __init__(self, token: str, chat_id: Optional[int] = None):
@@ -131,6 +131,16 @@ class TelegramBotService:
     def command_queue(self) -> queue.Queue[TelegramCommand]:
         """Queue des commandes reçues."""
         return self._command_queue
+
+    def configure(self, token: str, chat_id: Optional[int] = None) -> None:
+        """Met à jour les identifiants sans exposer l’état interne à l’interface."""
+        was_running = self.is_running
+        if was_running:
+            self.stop()
+        self._token = (token or "").strip()
+        self._chat_id = chat_id
+        if self._token:
+            self.start()
     
     def get_status(self) -> Tuple[str, str]:
         """
@@ -139,15 +149,13 @@ class TelegramBotService:
         Returns:
             Tuple (texte de statut, code couleur hex)
         """
-        from gui.theme import Theme
-        
         if not self.is_configured:
-            return "Token manquant", Theme.STATUS_ERROR
+            return "Token manquant", "#FF6B6B"
         if not self._chat_id:
-            return "Chat ID manquant", Theme.STATUS_WARN
+            return "Chat ID manquant", "#F6C45D"
         if not self.is_running:
-            return "Poller arrêté", Theme.STATUS_WARN
-        return "Connecté", Theme.STATUS_OK
+            return "Poller arrêté", "#F6C45D"
+        return "Connecté", "#63E6A4"
     
     # =========================
     #     Start / Stop

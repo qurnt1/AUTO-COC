@@ -1,608 +1,414 @@
 # -*- coding: utf-8 -*-
-"""
-Macro COC v3.0 — GUI / App
+"""Main PyQt6 window for AUTO-COC."""
 
-Fenêtre principale de l'application.
-"""
+from __future__ import annotations
 
 import ctypes
 import os
-import queue
-import shutil
-import threading
-import time
-from enum import Enum, auto
 from pathlib import Path
-from tkinter import messagebox, filedialog
-from typing import Dict, List, Optional
 
-import customtkinter as ctk
 import keyboard
-
-from gui.theme import Theme
-from gui.components import MacroList
-from gui.dialogs import (
-    TextInputDialog, SettingsDialog, TelegramAutomationDialog, DiagnosticsDialog
-)
-from models.macro import Macro, is_protected_macro
-from services.recorder_service import Recorder, Player, trim_tail
-from services.telegram_service import TelegramBotService, TelegramCommand
-from utils.config import (
-    read_params_csv, write_params_csv, read_macro_file, write_macro_file,
-    read_macro_meta, list_macros, macro_path_from_name, sanitize_macro_name,
-    as_bool, fmt_seconds, fmt_duration_for_list
-)
-from utils.logger import get_logger, clean_old_logs
-from utils.system import (
-    grab_screenshot_png_bytes, resolve_exe_from_path, kill_process_by_name,
-    is_process_running, perform_shutdown, ensure_directories
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QIcon, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
-# Pillow check
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
-    Image = None
-
-try:
-    import mss
-    MSS_AVAILABLE = True
-except ImportError:
-    MSS_AVAILABLE = False
+from gui.components import NavButton, StatusPill
+from gui.controller import RuntimeController, RuntimeState
+from gui.dialogs import DiagnosticsDialog, SettingsDialog, TelegramDialog, TextInputDialog
+from gui.pages.console_page import ConsolePage
+from gui.pages.diagnostics_page import DiagnosticsPage
+from gui.pages.macros_page import MacrosPage
+from gui.pages.remote_page import RemotePage
+from gui.theme import Theme, build_stylesheet
+from utils.logger import clean_old_logs, get_logger
 
 
-class State(Enum):
-    IDLE = auto()
-    RECORDING = auto()
-    PLAYING = auto()
-
-
-class App(ctk.CTk):
-    """Application principale Macro COC."""
+class MainWindow(QMainWindow):
+    hotkey_signal = pyqtSignal(str)
 
     def __init__(
         self,
-        params: Dict[str, str],
-        tg_service: TelegramBotService,
+        params: dict[str, str],
+        telegram,
         base_dir: Path,
-        config_dir: Path,
         macros_dir: Path,
         params_path: Path,
         log_path: Path,
         icon_path: Path,
-        icon_png_path: Path,
-        guide_html_path: Path,
-        legacy_macro_path: Path,
+        guide_path: Path,
         app_version: str,
         python_version: str,
-        protected_macro_names: List[str],
+        protected_names: list[str],
     ):
         super().__init__()
-        self._log = get_logger()
-        self._log.info(f"=== Démarrage GUI Macro COC v{app_version} ===")
-        
-        # Config
-        self.params = params
-        self.tg = tg_service
-        self.BASE_DIR = base_dir
-        self.CONFIG_DIR = config_dir
-        self.MACROS_DIR = macros_dir
-        self.PARAMS_PATH = params_path
-        self.LOG_PATH = log_path
-        self.ICON_PATH = icon_path
-        self.ICON_PNG_PATH = icon_png_path
-        self.GUIDE_HTML_PATH = guide_html_path
-        self.LEGACY_MACRO = legacy_macro_path
-        self.APP_VERSION = app_version
-        self.PYTHON_VERSION = python_version
-        self.PROTECTED_NAMES = protected_macro_names
-        
-        # CustomTkinter setup
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("dark-blue")
-        
-        # Windows App ID
-        if os.name == 'nt':
-            try:
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MacroCOC.App.v3")
-            except Exception:
-                pass
-        
-        # Fenêtre
-        self.title("Macro COC v3.0")
-        self.geometry("1200x720")
-        self.minsize(1024, 640)
-        self._apply_icon()
-        
-        # État
-        self.current_state = State.IDLE
-        self.current_macro_name: Optional[str] = None
-        self.current_macro_path: Optional[Path] = None
-        self.all_macro_names: List[str] = []
-        self._coc_launched_once = False
-        self._coc_is_running_tg = False
-        
-        # Modèle
-        self.macro = Macro()
-        self.rec = Recorder()
-        self.player = Player(self.rec)
-        
-        # Variables UI
-        self.status_var = ctk.StringVar(value="Prêt")
-        self.cycle_count = ctk.IntVar(value=0)
-        self.session_seconds = 0.0
-        self.session_elapsed = ctk.StringVar(value="00:00")
-        self.macro_duration = ctk.StringVar(value="00:00")
-        self.macro_events = ctk.StringVar(value="0")
-        self.tg_status_var = ctk.StringVar(value="Initialisation...")
-        self.tg_status_color_var = ctk.StringVar(value=Theme.STATUS_WARN)
-        
-        # Windows ouvertes
-        self.open_windows: Dict[str, ctk.CTkToplevel] = {}
-        
-        # Timer
-        self._play_timer_running = False
-        self._last_tick: Optional[float] = None
-        
-        # Build UI
-        self._build_ui()
+        self.log = get_logger()
+        self.app_version = app_version
+        self.python_version = python_version
+        self.base_dir = base_dir
+        self.params_path = params_path
+        self.log_path = log_path
+        self.icon_path = icon_path
+        self.guide_path = guide_path
+        self.telegram = telegram
+        self.controller = RuntimeController(
+            params=params,
+            telegram=telegram,
+            macros_dir=macros_dir,
+            params_path=params_path,
+            protected_names=protected_names,
+            app_version=app_version,
+            python_version=python_version,
+            parent=self,
+        )
+        self._closing = False
+        self._hotkeys_registered = False
+        self.setWindowTitle(f"AUTO-COC  /  {app_version}")
+        self.setMinimumSize(1180, 760)
+        self.resize(1480, 900)
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        self.setStyleSheet(build_stylesheet())
+        self._set_windows_app_id()
+        self._build_shell()
+        self._connect_signals()
+        self._register_shortcuts()
         self._register_hotkeys()
-        self.protocol("WM_DELETE_WINDOW", self.safe_quit)
-        
-        # Bootstrap
-        self.after(150, self._bootstrap)
-        
-        # Polling queue Telegram
-        self.after(100, self._poll_telegram_queue)
-    
-    def _apply_icon(self):
-        if self.ICON_PATH.exists():
+
+        self.metrics_timer = QTimer(self)
+        self.metrics_timer.setInterval(200)
+        self.metrics_timer.timeout.connect(self.controller.update_metrics)
+        self.metrics_timer.start()
+        self.telegram_timer = QTimer(self)
+        self.telegram_timer.setInterval(250)
+        self.telegram_timer.timeout.connect(self.controller.poll_telegram_status)
+        self.telegram_timer.start()
+        QTimer.singleShot(120, self.controller.bootstrap)
+
+    def _build_shell(self) -> None:
+        central = QWidget()
+        central.setObjectName("WindowRoot")
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(14, 14, 14, 14)
+        shell.setSpacing(14)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("Card")
+        sidebar.setFixedWidth(228)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 16, 14, 14)
+        sidebar_layout.setSpacing(6)
+
+        brand = QVBoxLayout()
+        brand.setContentsMargins(8, 4, 8, 18)
+        brand.setSpacing(3)
+        brand_name = QLabel("AUTO-COC")
+        brand_name.setStyleSheet(f"font-size: 20px; font-weight: 800; color: {Theme.TEXT};")
+        brand_tag = QLabel("OPERATOR CONSOLE")
+        brand_tag.setStyleSheet(f"font-size: 10px; font-weight: 700; letter-spacing: 1px; color: {Theme.ACCENT};")
+        brand.addWidget(brand_name)
+        brand.addWidget(brand_tag)
+        sidebar_layout.addLayout(brand)
+
+        self.nav_buttons: list[NavButton] = []
+        for label, tooltip in (("Console", "Vue d’ensemble et commandes"), ("Macros", "Bibliothèque et événements"), ("Télécommande", "Statut et commandes Telegram"), ("Diagnostics", "État système et journal")):
+            button = NavButton(label, tooltip)
+            self.nav_buttons.append(button)
+            sidebar_layout.addWidget(button)
+        self.nav_buttons[0].setChecked(True)
+        sidebar_layout.addStretch()
+
+        shortcuts = QLabel("F1  lancer / arrêter\nCtrl+Shift+1  lancer\nCtrl+Shift+0  stopper")
+        shortcuts.setStyleSheet(f"color: {Theme.TEXT_SUBTLE}; font-family: 'Cascadia Mono'; font-size: 10px; padding: 8px;")
+        sidebar_layout.addWidget(shortcuts)
+        self.settings_button = QPushButton("Paramètres")
+        self.settings_button.setObjectName("QuietButton")
+        self.settings_button.setMinimumHeight(40)
+        sidebar_layout.addWidget(self.settings_button)
+        shell.addWidget(sidebar)
+
+        content = QVBoxLayout()
+        content.setSpacing(14)
+        header = QFrame()
+        header.setObjectName("Card")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 12, 18, 12)
+        title_column = QVBoxLayout()
+        title_column.setSpacing(2)
+        self.header_title = QLabel("Console")
+        self.header_title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {Theme.TEXT};")
+        header_subtitle = QLabel("AUTO-COC / contrôle local")
+        header_subtitle.setStyleSheet(f"font-size: 11px; color: {Theme.TEXT_SUBTLE};")
+        title_column.addWidget(self.header_title)
+        title_column.addWidget(header_subtitle)
+        header_layout.addLayout(title_column)
+        header_layout.addStretch()
+        self.state_pill = StatusPill("État", "Prêt", Theme.ACCENT)
+        self.telegram_pill = StatusPill("Telegram", "Hors ligne", Theme.WARNING)
+        self.coc_pill = StatusPill("CoC", "Non lancé", Theme.TEXT_MUTED)
+        header_layout.addWidget(self.state_pill)
+        header_layout.addWidget(self.telegram_pill)
+        header_layout.addWidget(self.coc_pill)
+        content.addWidget(header)
+
+        self.pages = QStackedWidget()
+        self.console_page = ConsolePage()
+        self.macros_page = MacrosPage()
+        self.remote_page = RemotePage()
+        self.diagnostics_page = DiagnosticsPage(app_version=self.app_version, python_version=self.python_version, log_path=self.log_path)
+        for page in (self.console_page, self.macros_page, self.remote_page, self.diagnostics_page):
+            self.pages.addWidget(page)
+        content.addWidget(self.pages, 1)
+        shell.addLayout(content, 1)
+        self.setCentralWidget(central)
+        self.statusBar().showMessage("Prêt")
+
+    def _connect_signals(self) -> None:
+        for index, button in enumerate(self.nav_buttons):
+            button.clicked.connect(lambda checked, idx=index: self._navigate(idx))
+        self.settings_button.clicked.connect(self.open_settings)
+
+        pages = (self.console_page, self.macros_page)
+        for page in pages:
+            page.macro_selected.connect(self.controller.select_macro)
+            page.create_requested.connect(self.create_macro)
+            page.rename_requested.connect(self.rename_macro)
+            page.delete_requested.connect(self.delete_macro)
+        self.console_page.record_requested.connect(self.toggle_recording)
+        self.console_page.play_requested.connect(self.controller.start_playback)
+        self.console_page.stop_requested.connect(self.controller.stop_all)
+        self.console_page.coc_requested.connect(self.controller.launch_coc)
+        self.console_page.loop_toggled.connect(self.controller.set_auto_loop)
+        self.console_page.safeguard_toggled.connect(self.controller.set_safeguard)
+        self.remote_page.configure_requested.connect(self.open_telegram)
+        self.remote_page.capture_requested.connect(self.controller.capture_screen)
+
+        signals = self.controller.signals
+        signals.state_changed.connect(self._on_state_changed)
+        signals.macros_changed.connect(self._on_macros_changed)
+        signals.macro_selected.connect(self._on_macro_selected)
+        signals.metrics_changed.connect(self._on_metrics_changed)
+        signals.activity.connect(self._on_activity)
+        signals.error.connect(self._on_error)
+        signals.telegram_status.connect(self._on_telegram_status)
+        signals.coc_presence_changed.connect(self._on_coc_presence)
+        signals.safeguard_triggered.connect(self.controller.handle_safeguard_loss)
+        self.hotkey_signal.connect(self._on_hotkey)
+
+    def _register_shortcuts(self) -> None:
+        self.shortcut_new = QShortcut(QKeySequence("Ctrl+N"), self)
+        self.shortcut_new.activated.connect(self.create_macro)
+        self.shortcut_search = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.shortcut_search.activated.connect(self.console_page.library.search.setFocus)
+        self.shortcut_stop = QShortcut(QKeySequence("Escape"), self)
+        self.shortcut_stop.activated.connect(self.controller.stop_all)
+        self.shortcut_play = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self.shortcut_play.activated.connect(self.controller.start_playback)
+
+    def _register_hotkeys(self) -> None:
+        try:
+            keyboard.add_hotkey("f1", lambda: self.hotkey_signal.emit("toggle"))
+            keyboard.add_hotkey("ctrl+shift+1", lambda: self.hotkey_signal.emit("play"))
+            keyboard.add_hotkey("ctrl+shift+0", lambda: self.hotkey_signal.emit("stop"))
+            self._hotkeys_registered = True
+            self._on_activity("Raccourcis globaux actifs", "success")
+        except Exception as exc:
+            self._on_activity(f"Raccourcis globaux indisponibles · {exc}", "warning")
+
+    def _navigate(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        self.header_title.setText(self.nav_buttons[index].text())
+        self.nav_buttons[index].setChecked(True)
+        if index == 3:
+            self.diagnostics_page.refresh()
+
+    def _on_macros_changed(self, items, selected: str) -> None:
+        self.console_page.library.set_items(items, selected)
+        self.macros_page.library.set_items(items, selected)
+
+    def _refresh_macro_libraries(self) -> None:
+        self._on_macros_changed(self.controller.summaries(), self.controller.current_macro_name or "")
+
+    def _on_macro_selected(self, macro) -> None:
+        self.console_page.set_macro(macro)
+        self.macros_page.set_macro(macro)
+
+    def _on_state_changed(self, state_name: str, label: str) -> None:
+        colors = {
+            "IDLE": Theme.ACCENT,
+            "RECORDING": Theme.DANGER,
+            "PLAYING": Theme.INFO,
+            "STOPPING": Theme.WARNING,
+            "ERROR": Theme.DANGER,
+        }
+        messages = {
+            "IDLE": "Prêt à exécuter",
+            "RECORDING": "Capture en cours · effectue tes actions dans CoC",
+            "PLAYING": "La macro est en cours d’exécution",
+            "STOPPING": "Arrêt sécurisé en cours",
+            "ERROR": "Une opération nécessite ton attention",
+        }
+        self.state_pill.set_status(label, colors.get(state_name, Theme.TEXT_MUTED))
+        self.console_page.set_state(label, colors.get(state_name, Theme.TEXT_MUTED), messages.get(state_name, label), state_name)
+        self.statusBar().showMessage(label)
+
+    def _on_metrics_changed(self, elapsed: float, events: int, duration: float, cycles: int) -> None:
+        self.console_page.set_metrics(elapsed, events, duration, cycles, self.controller.state.name, self.controller.auto_loop)
+
+    def _on_activity(self, message: str, level: str) -> None:
+        self.console_page.activity.add(message, level)
+        self.statusBar().showMessage(message, 5000)
+
+    def _on_error(self, title: str, detail: str) -> None:
+        message = f"{title}\n\n{detail}" if detail else title
+        QMessageBox.warning(self, title, message)
+
+    def _on_telegram_status(self, status: str, color: str) -> None:
+        self.telegram_pill.set_status(status, color)
+        self.remote_page.set_status(status, color)
+
+    def _on_coc_presence(self, snapshot) -> None:
+        self.console_page.set_coc_presence(snapshot)
+        if snapshot.present:
+            self.coc_pill.set_status("Détecté", Theme.ACCENT)
+        else:
+            self.coc_pill.set_status("Absent", Theme.WARNING)
+        self.console_page.set_safeguard(self.controller.safeguard_enabled)
+
+    def _on_hotkey(self, action: str) -> None:
+        if action == "toggle":
+            if self.controller.state == RuntimeState.RECORDING:
+                self.controller.stop_recording()
+            elif self.controller.state == RuntimeState.PLAYING:
+                self.controller.stop_all()
+            else:
+                self.controller.start_playback()
+        elif action == "play":
+            self.controller.start_playback()
+        elif action == "stop":
+            self.controller.stop_all()
+
+    def toggle_recording(self) -> None:
+        if self.controller.state == RuntimeState.RECORDING:
+            self.controller.stop_recording()
+        else:
+            self.controller.start_recording()
+
+    def create_macro(self) -> None:
+        name = TextInputDialog.get_text(self, "Nouvelle macro", "Nom de la macro", "Nouvelle macro")
+        if name:
+            self.controller.create_macro(name)
+
+    def rename_macro(self) -> None:
+        if not self.controller.current_macro_name:
+            return
+        name = TextInputDialog.get_text(self, "Renommer la macro", "Nouveau nom", self.controller.current_macro_name)
+        if name:
+            self.controller.rename_macro(name)
+
+    def delete_macro(self) -> None:
+        name = self.controller.current_macro_name
+        if not name:
+            return
+        answer = QMessageBox.question(self, "Supprimer la macro", f"Supprimer « {name} » ?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.controller.delete_macro()
+
+    def open_settings(self) -> None:
+        status, color = self.telegram.get_status()
+        dialog = SettingsDialog(
+            self.controller.params,
+            self._save_params,
+            self.open_telegram,
+            self.open_diagnostics,
+            self._confirm_shutdown,
+            status,
+            color,
+            self,
+        )
+        dialog.exec()
+
+    def _save_params(self, params: dict[str, str]) -> None:
+        self.controller.params.update(params)
+        self.controller.refresh_coc_profile()
+        self.controller.refresh_coc_presence()
+        self.controller.save_params()
+        self._on_activity("Paramètres sauvegardés", "success")
+
+    def open_telegram(self) -> None:
+        dialog = TelegramDialog(self.controller.params, self.guide_path, self._save_telegram, self)
+        dialog.exec()
+
+    def _save_telegram(self, params: dict[str, str]) -> None:
+        self.controller.params.update(params)
+        self.controller.save_params()
+        chat_id = None
+        if params.get("telegram_chat_id", "").strip():
+            chat_id = int(params["telegram_chat_id"].strip())
+        self.telegram.configure(params.get("telegram_bot_token", ""), chat_id)
+        if self.telegram.is_configured and not self.telegram.is_running:
+            self.telegram.start()
+        self.controller.poll_telegram_status()
+        self._on_activity("Configuration Telegram mise à jour", "success")
+
+    def open_diagnostics(self) -> None:
+        pil_available = False
+        mss_available = False
+        try:
+            import PIL  # noqa: F401
+            pil_available = True
+        except ImportError:
+            pass
+        try:
+            import mss  # noqa: F401
+            mss_available = True
+        except ImportError:
+            pass
+        dialog = DiagnosticsDialog(
+            app_version=self.app_version,
+            python_version=self.python_version,
+            telegram_status=self.telegram.get_status()[0],
+            pil_available=pil_available,
+            mss_available=mss_available,
+            log_path=self.log_path,
+            base_dir=self.base_dir,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _confirm_shutdown(self) -> None:
+        answer = QMessageBox.question(self, "Éteindre le PC", "Confirmer l’extinction du PC ?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.controller.request_shutdown()
+
+    def _set_windows_app_id(self) -> None:
+        if os.name == "nt":
             try:
-                self.iconbitmap(str(self.ICON_PATH))
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AutoCoc.OperatorConsole.v4")
             except Exception:
                 pass
 
-    def _build_ui(self):
-        """Construit l'interface utilisateur."""
-        root = ctk.CTkFrame(self, corner_radius=0, fg_color=Theme.APP_BG)
-        root.pack(fill="both", expand=True)
-        
-        # Header
-        header = ctk.CTkFrame(root, corner_radius=0, fg_color=Theme.HEADER_BG, height=Theme.HEADER_HEIGHT)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        
-        self._title_lbl = ctk.CTkLabel(header, text="Macro COC v3.0", font=ctk.CTkFont(size=24, weight="bold"))
-        self._title_lbl.pack(side="left", padx=20)
-        
-        ctk.CTkButton(header, text="Paramètres", width=120, command=self.open_settings).pack(side="right", padx=20)
-        
-        # Body
-        body = ctk.CTkFrame(root, fg_color=Theme.APP_BG)
-        body.pack(fill="both", expand=True, padx=12, pady=12)
-        body.grid_columnconfigure(0, weight=0)
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_rowconfigure(0, weight=1)
-        
-        # Left panel
-        left = ctk.CTkFrame(body, corner_radius=12, fg_color=Theme.LEFT_CONTAINER_BG, width=320)
-        left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
-        left.pack_propagate(False)
-        
-        ctk.CTkLabel(left, text="Macros", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=12, pady=(12, 4))
-        
-        self.search_entry = ctk.CTkEntry(left, placeholder_text="Rechercher...")
-        self.search_entry.pack(fill="x", padx=8, pady=(0, 8))
-        self.search_entry.bind("<KeyRelease>", self._filter_macro_list)
-        
-        self.macro_list = MacroList(left, on_select=self._select_macro_by_name, on_rclick=self._show_macro_menu)
-        self.macro_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        
-        # Actions
-        actions = ctk.CTkFrame(left, fg_color=Theme.LEFT_ACTIONS_BG)
-        actions.pack(fill="x", padx=8, pady=(0, 12))
-        
-        self.btn_new = ctk.CTkButton(actions, text="Nouveau", width=80, command=self.macro_new,
-                                     fg_color=Theme.BTN_PRIMARY_BG, hover_color=Theme.BTN_PRIMARY_HOVER)
-        self.btn_new.pack(side="left", padx=4, pady=8)
-        
-        self.btn_rename = ctk.CTkButton(actions, text="Renommer", width=90, command=self.macro_rename)
-        self.btn_rename.pack(side="left", padx=4, pady=8)
-        
-        self.btn_delete = ctk.CTkButton(actions, text="Supprimer", width=90, command=self.macro_delete,
-                                        fg_color=Theme.BTN_STOP_BG, hover_color=Theme.BTN_STOP_HOVER)
-        self.btn_delete.pack(side="left", padx=4, pady=8)
-        
-        # Center panel
-        main = ctk.CTkFrame(body, corner_radius=12, fg_color=Theme.CENTER_BG)
-        main.grid(row=0, column=1, sticky="nsew")
-        
-        # Info bar
-        info = ctk.CTkFrame(main, fg_color=Theme.INFO_BG)
-        info.pack(fill="x", padx=16, pady=(16, 8))
-        
-        self.lbl_macro_name = ctk.CTkLabel(info, text="Macro : —", font=ctk.CTkFont(size=16, weight="bold"))
-        self.lbl_macro_name.pack(side="left", padx=6, pady=10)
-        
-        self.lbl_macro_meta = ctk.CTkLabel(info, text="Non enregistrée", text_color=Theme.INFO_TEXT_MUTED)
-        self.lbl_macro_meta.pack(side="right", padx=6)
-        
-        # Controls
-        controls = ctk.CTkFrame(main, fg_color="transparent")
-        controls.pack(fill="x", padx=16, pady=(6, 10))
-        
-        self.btn_rec = ctk.CTkButton(controls, text="Enregistrer", height=44, width=200,
-                                     fg_color=Theme.BTN_PRIMARY_BG, hover_color=Theme.BTN_PRIMARY_HOVER,
-                                     command=self.toggle_record)
-        self.btn_rec.pack(side="left", padx=6)
-        
-        self.btn_play = ctk.CTkButton(controls, text="Lire", height=44, width=170,
-                                      fg_color=Theme.BTN_PRIMARY_BG, hover_color=Theme.BTN_PRIMARY_HOVER,
-                                      command=lambda: self.on_play(notify_tg=True))
-        self.btn_play.pack(side="left", padx=6)
-        
-        self.btn_stop = ctk.CTkButton(controls, text="Stopper", height=44, width=210,
-                                      fg_color=Theme.BTN_STOP_BG, hover_color=Theme.BTN_STOP_HOVER,
-                                      command=lambda: self.force_stop_all(notify_tg=True))
-        self.btn_stop.pack(side="left", padx=6)
-        
-        # Stats
-        stats = ctk.CTkFrame(main, corner_radius=12, fg_color=Theme.CARD_BG)
-        stats.pack(fill="x", padx=16, pady=(6, 12))
-        
-        for label, var in [("Durée macro", self.macro_duration), ("Événements", self.macro_events),
-                           ("Cycles", self.cycle_count), ("Temps total", self.session_elapsed)]:
-            f = ctk.CTkFrame(stats, fg_color="transparent")
-            f.pack(fill="x", padx=12, pady=4)
-            ctk.CTkLabel(f, text=label).pack(side="left")
-            ctk.CTkLabel(f, textvariable=var, text_color="#86efac").pack(side="right")
-        
-        # Launch CoC
-        ctk.CTkButton(main, text="Lancer CoC", height=44, width=180,
-                      fg_color=Theme.BTN_LAUNCH_BG, hover_color=Theme.BTN_LAUNCH_HOVER,
-                      command=self.launch_coc_once).pack(padx=16, pady=(0, 12), anchor="w")
-        
-        # Footer
-        footer = ctk.CTkFrame(root, fg_color=Theme.STATUS_BG, height=28)
-        footer.pack(fill="x", side="bottom")
-        ctk.CTkLabel(footer, textvariable=self.status_var, anchor="w").pack(side="left", padx=10)
-
-    def _bootstrap(self):
-        """Initialisation post-UI."""
-        self._ensure_protected_macros()
-        self._refresh_macro_sidebar()
-        self._update_tg_status()
-        
-        # Sélectionner la dernière macro
-        wanted = self.params.get("last_macro", "").strip()
-        target = wanted if wanted in self.all_macro_names else (self.all_macro_names[0] if self.all_macro_names else None)
-        
-        if target:
-            self.macro_list.select(target)
-        
-        # Message TG
-        if self.tg.is_ready:
-            self.tg.send_message(f"Macro COC v{self.APP_VERSION} lancée.")
-            self.tg.replace_controls(self._tg_status_text("Prêt"), coc_launched=self._coc_is_running_tg)
-
-    def _poll_telegram_queue(self):
-        """Polling de la queue Telegram."""
-        try:
-            while not self.tg.command_queue.empty():
-                cmd: TelegramCommand = self.tg.command_queue.get_nowait()
-                self._handle_tg_command(cmd.command, cmd.meta)
-        except Exception as e:
-            self._log.error(f"Erreur polling TG queue: {e}")
-        self.after(100, self._poll_telegram_queue)
-
-    def _handle_tg_command(self, cmd: str, meta: dict):
-        """Gère une commande Telegram."""
-        if cmd == "STOP":
-            self.force_stop_all(notify_tg=False)
-            self.tg.replace_controls(self._tg_status_text("Arrêté"), coc_launched=self._coc_is_running_tg)
-        elif cmd == "GO":
-            self.on_play(notify_tg=False)
-            self.tg.replace_controls(self._tg_status_text("Lecture"), coc_launched=self._coc_is_running_tg)
-        elif cmd == "MENU":
-            self.tg.replace_menu("Paramètres", loop_state=self._auto_loop())
-        elif cmd == "BACK":
-            if self.tg.get_last_menu_id():
-                self.tg.delete_message(self.tg.get_last_menu_id())
-                self.tg.clear_last_menu_id()
-            self.tg.replace_controls(self._tg_status_text("Prêt"), coc_launched=self._coc_is_running_tg)
-        elif cmd == "CAPTURE":
-            threading.Thread(target=self._send_capture, daemon=True).start()
-        elif cmd == "TOGGLE_LOOP":
-            self.params["auto_loop"] = "0" if self._auto_loop() else "1"
-            self._save_params()
-            self.tg.send_message(f"Loop {'ON' if self._auto_loop() else 'OFF'}.")
-            self.tg.replace_menu("Paramètres", loop_state=self._auto_loop())
-        elif cmd == "SHUTDOWN_ASK":
-            self.tg.push_shutdown_confirm()
-        elif cmd == "SHUTDOWN_CONFIRM":
-            self.tg.send_message("🛑 Extinction...")
-            threading.Thread(target=perform_shutdown, daemon=True).start()
-        elif cmd == "SHUTDOWN_CANCEL":
-            self.tg.send_message("Extinction annulée.")
-            self.tg.replace_controls(self._tg_status_text("Prêt"), coc_launched=self._coc_is_running_tg)
-        elif cmd == "LAUNCH_COC":
-            self.launch_coc_once()
-        elif cmd.startswith("SELECT_MACRO:"):
-            name = cmd[13:]
-            if name in self.all_macro_names:
-                self.macro_list.select(name, fire=True)
-                self.tg.replace_controls(self._tg_status_text(f"Macro: {name}"), coc_launched=self._coc_is_running_tg)
-        elif cmd == "SELECT_MACRO_LIST":
-            self.tg.push_macro_selection(self.all_macro_names)
-        elif cmd == "RELOAD_COC":
-            self._play_protected_macro("Recharger COC")
-        elif cmd == "VALIDATE_ARRIVAL":
-            self._play_protected_macro("Valider arrivée")
-
-    def _tg_status_text(self, prefix: str) -> str:
-        loop = "ON" if self._auto_loop() else "OFF"
-        return f"{prefix} | Macro: {self.current_macro_name or '—'} | Loop: {loop}"
-
-    def _auto_loop(self) -> bool:
-        return as_bool(self.params.get("auto_loop", "0"))
-
-    def _update_tg_status(self):
-        status, color = self.tg.get_status()
-        self.tg_status_var.set(status)
-        self.tg_status_color_var.set(color)
-
-    def _send_capture(self):
-        png = grab_screenshot_png_bytes()
-        if png:
-            self.tg.send_photo(png, caption=f"📸 {self.current_macro_name or 'Capture'}")
-
-    def _refresh_macro_sidebar(self, keep_selection: bool = True):
-        items = list_macros(self.MACROS_DIR, self.LEGACY_MACRO, self.PROTECTED_NAMES)
-        self.all_macro_names = [n for n, _ in items]
-        meta = {n: read_macro_meta(p) for n, p in items}
-        self.macro_list.set_meta(meta)
-        sel = self.current_macro_name if keep_selection else None
-        term = self.search_entry.get() if keep_selection else ""
-        self.macro_list.refresh(self.all_macro_names, selected=sel, filter_term=term)
-
-    def _filter_macro_list(self, event=None):
-        self._refresh_macro_sidebar(keep_selection=True)
-
-    def _show_macro_menu(self, event, name: str):
-        pass  # Context menu - simplified for now
-
-    def _select_macro_by_name(self, name: str):
-        if self.current_state != State.IDLE:
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._closing:
+            event.accept()
             return
-        path = self.LEGACY_MACRO if name == self.LEGACY_MACRO.stem else macro_path_from_name(self.MACROS_DIR, name)
-        if not path.exists():
-            return
-        n, steps, sha1, _ = read_macro_file(path)
-        self.macro = Macro(name=n)
-        self.macro.set_steps_from_dicts(steps)
-        self.macro.sha1 = sha1
-        self.current_macro_name = name
-        self.current_macro_path = path
-        self._update_macro_info()
-        self.params["last_macro"] = name
-        self._save_params()
-
-    def _update_macro_info(self):
-        n = self.macro.event_count()
-        d = self.macro.duration()
-        self.macro_events.set(str(n))
-        self.macro_duration.set(fmt_seconds(d))
-        name = self.current_macro_name or "—"
-        meta = "Non enregistrée" if n == 0 else f"{n} évts | {fmt_seconds(d)}"
-        self.lbl_macro_name.configure(text=f"Macro : {name}")
-        self.lbl_macro_meta.configure(text=meta)
-
-    def _ensure_protected_macros(self):
-        for name in self.PROTECTED_NAMES:
-            path = macro_path_from_name(self.MACROS_DIR, name)
-            if not path.exists():
-                write_macro_file(path, name, [])
-
-    def _play_protected_macro(self, name: str):
-        path = macro_path_from_name(self.MACROS_DIR, name)
-        if not path.exists():
-            return
-        _, steps, _, _ = read_macro_file(path)
-        if steps and self.current_state == State.IDLE:
-            self.current_state = State.PLAYING
-            self.player.play(steps, loop=False)
-            self.tg.replace_controls(self._tg_status_text(f"Lecture {name}"), coc_launched=self._coc_is_running_tg)
-
-    def _save_params(self):
-        write_params_csv(self.PARAMS_PATH, self.params)
-
-    # === Macro CRUD ===
-    def macro_new(self):
-        dlg = TextInputDialog(self, "Nouvelle macro", "Nom:", "Nouvelle Macro")
-        name = dlg.show()
-        if not name or is_protected_macro(name):
-            return
-        name = sanitize_macro_name(name)
-        path = macro_path_from_name(self.MACROS_DIR, name)
-        write_macro_file(path, name, [])
-        self._refresh_macro_sidebar(keep_selection=False)
-        self.macro_list.select(name, fire=True)
-
-    def macro_rename(self):
-        if not self.current_macro_name or is_protected_macro(self.current_macro_name):
-            return
-        dlg = TextInputDialog(self, "Renommer", "Nouveau nom:", self.current_macro_name)
-        new_name = dlg.show()
-        if not new_name or is_protected_macro(new_name):
-            return
-        new_name = sanitize_macro_name(new_name)
-        new_path = macro_path_from_name(self.MACROS_DIR, new_name)
-        self.macro.name = new_name
-        write_macro_file(new_path, new_name, [s.to_dict() for s in self.macro.steps])
-        if self.current_macro_path and self.current_macro_path != new_path:
-            try:
-                self.current_macro_path.unlink()
-            except Exception:
-                pass
-        self.current_macro_name = new_name
-        self.current_macro_path = new_path
-        self._refresh_macro_sidebar(keep_selection=False)
-        self.macro_list.select(new_name, fire=False)
-
-    def macro_delete(self):
-        if not self.current_macro_path or is_protected_macro(self.current_macro_name):
-            return
-        if not messagebox.askyesno("Supprimer", f"Supprimer « {self.current_macro_name} » ?"):
-            return
-        try:
-            self.current_macro_path.unlink()
-        except Exception:
-            pass
-        self.current_macro_name = None
-        self.current_macro_path = None
-        self.macro = Macro()
-        self._refresh_macro_sidebar(keep_selection=False)
-        self._update_macro_info()
-
-    # === Recording/Playback ===
-    def toggle_record(self):
-        if self.current_state == State.RECORDING:
-            self.rec.stop()
-            steps = trim_tail(self.rec.get_steps_as_dicts(), 3.0)
-            self.macro.set_steps_from_dicts(steps)
-            write_macro_file(self.current_macro_path, self.current_macro_name, steps)
-            self._update_macro_info()
-            self.current_state = State.IDLE
-            self._update_ui_state()
-        elif self.current_state == State.IDLE and self.current_macro_path:
-            self.current_state = State.RECORDING
-            self._update_ui_state()
-            self.macro.clear()
-            self.rec.start()
-
-    def on_play(self, notify_tg: bool = True):
-        if self.current_state != State.IDLE:
-            return
-        steps = [s.to_dict() for s in self.macro.steps]
-        if not steps:
-            return
-        self.current_state = State.PLAYING
-        self._update_ui_state()
-        self.cycle_count.set(0)
-        self.session_seconds = 0.0
-        self.player.on_cycle = lambda: self.after(0, lambda: self.cycle_count.set(self.cycle_count.get() + 1))
-        self.player.on_stopped = lambda: self.after(0, self._on_player_stopped)
-        self.player.play(steps, loop=self._auto_loop())
-        self._start_timer()
-        if notify_tg:
-            self.tg.replace_controls(self._tg_status_text("Lecture"), coc_launched=self._coc_is_running_tg)
-
-    def force_stop_all(self, notify_tg: bool = True):
-        if self.current_state == State.RECORDING:
-            self.rec.stop()
-        if self.current_state == State.PLAYING:
-            self.player.stop()
-        self._stop_timer()
-        self.current_state = State.IDLE
-        self._update_ui_state()
-        if notify_tg:
-            self.tg.replace_controls(self._tg_status_text("Arrêté"), coc_launched=self._coc_is_running_tg)
-
-    def _on_player_stopped(self):
-        self._stop_timer()
-        self.current_state = State.IDLE
-        self._update_ui_state()
-
-    def _update_ui_state(self):
-        idle = self.current_state == State.IDLE
-        self.btn_new.configure(state="normal" if idle else "disabled")
-        self.btn_rename.configure(state="normal" if idle else "disabled")
-        self.btn_delete.configure(state="normal" if idle else "disabled")
-        self.btn_play.configure(state="normal" if idle else "disabled")
-        rec_text = "Arrêter" if self.current_state == State.RECORDING else "Enregistrer"
-        self.btn_rec.configure(text=rec_text)
-
-    def _start_timer(self):
-        self._play_timer_running = True
-        self._last_tick = time.perf_counter()
-        self.after(200, self._tick_timer)
-
-    def _stop_timer(self):
-        self._play_timer_running = False
-
-    def _tick_timer(self):
-        if not self._play_timer_running:
-            return
-        now = time.perf_counter()
-        self.session_seconds += now - (self._last_tick or now)
-        self._last_tick = now
-        self.session_elapsed.set(fmt_seconds(self.session_seconds))
-        self.after(200, self._tick_timer)
-
-    # === Hotkeys ===
-    def _register_hotkeys(self):
-        try:
-            keyboard.add_hotkey("f1", self._hk_toggle)
-            keyboard.add_hotkey("ctrl+shift+1", lambda: self.on_play(notify_tg=True))
-            keyboard.add_hotkey("ctrl+shift+0", lambda: self.force_stop_all(notify_tg=True))
-        except Exception as e:
-            self._log.error(f"Hotkeys error: {e}")
-
-    def _hk_toggle(self):
-        if self.current_state == State.PLAYING:
-            self.force_stop_all(notify_tg=True)
-        elif self.current_state == State.IDLE:
-            self.on_play(notify_tg=True)
-
-    # === CoC Launch ===
-    def launch_coc_once(self):
-        path = self.params.get("coc_path", "").strip()
-        if not path:
-            return
-        if self._coc_launched_once:
-            return
-        try:
-            os.startfile(path) if os.name == 'nt' else None
-            self._coc_launched_once = True
-            self._coc_is_running_tg = True
-            self.tg.replace_controls(self._tg_status_text("CoC lancé"), coc_launched=True)
-        except Exception as e:
-            self._log.error(f"Launch error: {e}")
-
-    # === Settings ===
-    def open_settings(self):
-        if "settings" in self.open_windows:
-            return
-        def on_save(p):
-            self.params.update(p)
-            self._save_params()
-        def on_close(name):
-            self.open_windows.pop(name, None)
-        def open_tg():
-            TelegramAutomationDialog(self, self.params, on_save, self.GUIDE_HTML_PATH)
-        def open_diag():
-            DiagnosticsDialog(self, self.tg_status_var.get(), self.APP_VERSION, self.PYTHON_VERSION,
-                            PIL_AVAILABLE, MSS_AVAILABLE, self.LOG_PATH, self.BASE_DIR)
-        win = SettingsDialog(self, self.params, on_save, open_tg, open_diag,
-                            self.tg_status_var, self.tg_status_color_var,
-                            lambda: None, self._request_shutdown, name="settings", on_close_cb=on_close)
-        self.open_windows["settings"] = win
-
-    def _request_shutdown(self):
-        if messagebox.askyesno("Extinction", "Éteindre le PC ?"):
-            if messagebox.askyesno("Confirmer", "Confirmer l'extinction ?"):
-                threading.Thread(target=perform_shutdown, daemon=True).start()
-
-    def safe_quit(self):
-        self._log.info("Fermeture...")
-        self.force_stop_all(notify_tg=False)
-        if self.tg.is_ready:
-            self.tg.send_message("Application fermée.")
-        try:
-            keyboard.remove_all_hotkeys()
-        except Exception:
-            pass
-        clean_old_logs(self.LOG_PATH.parent, "app.log*", 24)
-        self.destroy()
+        if self.controller.is_busy:
+            answer = QMessageBox.question(self, "Fermer AUTO-COC", "Une opération est en cours. Arrêter et fermer ?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        self._closing = True
+        self.metrics_timer.stop()
+        self.telegram_timer.stop()
+        clean_old_logs(self.log_path.parent, "app.log*", 24)
+        self.controller.shutdown()
+        event.accept()
