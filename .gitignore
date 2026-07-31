@@ -2,11 +2,11 @@
 # (Comme demandé)
 config/data.csv
 
-# Données générées par l'utilisateur (Macros)
-# Il est recommandé d'ignorer les macros créées par l'utilisateur.
-# Si vous avez des macros par défaut (ex: "Recharger COC"),
-# vous pouvez les forcer avec: !config/macros/Recharger COC.json
-config/macros/
+# Macros créées par l'utilisateur. Les deux routines système distribuées
+# restent suivies pour qu'un clone propre soit immédiatement fonctionnel.
+config/macros/*
+!config/macros/Recharger COC.json
+!config/macros/Valider arrivée.json
 
 # Fichiers générés par l'application
 config/app.log

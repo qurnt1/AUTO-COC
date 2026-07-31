@@ -36,7 +36,7 @@ Dans `Paramètres` :
 - renseigne les fragments de titres de fenêtre séparés par `|` ;
 - active `Safeguard CoC` pour arrêter une macro si CoC n’est plus détecté.
 
-Le bouton `Ouvrir CoC` demande le lancement, puis l’interface attend une confirmation de présence. Aucun lancement n’est considéré comme validé uniquement parce que le processus du lanceur a démarré.
+Le bouton `Ouvrir CoC` demande le lancement, puis l’interface attend une confirmation de présence dans le délai configuré. Aucun lancement n’est considéré comme validé uniquement parce que le processus du lanceur a démarré. Les raccourcis du menu Démarrer dont Windows masque l’extension `.lnk` sont aussi résolus automatiquement.
 
 ## Selftests
 
@@ -73,7 +73,7 @@ models/                   # Modèles de macros
 services/                 # Enregistrement, lecture, Telegram, système
   coc/                    # Profil, lancement, détection et safeguard CoC
 utils/                    # Persistance, logging et utilitaires
-config/macros/            # Macros JSON
+config/macros/            # Macros utilisateur + routines système distribuées
 ```
 
 ## Données et sécurité
