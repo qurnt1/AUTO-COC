@@ -34,6 +34,7 @@ class CocPresenceMonitor:
         self._state_lock = threading.Lock()
         self._armed = False
         self._missing_count = 0
+        self._last_error = ""
         self._thread: threading.Thread | None = None
 
     @property
@@ -78,6 +79,7 @@ class CocPresenceMonitor:
             if snapshot.error:
                 self._notify_error(snapshot.error)
             else:
+                self._last_error = ""
                 self._update_presence(snapshot)
             self._stop.wait(self.interval)
 
@@ -108,6 +110,9 @@ class CocPresenceMonitor:
             self._notify_error(f"callback safeguard : {exc}")
 
     def _notify_error(self, detail: str) -> None:
+        if detail == self._last_error:
+            return
+        self._last_error = detail
         self.log.error("Monitoring CoC indisponible : %s", detail)
         if self.on_error:
             try:
