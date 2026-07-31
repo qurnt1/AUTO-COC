@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Macro COC v3.0 — Utils / System
+AUTO-COC system utilities
 
 Gestion des processus système, extinction PC, et capture d'écran.
 """

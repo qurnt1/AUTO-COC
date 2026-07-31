@@ -32,9 +32,9 @@ class CocDetector:
         errors = tuple(error for error in (process_error, window_error) if error)
         error = " · ".join(errors)
         if error and not present:
-            reason = "Détection CoC indisponible"
+            reason = "CoC detection unavailable"
         else:
-            reason = "Processus CoC détecté" if processes else "Fenêtre CoC détectée" if windows else "CoC introuvable"
+            reason = "CoC process detected" if processes else "CoC window detected" if windows else "CoC not found"
         return CocPresence(
             present=present,
             process_found=bool(processes),

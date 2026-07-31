@@ -1,57 +1,41 @@
 # Product
 
-<!-- impeccable:product-schema 1 -->
-
 ## Platform
 
-adaptive
+Windows desktop application.
 
 ## Users
 
-Utilisateur Windows qui lance régulièrement des macros clavier/souris pendant qu’une autre application est au premier plan.
+Windows users who run keyboard and mouse automation while another application is in the foreground.
 
-## Product Purpose
+## Purpose
 
-AUTO-COC enregistre, stocke et rejoue des séquences clavier/souris, avec contrôle local et distant via Telegram. Le succès se mesure à la fiabilité de l’exécution, à la visibilité immédiate de l’état et à la capacité d’arrêter une macro sans ambiguïté.
+AUTO-COC records, stores and replays input sequences with local controls and optional Telegram commands. Success means reliable execution, immediate state visibility and an unambiguous stop action.
 
-## Positioning
+## Operating context
 
-Un outil d’automatisation local orienté opérateur, avec timing précis, commandes globales et télécommande Telegram.
+The application runs on Windows while the user interacts with Clash of Clans or another foreground application. Macros are stored locally as JSON and settings as CSV.
 
-## Operating Context
+## Capabilities and constraints
 
-L’application est utilisée sur Windows, souvent en arrière-plan pendant que l’utilisateur interagit avec Clash of Clans ou une autre application. Les macros sont stockées localement en JSON et les paramètres en CSV.
+- Keyboard and mouse recording through `pynput`.
+- Absolute-timing playback, optional looping and emergency stop.
+- A single editable macro library. System actions are role assignments, not a separate locked macro type.
+- Global shortcuts: `F1`, `Ctrl+Shift+1` and `Ctrl+Shift+0`.
+- Asynchronous Telegram control in a dedicated thread.
+- Screenshots, CoC launch and Windows shutdown.
+- Configurable CoC launch profile using path, process names and window titles.
+- Presence detection and safeguard that stops playback after repeated missing checks.
+- PyQt6-only interface.
 
-## Capabilities and Constraints
+## Design principles
 
-- Enregistrement clavier/souris via `pynput`.
-- Lecture à timing absolu, boucle optionnelle et arrêt d’urgence.
-- Macros système protégées.
-- Raccourcis globaux `F1`, `Ctrl+Shift+1` et `Ctrl+Shift+0`.
-- Contrôle Telegram asynchrone dans un thread séparé.
-- Capture d’écran, lancement de CoC et extinction Windows.
-- Profil de lancement CoC configurable par chemin, processus et titres de fenêtre.
-- Détection de présence CoC et safeguard qui arrête la lecture après plusieurs contrôles absents.
-- L’interface finale utilise PyQt6 exclusivement.
+1. Execution state and CoC presence must be understandable in under one second.
+2. Stop must remain visible, immediate and unambiguous.
+3. Remote and local actions must use the same runtime state.
+4. Existing macro data must remain readable.
+5. Every macro is user-editable. System actions point to macros by role and follow rename/delete operations safely.
 
-## Brand Commitments
+## Accessibility
 
-Le nom AUTO-COC et les assets présents dans `config/` sont conservés. L’interface adopte une console opérateur sombre, sobre et très lisible.
-
-## Evidence on Hand
-
-- Modèles de macros dans `models/macro.py`.
-- Services d’enregistrement, de lecture et Telegram dans `services/`.
-- Macros existantes dans `config/macros/`.
-
-## Product Principles
-
-1. L’état d’exécution et la présence de CoC doivent être compréhensibles en moins d’une seconde.
-2. L’arrêt doit rester disponible et sans ambiguïté.
-3. Les opérations distantes et locales doivent suivre le même modèle d’état.
-4. Les données existantes ne doivent pas être réécrites dans un format incompatible.
-5. Les routines système ne doivent pas être confondues avec les macros éditables de l’utilisateur.
-
-## Accessibility & Inclusion
-
-Navigation clavier, focus visible, contraste renforcé, taille de texte compatible avec le scaling Windows et messages d’erreur explicites.
+Keyboard navigation, visible focus, strong contrast, Windows scaling support and explicit error messages.

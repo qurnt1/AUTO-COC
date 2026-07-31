@@ -22,10 +22,10 @@ class RemotePage(QWidget):
         eyebrow = QLabel("REMOTE CONTROL")
         eyebrow.setObjectName("PageEyebrow")
         root.addWidget(eyebrow)
-        title = QLabel("Télécommande Telegram")
+        title = QLabel("Remote")
         title.setObjectName("PageTitle")
         root.addWidget(title)
-        subtitle = QLabel("Supervise et contrôle AUTO-COC depuis ton téléphone, avec le même état que la console locale.")
+        subtitle = QLabel("Control AUTO-COC from Telegram.")
         subtitle.setObjectName("PageSubtitle")
         root.addWidget(subtitle)
 
@@ -35,28 +35,28 @@ class RemotePage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
         top = QHBoxLayout()
-        top.addWidget(StatusPill("Telegram", "Initialisation…", Theme.WARNING))
+        top.addWidget(StatusPill("Telegram", "Starting…", Theme.WARNING))
         top.addStretch()
-        configure = QPushButton("Configurer Telegram…")
+        configure = QPushButton("Configure Telegram")
         configure.clicked.connect(self.configure_requested)
         top.addWidget(configure)
         layout.addLayout(top)
-        info = QLabel("Les commandes distantes sont traitées dans le thread Telegram puis exécutées par le contrôleur Qt. L’interface locale reste utilisable même lorsque Telegram est hors ligne.")
+        info = QLabel("Remote commands use the same runtime state as the local console.")
         info.setObjectName("PageSubtitle")
         info.setWordWrap(True)
         layout.addWidget(info)
         commands = QListWidget()
         commands.addItems([
-            "GO · lancer la macro sélectionnée",
-            "STOP · arrêter immédiatement l’exécution",
-            "CAPTURE · envoyer une capture d’écran",
-            "LAUNCH_COC · lancer le chemin configuré",
-            "MENU · afficher les actions secondaires",
+            "GO · run the selected macro",
+            "STOP · stop immediately",
+            "CAPTURE · send a screenshot",
+            "LAUNCH_COC · open the configured launcher",
+            "MENU · open more actions",
         ])
         commands.setMinimumHeight(210)
         layout.addWidget(commands)
         actions = QHBoxLayout()
-        capture = QPushButton("Envoyer une capture")
+        capture = QPushButton("Send screenshot")
         capture.clicked.connect(self.capture_requested)
         actions.addStretch()
         actions.addWidget(capture)

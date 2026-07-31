@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Macro COC v3.0 — Services / Vision Service
+AUTO-COC vision service
 
 Placeholder pour la Computer Vision (v3.1+).
 Intégration future avec OpenCV/pyautogui.

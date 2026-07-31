@@ -1,85 +1,67 @@
-# AUTO-COC v4
+# AUTO-COC
 
-Application Windows d’enregistrement et de lecture de macros clavier/souris, avec contrôle Telegram.
+AUTO-COC is a Windows desktop console for recording and playing keyboard/mouse macros, with optional Telegram control for Clash of Clans workflows.
 
-## Fonctionnalités
+## Features
 
-- Console opérateur PyQt6 sombre, épurée et orientée action.
-- Enregistrement clavier/souris avec délai de préparation.
-- Lecture à timing absolu et mode boucle.
-- Arrêt d’urgence local et global.
-- Macros utilisateur et routines système présentées dans deux espaces distincts.
-- Contrôle Telegram asynchrone.
-- Capture d’écran et lancement de CoC via un lanceur Windows configurable (`.exe` ou `.lnk`).
-- Détection CoC par processus, chemin d’exécutable et titre de fenêtre.
-- Safeguard optionnel : arrête automatiquement la lecture si CoC disparaît plusieurs contrôles de suite.
-- Diagnostics et journal d’activité intégrés.
-- Sauvegarde atomique des paramètres et macros.
+- PyQt6 operator console with a focused dark theme.
+- Keyboard and mouse recording with absolute-timing playback.
+- One-shot or looped playback, with immediate local and global stop controls.
+- One editable macro library. System actions are regular macros assigned to roles, so they can be renamed, edited or deleted.
+- Telegram control and screenshots.
+- Configurable CoC launcher (`.exe` or `.lnk`) with process, executable-path and window-title detection.
+- Optional safeguard that stops playback when CoC disappears for the configured number of checks.
+- Atomic persistence for macro JSON files and settings CSV.
 
-## Installation
+## Install
 
-Prérequis : Python 3.10+ et Windows 10/11.
+Requirements: Python 3.10+ on Windows 10/11.
 
 ```bash
 pip install -r requirements.txt
 python main.pyw
 ```
 
-## Utilisation
+## Use
 
-La console est organisée autour de trois informations immédiates : la macro active, l’état de CoC et l’état de lecture. Les routines intégrées comme `Recharger COC` et `Valider arrivée` apparaissent dans une zone dédiée et restent non éditables. Les actions de création, renommage et suppression ne concernent que les macros personnelles.
+Create or select a macro in `Macros`, then use `Record`, `Run macro`, `Stop`, or `Open CoC` from `Home`.
 
-Dans `Paramètres` :
+In `Settings`, configure the CoC launcher and detection profile. Enable `Stop if CoC disappears` to arm the safeguard during playback. The launcher is considered ready only after CoC is detected, not merely after a process is started.
 
-- configure le chemin du lanceur CoC ;
-- renseigne les noms de processus séparés par `|` si nécessaire ;
-- renseigne les fragments de titres de fenêtre séparés par `|` ;
-- active `Safeguard CoC` pour arrêter une macro si CoC n’est plus détecté.
+Telegram shortcuts use the assigned system roles. Renaming a role macro keeps its Telegram action linked. Deleting it clears the assignment, so the action becomes unavailable until a macro is assigned again.
 
-Le bouton `Ouvrir CoC` demande le lancement, puis l’interface attend une confirmation de présence dans le délai configuré. Aucun lancement n’est considéré comme validé uniquement parce que le processus du lanceur a démarré. Les raccourcis du menu Démarrer dont Windows masque l’extension `.lnk` sont aussi résolus automatiquement.
-
-## Selftests
-
-Les tests headless vérifient les modèles, la persistance, le timing du lecteur, le contraste du thème et le profil de détection CoC.
+## Self-test
 
 ```bash
 python main.pyw --selftest
 ```
 
-## Raccourcis
+## Shortcuts
 
-| Raccourci | Action |
+| Shortcut | Action |
 |---|---|
-| `F1` | Lancer ou arrêter |
-| `Ctrl+Shift+1` | Lancer la macro sélectionnée |
-| `Ctrl+Shift+0` | Arrêter immédiatement |
-| `Ctrl+N` | Créer une macro |
-| `Ctrl+F` | Rechercher une macro |
-| `Ctrl+Entrée` | Lancer la macro sélectionnée |
-| `Échap` | Arrêter ou fermer l’action courante |
+| `F1` | Run or stop |
+| `Ctrl+Shift+1` | Run selected macro |
+| `Ctrl+Shift+0` | Stop immediately |
+| `Ctrl+N` | Create a macro |
+| `Ctrl+F` | Search macros |
+| `Ctrl+Enter` | Run selected macro |
+| `Esc` | Stop or close the current action |
 
-## Organisation
+## Layout
 
 ```text
-main.pyw                  # Bootstrap QApplication et selftests
-gui/
-  app.py                  # QMainWindow et navigation
-  controller.py           # État, actions et signaux Qt
-  components.py           # Widgets réutilisables
-  dialogs.py              # Dialogues PyQt6
-  theme.py                # Palette et feuille de style QSS
-  pages/                  # Console, bibliothèque, Telegram, diagnostics
-models/                   # Modèles de macros
-services/                 # Enregistrement, lecture, Telegram, système
-  coc/                    # Profil, lancement, détection et safeguard CoC
-utils/                    # Persistance, logging et utilitaires
-config/macros/            # Macros utilisateur + routines système distribuées
+main.pyw                  # QApplication bootstrap and self-tests
+gui/                      # Main window, controller, dialogs, theme and pages
+models/                   # Macro data models
+services/                 # Recording, playback, Telegram and CoC services
+  coc/                    # Launching, detection and safeguard
+utils/                    # Persistence, logging and system helpers
+config/macros/            # Local macro JSON files
 ```
 
-## Données et sécurité
+Macro files and settings stay local in `config/`. The Telegram token is never committed and remains masked in the settings dialog.
 
-Les macros et paramètres restent locaux dans `config/`. Le token Telegram ne doit pas être partagé ni versionné. Le champ de configuration masque le token dans l’interface et conserve la valeur actuelle lorsqu’il est laissé vide.
-
-## Licence
+## License
 
 MIT.

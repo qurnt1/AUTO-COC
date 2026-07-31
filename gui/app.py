@@ -46,14 +46,10 @@ class MainWindow(QMainWindow):
         log_path: Path,
         icon_path: Path,
         guide_path: Path,
-        app_version: str,
-        python_version: str,
-        protected_names: list[str],
+        system_names: list[str],
     ):
         super().__init__()
         self.log = get_logger()
-        self.app_version = app_version
-        self.python_version = python_version
         self.base_dir = base_dir
         self.params_path = params_path
         self.log_path = log_path
@@ -65,14 +61,12 @@ class MainWindow(QMainWindow):
             telegram=telegram,
             macros_dir=macros_dir,
             params_path=params_path,
-            protected_names=protected_names,
-            app_version=app_version,
-            python_version=python_version,
+            system_names=system_names,
             parent=self,
         )
         self._closing = False
         self._hotkeys_registered = False
-        self.setWindowTitle(f"AUTO-COC  /  {app_version}")
+        self.setWindowTitle("AUTO-COC")
         self.setMinimumSize(1180, 760)
         self.resize(1480, 900)
         if icon_path.exists():
@@ -110,27 +104,20 @@ class MainWindow(QMainWindow):
 
         brand = QVBoxLayout()
         brand.setContentsMargins(8, 4, 8, 18)
-        brand.setSpacing(3)
         brand_name = QLabel("AUTO-COC")
         brand_name.setStyleSheet(f"font-size: 20px; font-weight: 800; color: {Theme.TEXT};")
-        brand_tag = QLabel("OPERATOR CONSOLE")
-        brand_tag.setStyleSheet(f"font-size: 10px; font-weight: 700; letter-spacing: 1px; color: {Theme.ACCENT};")
         brand.addWidget(brand_name)
-        brand.addWidget(brand_tag)
         sidebar_layout.addLayout(brand)
 
         self.nav_buttons: list[NavButton] = []
-        for label, tooltip in (("Console", "Vue d’ensemble et commandes"), ("Macros", "Bibliothèque et événements"), ("Télécommande", "Statut et commandes Telegram"), ("Diagnostics", "État système et journal")):
+        for label, tooltip in (("Home", "Run and monitor macros"), ("Macros", "Browse and edit macros"), ("Remote", "Telegram controls"), ("Diagnostics", "System log")):
             button = NavButton(label, tooltip)
             self.nav_buttons.append(button)
             sidebar_layout.addWidget(button)
         self.nav_buttons[0].setChecked(True)
         sidebar_layout.addStretch()
 
-        shortcuts = QLabel("F1  lancer / arrêter\nCtrl+Shift+1  lancer\nCtrl+Shift+0  stopper")
-        shortcuts.setStyleSheet(f"color: {Theme.TEXT_SUBTLE}; font-family: 'Cascadia Mono'; font-size: 10px; padding: 8px;")
-        sidebar_layout.addWidget(shortcuts)
-        self.settings_button = QPushButton("Paramètres")
+        self.settings_button = QPushButton("Settings")
         self.settings_button.setObjectName("QuietButton")
         self.settings_button.setMinimumHeight(40)
         sidebar_layout.addWidget(self.settings_button)
@@ -144,17 +131,14 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(18, 12, 18, 12)
         title_column = QVBoxLayout()
         title_column.setSpacing(2)
-        self.header_title = QLabel("Console")
+        self.header_title = QLabel("Home")
         self.header_title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {Theme.TEXT};")
-        header_subtitle = QLabel("AUTO-COC / contrôle local")
-        header_subtitle.setStyleSheet(f"font-size: 11px; color: {Theme.TEXT_SUBTLE};")
         title_column.addWidget(self.header_title)
-        title_column.addWidget(header_subtitle)
         header_layout.addLayout(title_column)
         header_layout.addStretch()
-        self.state_pill = StatusPill("État", "Prêt", Theme.ACCENT)
-        self.telegram_pill = StatusPill("Telegram", "Hors ligne", Theme.WARNING)
-        self.coc_pill = StatusPill("CoC", "Non lancé", Theme.TEXT_MUTED)
+        self.state_pill = StatusPill("State", "Ready", Theme.ACCENT)
+        self.telegram_pill = StatusPill("Telegram", "Offline", Theme.WARNING)
+        self.coc_pill = StatusPill("CoC", "Not detected", Theme.TEXT_MUTED)
         header_layout.addWidget(self.state_pill)
         header_layout.addWidget(self.telegram_pill)
         header_layout.addWidget(self.coc_pill)
@@ -164,13 +148,13 @@ class MainWindow(QMainWindow):
         self.console_page = ConsolePage()
         self.macros_page = MacrosPage()
         self.remote_page = RemotePage()
-        self.diagnostics_page = DiagnosticsPage(app_version=self.app_version, python_version=self.python_version, log_path=self.log_path)
+        self.diagnostics_page = DiagnosticsPage(log_path=self.log_path)
         for page in (self.console_page, self.macros_page, self.remote_page, self.diagnostics_page):
             self.pages.addWidget(page)
         content.addWidget(self.pages, 1)
         shell.addLayout(content, 1)
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Prêt")
+        self.statusBar().showMessage("Ready")
 
     def _connect_signals(self) -> None:
         for index, button in enumerate(self.nav_buttons):
@@ -220,9 +204,9 @@ class MainWindow(QMainWindow):
             keyboard.add_hotkey("ctrl+shift+1", lambda: self.hotkey_signal.emit("play"))
             keyboard.add_hotkey("ctrl+shift+0", lambda: self.hotkey_signal.emit("stop"))
             self._hotkeys_registered = True
-            self._on_activity("Raccourcis globaux actifs", "success")
+            self._on_activity("Global hotkeys ready", "success")
         except Exception as exc:
-            self._on_activity(f"Raccourcis globaux indisponibles · {exc}", "warning")
+            self._on_activity(f"Global hotkeys unavailable · {exc}", "warning")
 
     def _navigate(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
@@ -251,11 +235,11 @@ class MainWindow(QMainWindow):
             "ERROR": Theme.DANGER,
         }
         messages = {
-            "IDLE": "Prêt à exécuter",
-            "RECORDING": "Capture en cours · effectue tes actions dans CoC",
-            "PLAYING": "La macro est en cours d’exécution",
-            "STOPPING": "Arrêt sécurisé en cours",
-            "ERROR": "Une opération nécessite ton attention",
+            "IDLE": "Ready",
+            "RECORDING": "Recording · perform your actions in CoC",
+            "PLAYING": "Macro is running",
+            "STOPPING": "Stopping safely",
+            "ERROR": "Action needs your attention",
         }
         self.state_pill.set_status(label, colors.get(state_name, Theme.TEXT_MUTED))
         self.console_page.set_state(label, colors.get(state_name, Theme.TEXT_MUTED), messages.get(state_name, label), state_name)
@@ -279,9 +263,9 @@ class MainWindow(QMainWindow):
     def _on_coc_presence(self, snapshot) -> None:
         self.console_page.set_coc_presence(snapshot)
         if snapshot.error:
-            self.coc_pill.set_status("Indisponible", Theme.WARNING)
+            self.coc_pill.set_status("Unavailable", Theme.WARNING)
         elif snapshot.present:
-            self.coc_pill.set_status("Détecté", Theme.ACCENT)
+            self.coc_pill.set_status("Detected", Theme.ACCENT)
         else:
             self.coc_pill.set_status("Absent", Theme.WARNING)
         self.console_page.set_safeguard(self.controller.safeguard_enabled)
@@ -306,14 +290,14 @@ class MainWindow(QMainWindow):
             self.controller.start_recording()
 
     def create_macro(self) -> None:
-        name = TextInputDialog.get_text(self, "Nouvelle macro", "Nom de la macro", "Nouvelle macro")
+        name = TextInputDialog.get_text(self, "New macro", "Macro name", "New macro")
         if name:
             self.controller.create_macro(name)
 
     def rename_macro(self) -> None:
         if not self.controller.current_macro_name:
             return
-        name = TextInputDialog.get_text(self, "Renommer la macro", "Nouveau nom", self.controller.current_macro_name)
+        name = TextInputDialog.get_text(self, "Rename macro", "New name", self.controller.current_macro_name)
         if name:
             self.controller.rename_macro(name)
 
@@ -321,7 +305,7 @@ class MainWindow(QMainWindow):
         name = self.controller.current_macro_name
         if not name:
             return
-        answer = QMessageBox.question(self, "Supprimer la macro", f"Supprimer « {name} » ?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        answer = QMessageBox.question(self, "Delete macro", f"Delete “{name}”?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer == QMessageBox.StandardButton.Yes:
             self.controller.delete_macro()
 
@@ -345,7 +329,7 @@ class MainWindow(QMainWindow):
         self.controller.refresh_coc_presence()
         self.controller.save_params()
         self.controller.sync_safeguard_state()
-        self._on_activity("Paramètres sauvegardés", "success")
+        self._on_activity("Settings saved", "success")
 
     def open_telegram(self) -> None:
         dialog = TelegramDialog(self.controller.params, self.guide_path, self._save_telegram, self)
@@ -361,7 +345,7 @@ class MainWindow(QMainWindow):
         if self.telegram.is_configured and not self.telegram.is_running:
             self.telegram.start()
         self.controller.poll_telegram_status()
-        self._on_activity("Configuration Telegram mise à jour", "success")
+        self._on_activity("Telegram settings saved", "success")
 
     def open_diagnostics(self) -> None:
         pil_available = False
@@ -377,8 +361,6 @@ class MainWindow(QMainWindow):
         except ImportError:
             pass
         dialog = DiagnosticsDialog(
-            app_version=self.app_version,
-            python_version=self.python_version,
             telegram_status=self.telegram.get_status()[0],
             pil_available=pil_available,
             mss_available=mss_available,
@@ -389,14 +371,14 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _confirm_shutdown(self) -> None:
-        answer = QMessageBox.question(self, "Éteindre le PC", "Confirmer l’extinction du PC ?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        answer = QMessageBox.question(self, "Shut down PC", "Shut down the computer?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer == QMessageBox.StandardButton.Yes:
             self.controller.request_shutdown()
 
     def _set_windows_app_id(self) -> None:
         if os.name == "nt":
             try:
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AutoCoc.OperatorConsole.v4")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AutoCoc.OperatorConsole")
             except Exception:
                 pass
 
@@ -405,7 +387,7 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         if self.controller.is_busy:
-            answer = QMessageBox.question(self, "Fermer AUTO-COC", "Une opération est en cours. Arrêter et fermer ?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            answer = QMessageBox.question(self, "Close AUTO-COC", "An operation is running. Stop and close?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return

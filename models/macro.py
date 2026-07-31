@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Macro COC v3.0 — Models / Macro
+AUTO-COC macro models
 
 Définition des structures de données pour les macros utilisant dataclasses.
 Remplace les dictionnaires utilisés dans v2.1.
@@ -181,15 +181,3 @@ class Macro:
     def has_changed(self, other_hash: str) -> bool:
         """Vérifie si la macro a changé par rapport à un hash de référence."""
         return self.sha1 != other_hash
-
-
-# --- Constantes pour les macros protégées ---
-PROTECTED_MACRO_NAMES = frozenset([
-    "recharger coc",
-    "valider arrivée"
-])
-
-
-def is_protected_macro(name: str) -> bool:
-    """Vérifie si un nom de macro est protégé (système)."""
-    return name.strip().lower() in PROTECTED_MACRO_NAMES

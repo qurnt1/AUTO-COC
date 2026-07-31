@@ -141,7 +141,6 @@ def build_stylesheet() -> str:
     QToolButton#NavButton:focus {{ border: 1px solid {Theme.ACCENT}; }}
     QToolButton#NavButton:checked {{ background: {Theme.ACCENT_SOFT}; color: {Theme.ACCENT}; border-color: #285D4C; }}
     QListView {{ background: transparent; border: none; outline: none; }}
-    QListView#SystemRoutineList {{ background: {Theme.ACCENT_SOFT}; border: 1px solid #44552B; border-radius: 8px; padding: 4px; }}
     QListView:focus {{ border: 1px solid {Theme.ACCENT}; border-radius: 8px; }}
     QListView::item {{ border: none; }}
     QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px; }}

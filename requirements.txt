@@ -1,4 +1,4 @@
-# Macro COC v3.0 - Requirements
+# AUTO-COC requirements
 
 # Core GUI
 PyQt6>=6.6.0
@@ -17,6 +17,6 @@ Pillow>=10.0.0
 # Optional: faster screenshots
 mss>=9.0.0
 
-# Optional: Computer Vision (v3.1+)
+# Optional: Computer Vision
 # opencv-python>=4.8.0
 # pyautogui>=0.9.54

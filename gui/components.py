@@ -125,53 +125,15 @@ class MacroDelegate(QStyledItemDelegate):
         painter.setFont(painter.font())
         name_rect = QRect(rect.left() + 13, rect.top() + 10, rect.width() - 26, 21)
         painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item.name)
-        meta = f"{item.events:,} événements  ·  {fmt_duration_for_list(item.duration)}"
+        meta = f"{item.events:,} events  ·  {fmt_duration_for_list(item.duration)}"
         painter.setPen(QColor(Theme.TEXT_MUTED))
         painter.setFont(painter.font())
         meta_rect = QRect(rect.left() + 13, rect.bottom() - 26, rect.width() - 26, 17)
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, meta)
-        if item.protected:
-            painter.setPen(QColor(Theme.WARNING))
-            painter.drawText(rect.adjusted(0, 0, -13, -1), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "INTÉGRÉE")
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         return QSize(260, 72)
-
-
-class SystemRoutineDelegate(QStyledItemDelegate):
-    """Render protected routines as operational capabilities, not macros."""
-
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
-        item: MacroSummary = index.data(Qt.ItemDataRole.UserRole)
-        rect = option.rect.adjusted(6, 4, -6, -4)
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(Theme.SURFACE_RAISED))
-        painter.drawRoundedRect(rect, 9, 9)
-        painter.setPen(QColor(Theme.TEXT))
-        painter.drawText(
-            QRect(rect.left() + 13, rect.top() + 9, rect.width() - 120, 20),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            item.name,
-        )
-        painter.setPen(QColor(Theme.TEXT_MUTED))
-        painter.drawText(
-            QRect(rect.left() + 13, rect.bottom() - 25, rect.width() - 26, 17),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            item.description or "Routine intégrée à AUTO-COC",
-        )
-        painter.setPen(QColor(Theme.WARNING))
-        painter.drawText(
-            rect.adjusted(0, 0, -13, -1),
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            "SYSTÈME",
-        )
-        painter.restore()
-
-    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        return QSize(260, 64)
 
 
 class MacroLibrary(QFrame):
@@ -190,7 +152,7 @@ class MacroLibrary(QFrame):
         header = QHBoxLayout()
         title = QLabel("Macros")
         title.setObjectName("CardTitle")
-        self.count = QLabel("0 personnelles")
+        self.count = QLabel("0 macros")
         self.count.setObjectName("CardCaption")
         header.addWidget(title)
         header.addStretch()
@@ -198,13 +160,12 @@ class MacroLibrary(QFrame):
         layout.addLayout(header)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Rechercher dans tes macros…")
+        self.search.setPlaceholderText("Search macros…")
         self.search.setClearButtonEnabled(True)
-        self.search.setAccessibleName("Rechercher une macro")
+        self.search.setAccessibleName("Search macros")
         layout.addWidget(self.search)
 
         self.model = MacroListModel(self)
-        self.system_model = MacroListModel(self)
         self._all_items: list[MacroSummary] = []
         self._filter_callback: Callable[[], None] | None = None
         self._updating = False
@@ -215,37 +176,15 @@ class MacroLibrary(QFrame):
         self.view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self.view.setMouseTracking(True)
         self.view.setSpacing(3)
-        self.view.setAccessibleName("Liste des macros")
+        self.view.setAccessibleName("Macro list")
         layout.addWidget(self.view, 1)
-
-        system_header = QHBoxLayout()
-        system_title = QLabel("Routines système")
-        system_title.setObjectName("SectionTitle")
-        system_caption = QLabel("Pilotées par AUTO-COC")
-        system_caption.setObjectName("CardCaption")
-        system_header.addWidget(system_title)
-        system_header.addStretch()
-        system_header.addWidget(system_caption)
-        layout.addLayout(system_header)
-
-        self.system_view = QListView()
-        self.system_view.setObjectName("SystemRoutineList")
-        self.system_view.setModel(self.system_model)
-        self.system_view.setItemDelegate(SystemRoutineDelegate(self.system_view))
-        self.system_view.setSelectionMode(QListView.SelectionMode.NoSelection)
-        self.system_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.system_view.setCursor(Qt.CursorShape.ArrowCursor)
-        self.system_view.setSpacing(3)
-        self.system_view.setMaximumHeight(160)
-        self.system_view.setAccessibleName("Liste des routines intégrées")
-        layout.addWidget(self.system_view)
 
         actions = QHBoxLayout()
         actions.setSpacing(6)
-        self.create_button = QPushButton("Nouvelle")
+        self.create_button = QPushButton("New")
         self.create_button.setObjectName("PrimaryButton")
-        self.rename_button = QPushButton("Renommer")
-        self.delete_button = QPushButton("Supprimer")
+        self.rename_button = QPushButton("Rename")
+        self.delete_button = QPushButton("Delete")
         self.delete_button.setObjectName("DangerButton")
         for button in (self.create_button, self.rename_button, self.delete_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -266,12 +205,9 @@ class MacroLibrary(QFrame):
         all_items = list(self._all_items)
         query = self.search.text().strip().lower()
         if query:
-            all_items = [item for item in all_items if query in item.name.lower() or query in item.description.lower()]
-        user_items = [item for item in all_items if item.editable]
-        system_items = [item for item in all_items if item.protected]
-        self.model.set_items(user_items)
-        self.system_model.set_items(system_items)
-        self.count.setText(f"{len(user_items)} personnelle{'' if len(user_items) == 1 else 's'}")
+            all_items = [item for item in all_items if query in item.name.lower()]
+        self.model.set_items(all_items)
+        self.count.setText(f"{len(all_items)} macro{'' if len(all_items) == 1 else 's'}")
         if selected_name:
             for row in range(self.model.rowCount()):
                 item = self.model.item_at(row)
@@ -302,7 +238,6 @@ class MacroLibrary(QFrame):
             return
         item = self.model.item_at(index.row())
         if item:
-            self.system_view.clearSelection()
             self.macro_selected.emit(item.name)
         self._update_actions()
 
@@ -320,9 +255,9 @@ class ActivityFeed(QFrame):
         layout.setContentsMargins(14, 14, 14, 10)
         layout.setSpacing(8)
         header = QHBoxLayout()
-        title = QLabel("Activité récente")
+        title = QLabel("Activity")
         title.setObjectName("CardTitle")
-        self.clear_button = QPushButton("Effacer")
+        self.clear_button = QPushButton("Clear")
         self.clear_button.setObjectName("QuietButton")
         self.clear_button.clicked.connect(self.clear)
         header.addWidget(title)

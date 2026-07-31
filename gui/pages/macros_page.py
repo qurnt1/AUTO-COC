@@ -31,10 +31,10 @@ class MacrosPage(QWidget):
         eyebrow = QLabel("MACRO LIBRARY")
         eyebrow.setObjectName("PageEyebrow")
         root.addWidget(eyebrow)
-        title = QLabel("Tes séquences, au même endroit")
+        title = QLabel("All macros")
         title.setObjectName("PageTitle")
         root.addWidget(title)
-        subtitle = QLabel("Inspecte les événements enregistrés sans modifier les macros système.")
+        subtitle = QLabel("Edit, rename or remove any macro.")
         subtitle.setObjectName("PageSubtitle")
         root.addWidget(subtitle)
 
@@ -49,14 +49,14 @@ class MacrosPage(QWidget):
         detail_layout = QVBoxLayout(details)
         detail_layout.setContentsMargins(18, 18, 18, 18)
         detail_layout.setSpacing(12)
-        heading = QLabel("Aperçu des événements")
+        heading = QLabel("Event preview")
         heading.setObjectName("CardTitle")
         detail_layout.addWidget(heading)
-        self.summary = QLabel("Sélectionne une macro pour afficher sa séquence.")
+        self.summary = QLabel("Select a macro to preview its events.")
         self.summary.setObjectName("CardCaption")
         detail_layout.addWidget(self.summary)
         self.events = QTableWidget(0, 4)
-        self.events.setHorizontalHeaderLabels(["#", "Type", "Délai", "Données"])
+        self.events.setHorizontalHeaderLabels(["#", "Type", "Delay", "Data"])
         self.events.horizontalHeader().setStretchLastSection(True)
         self.events.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.events.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -72,9 +72,9 @@ class MacrosPage(QWidget):
     def set_macro(self, macro) -> None:
         self.events.setRowCount(0)
         if not macro or not getattr(macro, "name", ""):
-            self.summary.setText("Sélectionne une macro pour afficher sa séquence.")
+            self.summary.setText("Select a macro to preview its events.")
             return
-        self.summary.setText(f"{macro.name} · {macro.event_count():,} événements · durée {macro.duration():.2f}s")
+        self.summary.setText(f"{macro.name} · {macro.event_count():,} events · {macro.duration():.2f}s")
         preview_steps = macro.steps[:120]
         self.events.setRowCount(len(preview_steps))
         for row, step in enumerate(preview_steps):

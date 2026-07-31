@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Macro COC v3.0 — Utils / Config
+AUTO-COC configuration utilities
 
-Gestion des fichiers de configuration CSV et JSON avec écriture atomique.
+Atomic CSV and JSON persistence for settings and macros.
 """
 
 import csv
@@ -243,50 +243,17 @@ def sanitize_macro_name(name: str) -> str:
     return name or "Macro"
 
 
-def list_macros(
-    macros_dir: Path,
-    protected_names: Optional[List[str]] = None
-) -> List[Tuple[str, Path]]:
-    """
-    Liste les macros, triées par nom naturel.
-    Les macros protégées sont toujours en premier.
-    
-    Args:
-        macros_dir: Dossier contenant les macros JSON
-        protected_names: Liste des noms de macros protégées
-        
-    Returns:
-        Liste de tuples (nom, chemin)
-    """
+def list_macros(macros_dir: Path) -> List[Tuple[str, Path]]:
+    """List all macros in natural name order."""
     macros_dir.mkdir(parents=True, exist_ok=True)
     items: List[Tuple[str, Path]] = []
 
     for p in macros_dir.glob("*.json"):
         items.append((p.stem, p))
     
-    # Séparer les macros protégées
-    protected = protected_names or []
-    protected_lower = [n.strip().lower() for n in protected]
-    
-    protected_items = []
-    other_items = []
-    
-    for n, p in items:
-        n_lower = n.strip().lower()
-        if n_lower in protected_lower:
-            protected_items.append((n, p))
-        else:
-            other_items.append((n, p))
-    
-    # Tri naturel seulement pour les autres items
-    other_items.sort(key=lambda item: natural_sort_key(item[0]))
-    
-    # Reconstruire la liste (protégées en premier)
-    final_items = protected_items + other_items
-    
-    # Déduplications
+    items.sort(key=lambda item: natural_sort_key(item[0]))
     seen, out = set(), []
-    for n, p in final_items:
+    for n, p in items:
         if n not in seen:
             out.append((n, p))
             seen.add(n)
@@ -319,7 +286,7 @@ def fmt_seconds(sec: float) -> str:
 
 
 def fmt_duration_for_list(d: float) -> str:
-    """Durée affichée dans la liste ; 0 -> 'Non enregistrée'."""
+    """Format a macro duration for the library; zero means it was not recorded."""
     if d <= 0.0:
-        return "Non enregistrée"
+        return "Not recorded"
     return fmt_seconds(d)

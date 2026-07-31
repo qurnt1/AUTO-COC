@@ -13,7 +13,7 @@ from typing import Any
 from PyQt6.QtCore import QTimer, QObject, Qt, pyqtSignal
 
 from gui.models import MacroSummary
-from models.macro import Macro, is_protected_macro
+from models.macro import Macro
 from services.recorder_service import Player, Recorder, trim_tail
 from services.coc.detector import CocDetector
 from services.coc.launcher import CocLauncher
@@ -40,6 +40,12 @@ class RuntimeState(Enum):
     PLAYING = auto()
     STOPPING = auto()
     ERROR = auto()
+
+
+SYSTEM_ROLE_DEFAULTS = {
+    "reload_coc": "Recharger COC",
+    "validate_arrival": "Validate arrival",
+}
 
 
 class RuntimeSignals(QObject):
@@ -69,9 +75,7 @@ class RuntimeController(QObject):
         telegram: TelegramBotService,
         macros_dir: Path,
         params_path: Path,
-        protected_names: list[str],
-        app_version: str,
-        python_version: str,
+        system_names: list[str],
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -81,9 +85,8 @@ class RuntimeController(QObject):
         self.telegram = telegram
         self.macros_dir = macros_dir
         self.params_path = params_path
-        self.protected_names = protected_names
-        self.app_version = app_version
-        self.python_version = python_version
+        defaults = tuple(system_names) or tuple(SYSTEM_ROLE_DEFAULTS.values())
+        self.system_defaults = dict(zip(SYSTEM_ROLE_DEFAULTS, defaults))
 
         self.state = RuntimeState.IDLE
         self.current_macro = Macro()
@@ -99,7 +102,7 @@ class RuntimeController(QObject):
         self.coc_profile = CocLaunchProfile.from_params(params)
         self.coc_detector = CocDetector(self.coc_profile)
         self.coc_launcher = CocLauncher()
-        self.coc_presence = CocPresence(False, False, False, reason="CoC non vérifié")
+        self.coc_presence = CocPresence(False, False, False, reason="CoC not verified")
         self._coc_last_present = False
         self._safeguard_triggered = False
         self.coc_monitor = CocPresenceMonitor(
@@ -147,22 +150,20 @@ class RuntimeController(QObject):
             return
         self._bootstrapped = True
         self.coc_monitor.start()
-        self._ensure_protected_macros()
+        self._ensure_system_macros()
         self.refresh_macros()
         self._emit_telegram_status()
         last = self.params.get("last_macro", "").strip()
-        editable_items = [item for item in self._summaries if item.editable]
-        if last and any(item.name == last for item in editable_items):
+        if last and any(item.name == last for item in self._summaries):
             self.select_macro(last)
-        elif editable_items:
-            self.select_macro(editable_items[0].name)
-        self._activity("Console prête", "success")
+        elif self._summaries:
+            self.select_macro(self._summaries[0].name)
         if self.telegram.is_ready:
-            self.telegram.send_message(f"Macro COC v{self.app_version} lancée.")
-            self._replace_tg_controls("Prêt")
+            self.telegram.send_message("AUTO-COC is ready.")
+            self._replace_tg_controls("Ready")
 
     def refresh_macros(self, selected_name: str | None = None) -> None:
-        items = list_macros(self.macros_dir, self.protected_names)
+        items = list_macros(self.macros_dir)
         self._summaries = []
         for name, path in items:
             events, duration = read_macro_meta(path)
@@ -174,23 +175,14 @@ class RuntimeController(QObject):
         return tuple(self._summaries)
 
     def _summary(self, name: str, events: int, duration: float):
-        if is_protected_macro(name):
-            descriptions = {
-                "recharger coc": "Réinitialise l’environnement de jeu avant une nouvelle session.",
-                "valider arrivée": "Effectue la séquence de validation de début de session.",
-            }
-            return MacroSummary(name, events, duration, "system", descriptions.get(name.casefold(), "Routine intégrée à AUTO-COC."))
-        return MacroSummary(name, events, duration, "user", "Macro créée par toi.")
+        return MacroSummary(name, events, duration)
 
     def select_macro(self, name: str) -> None:
         if self.is_busy:
             return
-        if is_protected_macro(name):
-            self._error("Cette routine système n’est pas une macro utilisateur.", "Elle est pilotée par les commandes système dédiées.")
-            return
         path = macro_path_from_name(self.macros_dir, name)
         if not path.exists():
-            self._error(f"La macro « {name} » est introuvable.", "Vérifie le dossier config/macros.")
+            self._error(f"Macro “{name}” not found.", "Check the config/macros folder.")
             return
         macro_name, steps, sha1, updated_at = read_macro_file(path)
         self.current_macro = Macro(name=macro_name)
@@ -204,69 +196,66 @@ class RuntimeController(QObject):
             self.save_params()
         self.signals.macro_selected.emit(self.current_macro)
         self.signals.macros_changed.emit(tuple(self._summaries), name)
-        self._activity(f"Macro sélectionnée · {name}", "info")
+        self._activity(f"Macro selected · {name}", "info")
 
     def create_macro(self, name: str) -> bool:
         if self.is_busy:
             return False
         clean_name = sanitize_macro_name(name)
-        if not clean_name or is_protected_macro(clean_name):
-            self._error("Ce nom de macro n’est pas disponible.", "Choisis un nom différent des macros système.")
+        if not clean_name:
+            self._error("This macro name is not available.", "Choose a different name.")
             return False
         path = macro_path_from_name(self.macros_dir, clean_name)
         if path.exists():
-            self._error("Cette macro existe déjà.", "Utilise Renommer ou choisis un autre nom.")
+            self._error("This macro already exists.", "Rename it or choose another name.")
             return False
         if not write_macro_file(path, clean_name, []):
-            self._error("La macro n’a pas pu être créée.", "Vérifie les droits d’écriture du dossier config.")
+            self._error("The macro could not be created.", "Check write access to the config folder.")
             return False
         self.refresh_macros(clean_name)
         self.select_macro(clean_name)
-        self._activity(f"Macro créée · {clean_name}", "success")
+        self._activity(f"Macro created · {clean_name}", "success")
         return True
 
     def rename_macro(self, new_name: str) -> bool:
         if not self.current_macro_name or not self.current_macro_path or self.is_busy:
             return False
-        if is_protected_macro(self.current_macro_name):
-            self._error("Cette macro système est protégée.", "Elle ne peut pas être renommée.")
-            return False
+        old_name = self.current_macro_name
         clean_name = sanitize_macro_name(new_name)
         new_path = macro_path_from_name(self.macros_dir, clean_name)
-        if not clean_name or is_protected_macro(clean_name) or (new_path.exists() and new_path != self.current_macro_path):
-            self._error("Ce nom de macro n’est pas disponible.", "Choisis un nom différent.")
+        if not clean_name or (new_path.exists() and new_path != self.current_macro_path):
+            self._error("This macro name is not available.", "Choose a different name.")
             return False
         if not write_macro_file(new_path, clean_name, [step.to_dict() for step in self.current_macro.steps]):
-            self._error("La macro n’a pas pu être renommée.", "Vérifie les droits d’écriture du dossier config.")
+            self._error("The macro could not be renamed.", "Check write access to the config folder.")
             return False
         if new_path != self.current_macro_path:
             self.current_macro_path.unlink(missing_ok=True)
         self.current_macro.name = clean_name
         self.current_macro_name = clean_name
         self.current_macro_path = new_path
+        self._rename_system_roles(old_name, clean_name)
         self.refresh_macros(clean_name)
         self.signals.macro_selected.emit(self.current_macro)
-        self._activity(f"Macro renommée · {clean_name}", "success")
+        self._activity(f"Macro renamed · {clean_name}", "success")
         return True
 
     def delete_macro(self) -> bool:
         if not self.current_macro_name or not self.current_macro_path or self.is_busy:
             return False
-        if is_protected_macro(self.current_macro_name):
-            self._error("Cette macro système est protégée.", "Elle ne peut pas être supprimée.")
-            return False
         name = self.current_macro_name
         try:
             self.current_macro_path.unlink()
         except OSError as exc:
-            self._error("La macro n’a pas pu être supprimée.", str(exc))
+            self._error("The macro could not be deleted.", str(exc))
             return False
+        self._clear_system_roles(name)
         self.current_macro = Macro()
         self.current_macro_name = None
         self.current_macro_path = None
         self.refresh_macros()
         self.signals.macro_selected.emit(self.current_macro)
-        self._activity(f"Macro supprimée · {name}", "success")
+        self._activity(f"Macro deleted · {name}", "success")
         return True
 
     def start_recording(self) -> bool:
@@ -275,13 +264,13 @@ class RuntimeController(QObject):
         try:
             self.recorder.start()
         except Exception as exc:
-            self._error("Impossible de démarrer l’enregistrement.", str(exc))
-            self._set_state(RuntimeState.IDLE, "Prêt")
+            self._error("Could not start recording.", str(exc))
+            self._set_state(RuntimeState.IDLE, "Ready")
             return False
         self._record_started_at = time.perf_counter()
         self.current_macro.clear()
-        self._set_state(RuntimeState.RECORDING, "Enregistrement")
-        self._activity(f"Enregistrement démarré · {self.current_macro_name}", "warning")
+        self._set_state(RuntimeState.RECORDING, "Recording")
+        self._activity(f"Recording started · {self.current_macro_name}", "warning")
         return True
 
     def stop_recording(self) -> bool:
@@ -291,45 +280,45 @@ class RuntimeController(QObject):
         steps = trim_tail(self.recorder.get_steps_as_dicts(), 3.0)
         self.current_macro.set_steps_from_dicts(steps)
         if not self.current_macro_path or not write_macro_file(self.current_macro_path, self.current_macro_name or "Macro", steps):
-            self._error("L’enregistrement n’a pas pu être sauvegardé.", "Vérifie les droits d’écriture du dossier config.")
-            self._set_state(RuntimeState.IDLE, "Prêt")
+            self._error("The recording could not be saved.", "Check write access to the config folder.")
+            self._set_state(RuntimeState.IDLE, "Ready")
             return False
         self._record_started_at = None
         self.refresh_macros(self.current_macro_name)
         self.signals.macro_selected.emit(self.current_macro)
-        self._set_state(RuntimeState.IDLE, "Macro sauvegardée")
-        self._activity(f"Macro sauvegardée · {len(steps):,} événements", "success")
+        self._set_state(RuntimeState.IDLE, "Macro saved")
+        self._activity(f"Macro saved · {len(steps):,} events", "success")
         return True
 
     def start_playback(self) -> bool:
         if self.is_busy or self.current_macro.is_empty():
             if self.current_macro.is_empty():
-                self._error("Cette macro est vide.", "Enregistre des événements avant de la lire.")
+                self._error("This macro is empty.", "Record some events before playing it.")
             return False
         self.refresh_coc_presence()
         if self.safeguard_enabled and not self.coc_presence.present:
-            detail = "La détection CoC est indisponible."
+            detail = "CoC detection is unavailable."
             if not self.coc_presence.error:
-                detail = "Le safeguard bloque la macro tant que CoC n’est pas présent."
-            self._error("CoC non vérifié.", detail)
+                detail = "Safeguard blocks playback until CoC is detected."
+            self._error("CoC not verified.", detail)
             return False
         try:
             self._cycles = 0
             self._playback_duration = self.current_macro.duration()
             self._playback_started_at = time.perf_counter()
             self._safeguard_triggered = False
-            self._set_state(RuntimeState.PLAYING, "Lecture")
+            self._set_state(RuntimeState.PLAYING, "Playing")
             if self.safeguard_enabled:
                 self.coc_monitor.arm()
             self.player.play([step.to_dict() for step in self.current_macro.steps], loop=self.auto_loop)
         except Exception as exc:
             self.coc_monitor.disarm()
             self._playback_started_at = None
-            self._set_state(RuntimeState.IDLE, "Prêt")
-            self._error("Impossible de démarrer la lecture.", str(exc))
+            self._set_state(RuntimeState.IDLE, "Ready")
+            self._error("Could not start playback.", str(exc))
             return False
-        self._activity(f"Lecture démarrée · {self.current_macro_name}", "success")
-        self._replace_tg_controls("Lecture")
+        self._activity(f"Playback started · {self.current_macro_name}", "success")
+        self._replace_tg_controls("Playing")
         return True
 
     def stop_all(self) -> None:
@@ -337,7 +326,7 @@ class RuntimeController(QObject):
             self.stop_recording()
             return
         if self.state == RuntimeState.PLAYING:
-            self._set_state(RuntimeState.STOPPING, "Arrêt en cours")
+            self._set_state(RuntimeState.STOPPING, "Stopping")
             self.coc_monitor.disarm()
             self.player.stop()
             self._playback_started_at = None
@@ -346,7 +335,7 @@ class RuntimeController(QObject):
         self.params["coc_safeguard"] = "1" if enabled else "0"
         self.save_params()
         self._apply_safeguard_state(enabled)
-        self._activity(f"Safeguard CoC · {'activé' if enabled else 'désactivé'}", "info")
+        self._activity(f"CoC safeguard · {'enabled' if enabled else 'disabled'}", "info")
 
     def sync_safeguard_state(self) -> None:
         """Apply a value loaded from the settings dialog without rewriting it."""
@@ -360,9 +349,9 @@ class RuntimeController(QObject):
             return
         self.refresh_coc_presence()
         if self.coc_presence.error:
-            self._activity("Safeguard en attente · détection CoC indisponible", "warning")
+            self._activity("Safeguard waiting · CoC detection unavailable", "warning")
         elif not self.coc_presence.present:
-            self.handle_safeguard_loss("CoC n’est plus détecté.")
+            self.handle_safeguard_loss("CoC is no longer detected.")
         else:
             self.coc_monitor.arm()
 
@@ -389,7 +378,7 @@ class RuntimeController(QObject):
     def set_auto_loop(self, enabled: bool) -> None:
         self.params["auto_loop"] = "1" if enabled else "0"
         self.save_params()
-        self._activity(f"Lecture en boucle · {'activée' if enabled else 'désactivée'}", "info")
+        self._activity(f"Loop playback · {'enabled' if enabled else 'disabled'}", "info")
 
     def save_params(self) -> None:
         write_params_csv(self.params_path, self.params)
@@ -398,44 +387,44 @@ class RuntimeController(QObject):
         self.refresh_coc_profile()
         result = self.coc_launcher.launch(self.coc_profile, self.coc_detector)
         if not result.started:
-            self._error("CoC n’a pas pu être lancé.", result.message)
+            self._error("Could not launch CoC.", result.message)
             return False
         self._coc_launch_timer.stop()
         self._coc_launched = result.already_present
         if result.already_present:
-            self._activity("CoC déjà détecté", "success")
+            self._activity("CoC already detected", "success")
         else:
             self._coc_launch_timer.start(int(self.coc_profile.startup_timeout * 1000))
-            self._activity("Lancement CoC demandé · vérification en cours", "success")
+            self._activity("CoC launch requested · checking", "success")
         return True
 
     def _on_coc_launch_timeout(self) -> None:
         if self.coc_presence.present:
             return
         self._coc_launched = False
-        detail = "Le lanceur a démarré, mais CoC n’a pas été détecté dans le délai configuré."
+        detail = "The launcher started, but CoC was not detected before the timeout."
         if self.coc_presence.error:
-            detail = f"La détection CoC est indisponible : {self.coc_presence.error}"
-        self._error("CoC non confirmé", detail)
+            detail = f"CoC detection is unavailable: {self.coc_presence.error}"
+        self._error("CoC was not confirmed", detail)
 
     def capture_screen(self) -> None:
         if not self.telegram.is_ready:
-            self._error("Telegram n’est pas connecté.", "Configure le bot et le Chat ID avant d’envoyer une capture.")
+            self._error("Telegram is not connected.", "Configure the bot and chat ID before sending a screenshot.")
             return
         threading.Thread(target=self._capture_worker, daemon=True, name="ScreenCapture").start()
-        self._activity("Capture d’écran en préparation…", "info")
+        self._activity("Preparing screenshot…", "info")
 
     def _capture_worker(self) -> None:
         png = grab_screenshot_png_bytes()
         if png:
             self.telegram.send_photo(png, caption=f"Capture · {self.current_macro_name or 'AUTO-COC'}")
-            self.signals.activity.emit("Capture envoyée via Telegram", "success")
+            self.signals.activity.emit("Screenshot sent via Telegram", "success")
         else:
-            self.signals.error.emit("Capture impossible", "Aucune méthode de capture n’a fonctionné.")
+            self.signals.error.emit("Screenshot unavailable", "No capture method succeeded.")
 
     def request_shutdown(self) -> None:
         threading.Thread(target=perform_shutdown, daemon=True, name="SystemShutdown").start()
-        self._activity("Extinction du système demandée", "warning")
+        self._activity("System shutdown requested", "warning")
 
     def drain_telegram_commands(self) -> None:
         while True:
@@ -446,7 +435,7 @@ class RuntimeController(QObject):
             self.handle_telegram_command(command.command, command.meta)
 
     def handle_telegram_command(self, command: str, meta: dict[str, Any]) -> None:
-        self._activity(f"Commande Telegram · {command}", "info")
+        self._activity(f"Telegram command · {command}", "info")
         if command == "STOP":
             self.stop_all()
         elif command == "GO":
@@ -457,50 +446,54 @@ class RuntimeController(QObject):
             self.launch_coc()
         elif command == "TOGGLE_LOOP":
             self.set_auto_loop(not self.auto_loop)
-            self._replace_tg_controls("Boucle mise à jour")
+            self._replace_tg_controls("Loop updated")
         elif command == "SELECT_MACRO_LIST":
-            self.telegram.push_macro_selection([item.name for item in self._summaries if item.editable])
+            self.telegram.push_macro_selection([item.name for item in self._summaries])
         elif command.startswith("SELECT_MACRO:"):
             self.select_macro(command.split(":", 1)[1])
         elif command == "RELOAD_COC":
-            self._play_protected_macro("Recharger COC")
+            self._play_system_macro("reload_coc")
         elif command == "VALIDATE_ARRIVAL":
-            self._play_protected_macro("Valider arrivée")
+            self._play_system_macro("validate_arrival")
         elif command == "MENU":
-            self.telegram.replace_menu("Paramètres", loop_state=self.auto_loop)
+            self.telegram.replace_menu("Settings", loop_state=self.auto_loop)
         elif command == "BACK":
-            self.telegram.replace_controls(self._tg_status_text("Prêt"), coc_launched=self._coc_running_for_tg)
+            self.telegram.replace_controls(self._tg_status_text("Ready"), coc_launched=self._coc_running_for_tg)
         elif command == "SHUTDOWN_ASK":
             self.telegram.push_shutdown_confirm()
         elif command == "SHUTDOWN_CONFIRM":
             self.request_shutdown()
         elif command == "SHUTDOWN_CANCEL":
-            self.telegram.replace_controls(self._tg_status_text("Prêt"), coc_launched=self._coc_running_for_tg)
+            self.telegram.replace_controls(self._tg_status_text("Ready"), coc_launched=self._coc_running_for_tg)
 
-    def _play_protected_macro(self, name: str) -> None:
+    def _play_system_macro(self, role: str) -> None:
         if self.is_busy:
-            self._error("Une autre opération est déjà en cours.", "Arrête la lecture avant de lancer cette macro.")
+            self._error("Another operation is already running.", "Stop playback before running this macro.")
             return
         if self.safeguard_enabled:
             self.refresh_coc_presence()
             if not self.coc_presence.present:
-                detail = "La détection CoC est indisponible."
+                detail = "CoC detection is unavailable."
                 if not self.coc_presence.error:
-                    detail = "Le safeguard bloque la routine tant que CoC n’est pas présent."
-                self._error("CoC non vérifié.", detail)
+                    detail = "Safeguard blocks this routine until CoC is detected."
+                self._error("CoC not verified.", detail)
                 return
+        name = self._system_macro_name(role)
+        if not name:
+            self._error("No macro is assigned to this command.", "Assign a macro name in the settings or use the macro library.")
+            return
         path = macro_path_from_name(self.macros_dir, name)
         if not path.exists():
-            self._error(f"La macro système « {name} » est introuvable.", "Réinstalle la macro protégée.")
+            self._error(f"The macro “{name}” could not be found.", "Select or recreate it in the macro library.")
             return
         _, steps, _, _ = read_macro_file(path)
         if not steps:
-            self._error(f"La macro système « {name} » est vide.", "")
+            self._error(f"The macro “{name}” is empty.", "Record some events before running it.")
             return
         self._playback_duration = sum(max(0.0, float(step.get("t", 0.0))) for step in steps)
         self._playback_started_at = time.perf_counter()
         self._safeguard_triggered = False
-        self._set_state(RuntimeState.PLAYING, f"Lecture · {name}")
+        self._set_state(RuntimeState.PLAYING, f"Playing · {name}")
         if self.safeguard_enabled:
             self.coc_monitor.arm()
         try:
@@ -508,16 +501,48 @@ class RuntimeController(QObject):
         except Exception as exc:
             self.coc_monitor.disarm()
             self._playback_started_at = None
-            self._set_state(RuntimeState.IDLE, "Prêt")
-            self._error("Impossible de lancer la routine système.", str(exc))
+            self._set_state(RuntimeState.IDLE, "Ready")
+            self._error("Could not run the routine.", str(exc))
             return
-        self._replace_tg_controls(f"Lecture · {name}")
+        self._replace_tg_controls(f"Playing · {name}")
 
-    def _ensure_protected_macros(self) -> None:
-        for name in self.protected_names:
-            path = macro_path_from_name(self.macros_dir, name)
-            if not path.exists():
-                write_macro_file(path, name, [])
+    def _ensure_system_macros(self) -> None:
+        changed = False
+        for role, default_name in self.system_defaults.items():
+            key = f"system_{role}_macro"
+            if key not in self.params:
+                self.params[key] = default_name
+                changed = True
+            name = self.params.get(key, "").strip()
+            if name:
+                path = macro_path_from_name(self.macros_dir, name)
+                if not path.exists():
+                    write_macro_file(path, name, [])
+        if changed:
+            self.save_params()
+
+    def _system_macro_name(self, role: str) -> str:
+        return self.params.get(f"system_{role}_macro", self.system_defaults.get(role, "")).strip()
+
+    def _rename_system_roles(self, old_name: str, new_name: str) -> None:
+        changed = False
+        for role in self.system_defaults:
+            key = f"system_{role}_macro"
+            if self.params.get(key, "").strip().casefold() == old_name.strip().casefold():
+                self.params[key] = new_name
+                changed = True
+        if changed:
+            self.save_params()
+
+    def _clear_system_roles(self, name: str) -> None:
+        changed = False
+        for role in self.system_defaults:
+            key = f"system_{role}_macro"
+            if self.params.get(key, "").strip().casefold() == name.strip().casefold():
+                self.params[key] = ""
+                changed = True
+        if changed:
+            self.save_params()
 
     def _player_cycle(self) -> None:
         self._cycles += 1
@@ -530,19 +555,19 @@ class RuntimeController(QObject):
         self._playback_started_at = None
         if self._safeguard_triggered:
             self._safeguard_triggered = False
-            self._set_state(RuntimeState.IDLE, "Arrêt safeguard · CoC perdu")
-            self._activity("Lecture arrêtée par le safeguard · CoC perdu", "warning")
+            self._set_state(RuntimeState.IDLE, "Safeguard stopped · CoC lost")
+            self._activity("Playback stopped by safeguard · CoC lost", "warning")
             self._replace_tg_controls("Safeguard")
         else:
-            self._set_state(RuntimeState.IDLE, "Lecture terminée")
-            self._activity("Lecture terminée", "success")
-            self._replace_tg_controls("Terminé")
+            self._set_state(RuntimeState.IDLE, "Playback complete")
+            self._activity("Playback complete", "success")
+            self._replace_tg_controls("Complete")
 
     def _apply_coc_snapshot(self, snapshot: CocPresence) -> None:
         self.coc_presence = snapshot
         if snapshot.present and self._coc_launch_timer.isActive():
             self._coc_launch_timer.stop()
-            self._activity("CoC détecté · lancement confirmé", "success")
+            self._activity("CoC detected · launch confirmed", "success")
         self._coc_launched = snapshot.present
         self._coc_running_for_tg = snapshot.present
         if self._bootstrapped and snapshot.present != self._coc_last_present:
@@ -555,19 +580,19 @@ class RuntimeController(QObject):
 
     def _handle_coc_lost(self, snapshot: CocPresence) -> None:
         if self.state == RuntimeState.PLAYING and self.safeguard_enabled:
-            self.log.warning("Safeguard CoC déclenché : %s", snapshot.reason)
-            self.signals.safeguard_triggered.emit("CoC n’est plus détecté.")
+            self.log.warning("CoC safeguard triggered: %s", snapshot.reason)
+            self.signals.safeguard_triggered.emit("CoC is no longer detected.")
 
     def _handle_coc_detection_error(self, detail: str) -> None:
-        self.log.warning("Détection CoC indisponible : %s", detail)
-        self.signals.activity.emit("Détection CoC indisponible · safeguard en attente", "warning")
+        self.log.warning("CoC detection unavailable: %s", detail)
+        self.signals.activity.emit("CoC detection unavailable · safeguard waiting", "warning")
 
     def handle_safeguard_loss(self, reason: str) -> None:
         if self.state != RuntimeState.PLAYING or not self.safeguard_enabled:
             return
         self._safeguard_triggered = True
-        self._set_state(RuntimeState.STOPPING, "Safeguard · arrêt en cours")
-        self._activity(f"Safeguard déclenché · {reason}", "warning")
+        self._set_state(RuntimeState.STOPPING, "Safeguard · stopping")
+        self._activity(f"Safeguard triggered · {reason}", "warning")
         self.player.stop()
 
     def _set_state(self, state: RuntimeState, label: str) -> None:
@@ -615,5 +640,5 @@ class RuntimeController(QObject):
             except Exception:
                 pass
             if self.telegram.is_ready:
-                self.telegram.send_message("Application fermée.")
+                self.telegram.send_message("AUTO-COC closed.")
             self.telegram.stop()

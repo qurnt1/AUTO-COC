@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Macro COC v3.0 — Services / Telegram Service
+AUTO-COC Telegram service
 
 Implémentation asynchrone avec python-telegram-bot v21+.
 Remplace entièrement TelegramBridge de v2.1.
@@ -150,12 +150,12 @@ class TelegramBotService:
             Tuple (texte de statut, code couleur hex)
         """
         if not self.is_configured:
-            return "Token manquant", "#FF6B6B"
+            return "Token missing", "#FF6B6B"
         if not self._chat_id:
-            return "Chat ID manquant", "#F6C45D"
+            return "Chat ID missing", "#F6C45D"
         if not self.is_running:
-            return "Poller arrêté", "#F6C45D"
-        return "Connecté", "#63E6A4"
+            return "Poller stopped", "#F6C45D"
+        return "Connected", "#63E6A4"
     
     # =========================
     #     Start / Stop
@@ -275,8 +275,8 @@ class TelegramBotService:
             return
         
         await update.message.reply_text(
-            "🤖 Macro COC v3.0 — Bot connecté!\n"
-            "Utilisez les commandes ou les boutons pour contrôler l'application."
+            "AUTO-COC is connected.\n"
+            "Use the buttons to control the application."
         )
     
     async def _on_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,7 +295,7 @@ class TelegramBotService:
             self._log.info(f"TG: Auto-assignation chat_id: {from_id}")
         elif from_id != self._chat_id:
             self._log.warning(f"TG: Callback ignoré (chat_id invalide: {from_id})")
-            await query.answer("Non autorisé.")
+            await query.answer("Not authorized.")
             return
         
         # Répondre immédiatement au callback
@@ -438,19 +438,19 @@ class TelegramBotService:
             
             # Créer le nouveau clavier
             coc_btn = (
-                [InlineKeyboardButton("COC lancé ✅", callback_data="DUMMY_COC_STATUS")]
+                [InlineKeyboardButton("CoC running ✅", callback_data="DUMMY_COC_STATUS")]
                 if coc_launched
-                else [InlineKeyboardButton("Lancer CoC", callback_data="LAUNCH_COC")]
+                else [InlineKeyboardButton("Launch CoC", callback_data="LAUNCH_COC")]
             )
             
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("Paramètres ⚙️", callback_data="MENU"),
-                    InlineKeyboardButton("Capture 📸", callback_data="CAPTURE")
+                    InlineKeyboardButton("Settings ⚙️", callback_data="MENU"),
+                    InlineKeyboardButton("Screenshot 📸", callback_data="CAPTURE")
                 ],
                 coc_btn,
                 [
-                    InlineKeyboardButton("Lancer ✅", callback_data="GO"),
+                    InlineKeyboardButton("Run ✅", callback_data="GO"),
                     InlineKeyboardButton("Stop ❌", callback_data="STOP")
                 ],
             ])
@@ -465,7 +465,7 @@ class TelegramBotService:
         except TelegramError as e:
             self._log.error(f"TG: Échec replace_controls: {e}")
     
-    def replace_menu(self, title: str = "Paramètres", loop_state: bool = False):
+    def replace_menu(self, title: str = "Settings", loop_state: bool = False):
         """Remplace le message de menu."""
         if not self.is_ready:
             return
@@ -481,14 +481,14 @@ class TelegramBotService:
             if self._last_menu_id:
                 await self._async_delete_message(self._last_menu_id)
             
-            loop_text = "Désactiver loop" if loop_state else "Activer loop"
+            loop_text = "Disable loop" if loop_state else "Enable loop"
             
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Retour", callback_data="BACK")],
-                [InlineKeyboardButton("📴 Éteindre PC", callback_data="SHUTDOWN_ASK")],
-                [InlineKeyboardButton("Choisir macro", callback_data="SELECT_MACRO_LIST")],
-                [InlineKeyboardButton("🔃 Recharger COC", callback_data="RELOAD_COC")],
-                [InlineKeyboardButton("Valider arrivée 👌", callback_data="VALIDATE_ARRIVAL")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="BACK")],
+                [InlineKeyboardButton("📴 Shut down PC", callback_data="SHUTDOWN_ASK")],
+                [InlineKeyboardButton("Choose macro", callback_data="SELECT_MACRO_LIST")],
+                [InlineKeyboardButton("🔃 Reload CoC", callback_data="RELOAD_COC")],
+                [InlineKeyboardButton("Validate arrival 👌", callback_data="VALIDATE_ARRIVAL")],
                 [InlineKeyboardButton(loop_text, callback_data="TOGGLE_LOOP")],
             ])
             
@@ -528,11 +528,11 @@ class TelegramBotService:
             if row:
                 buttons.append(row)
             
-            buttons.append([InlineKeyboardButton("Annuler ↩️", callback_data="CANCEL_SELECTION")])
+            buttons.append([InlineKeyboardButton("Cancel ↩️", callback_data="CANCEL_SELECTION")])
             
             await self._bot.send_message(
                 chat_id=self._chat_id,
-                text="🗂️ Quelle macro lancer ?",
+                text="🗂️ Which macro should run?",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             
@@ -553,13 +553,13 @@ class TelegramBotService:
         """Demande de confirmation d'extinction (async)."""
         try:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Annuler", callback_data="SHUTDOWN_CANCEL")],
-                [InlineKeyboardButton("✅ Confirmer l'extinction", callback_data="SHUTDOWN_CONFIRM")],
+                [InlineKeyboardButton("Cancel", callback_data="SHUTDOWN_CANCEL")],
+                [InlineKeyboardButton("✅ Confirm shutdown", callback_data="SHUTDOWN_CONFIRM")],
             ])
             
             await self._bot.send_message(
                 chat_id=self._chat_id,
-                text="⚠️ Confirmer l'extinction du PC ?",
+                text="⚠️ Confirm shutdown?",
                 reply_markup=keyboard
             )
             

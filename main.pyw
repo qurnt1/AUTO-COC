@@ -15,8 +15,6 @@ LOG_PATH = CONFIG_DIR / "app.log"
 ICON_PATH = CONFIG_DIR / "icon.ico"
 GUIDE_HTML_PATH = CONFIG_DIR / "guide_telegram.html"
 
-APP_VERSION = "4.0.0"
-PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 RECHARGER_MACRO_NAME = "Recharger COC"
 VALIDER_MACRO_NAME = "Valider arrivée"
 
@@ -36,7 +34,7 @@ def run_selftest() -> None:
     import time
 
     print("=" * 34)
-    print("       AUTO-COC SELFTESTS")
+    print("       AUTO-COC SELF-TESTS")
     print("=" * 34)
 
     step = Step(time_delta=1.0, step_type=StepType.MOUSE_MOVE, data={"x": 100, "y": 200})
@@ -44,7 +42,7 @@ def run_selftest() -> None:
     macro.set_steps([step])
     assert macro.event_count() == 1 and macro.duration() == 1.0
     assert Macro.from_json(macro.to_json()).event_count() == 1
-    print("[PASS] modèle Macro/Step")
+    print("[PASS] Macro/Step model")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
@@ -57,7 +55,7 @@ def run_selftest() -> None:
         assert write_macro_file(macro_path, "Test", steps)
         name, loaded_steps, sha1, _ = read_macro_file(macro_path)
         assert name == "Test" and len(loaded_steps) == 1 and sha1 == get_macro_hash(steps)
-    print("[PASS] persistance CSV/JSON atomique")
+    print("[PASS] atomic CSV/JSON persistence")
 
     recorder = Recorder()
     player = Player(recorder)
@@ -66,11 +64,11 @@ def run_selftest() -> None:
     player._run_one_cycle([{"t": 0.05, "type": "nop", "data": {}}] * 4)
     elapsed = time.perf_counter() - started
     assert abs(elapsed - 0.2) < 0.08
-    print("[PASS] timing absolu du Player")
+    print("[PASS] Player absolute timing")
 
     assert get_contrast_ratio(Theme.TEXT, Theme.BG) >= 4.5
     assert get_contrast_ratio(Theme.ACCENT, Theme.BG) >= 3.0
-    print("[PASS] contraste du thème")
+    print("[PASS] theme contrast")
 
     profile = CocLaunchProfile.from_params({
         "coc_path": "C:/Games/CoC.lnk",
@@ -82,7 +80,7 @@ def run_selftest() -> None:
     assert profile.process_names == ("wsaClient.exe", "ClashOfClans.exe")
     assert profile.window_titles == ("Clash of Clans", "Google Play Games")
     assert profile.missing_tolerance == 4
-    print("[PASS] profil de lancement et détection CoC")
+    print("[PASS] CoC launch and detection profile")
     print("ALL SELFTESTS PASSED")
 
 
@@ -110,16 +108,14 @@ def build_window():
         log_path=LOG_PATH,
         icon_path=ICON_PATH,
         guide_path=GUIDE_HTML_PATH,
-        app_version=APP_VERSION,
-        python_version=PYTHON_VERSION,
-        protected_names=[RECHARGER_MACRO_NAME, VALIDER_MACRO_NAME],
+        system_names=[RECHARGER_MACRO_NAME, VALIDER_MACRO_NAME],
     )
     return window
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="AUTO-COC PyQt6 operator console")
-    parser.add_argument("--selftest", action="store_true", help="Lance les tests headless puis quitte.")
+    parser = argparse.ArgumentParser(description="AUTO-COC operator console")
+    parser.add_argument("--selftest", action="store_true", help="Run headless checks and exit.")
     args = parser.parse_args()
     setup_environment()
     if args.selftest:
@@ -135,19 +131,18 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AUTO-COC")
     app.setApplicationDisplayName("AUTO-COC")
-    app.setApplicationVersion(APP_VERSION)
     app.setStyle("Fusion")
     app.setStyleSheet(build_stylesheet())
     window = None
     try:
         window = build_window()
         window.show()
-        logger.info("Console PyQt6 démarrée.")
+        logger.info("AUTO-COC started.")
         return app.exec()
     except Exception:
         if window is not None:
             window.controller.shutdown()
-        logger.exception("Erreur fatale au démarrage.")
+        logger.exception("Fatal startup error.")
         return 1
 
 

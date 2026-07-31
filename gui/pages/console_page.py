@@ -49,9 +49,8 @@ class ConsolePage(QWidget):
 
         heading = QVBoxLayout()
         heading.setSpacing(4)
-        heading.addWidget(_label("CENTRE D’EXÉCUTION", "PageEyebrow"))
-        heading.addWidget(_label("Lancer une séquence, en confiance", "PageTitle"))
-        heading.addWidget(_label("Choisis ta macro, vérifie CoC, puis garde le contrôle sur chaque exécution.", "PageSubtitle"))
+        heading.addWidget(_label("MACRO CONTROL", "PageEyebrow"))
+        heading.addWidget(_label("Run a macro", "PageTitle"))
         root.addLayout(heading, 0, 0, 1, 2)
 
         self.library = MacroLibrary()
@@ -68,24 +67,24 @@ class ConsolePage(QWidget):
         header = QHBoxLayout()
         title_column = QVBoxLayout()
         title_column.setSpacing(4)
-        self.macro_name = _label("Aucune macro sélectionnée", "CardTitle")
+        self.macro_name = _label("No macro selected", "CardTitle")
         self.macro_name.setStyleSheet("font-size: 20px;")
-        self.macro_meta = _label("Crée ou sélectionne une macro pour commencer.", "CardCaption")
+        self.macro_meta = _label("Select a macro to begin.", "CardCaption")
         title_column.addWidget(self.macro_name)
         title_column.addWidget(self.macro_meta)
         header.addLayout(title_column)
         header.addStretch()
-        self.state_pill = StatusPill("État", "Prêt", Theme.ACCENT)
+        self.state_pill = StatusPill("State", "Ready", Theme.ACCENT)
         header.addWidget(self.state_pill)
         runtime_layout.addLayout(header)
 
-        self.state_message = _label("Prêt à exécuter", "PageSubtitle")
+        self.state_message = _label("Ready", "PageSubtitle")
         self.state_message.setStyleSheet(f"font-size: 16px; color: {Theme.TEXT};")
         runtime_layout.addWidget(self.state_message)
 
         context = QHBoxLayout()
-        self.coc_status = StatusPill("CoC", "Vérification…", Theme.TEXT_MUTED)
-        self.safeguard_status = StatusPill("Safeguard", "Désactivé", Theme.TEXT_MUTED)
+        self.coc_status = StatusPill("CoC", "Checking…", Theme.TEXT_MUTED)
+        self.safeguard_status = StatusPill("Safeguard", "Off", Theme.TEXT_MUTED)
         context.addWidget(self.coc_status)
         context.addWidget(self.safeguard_status)
         context.addStretch()
@@ -99,9 +98,9 @@ class ConsolePage(QWidget):
 
         metrics = QHBoxLayout()
         metrics.setSpacing(8)
-        self.elapsed_metric = MetricCard("TEMPS ÉCOULÉ", "00:00", Theme.INFO)
-        self.events_metric = MetricCard("ÉVÉNEMENTS", "0", Theme.ACCENT)
-        self.duration_metric = MetricCard("DURÉE MACRO", "00:00", Theme.WARNING)
+        self.elapsed_metric = MetricCard("ELAPSED", "00:00", Theme.INFO)
+        self.events_metric = MetricCard("EVENTS", "0", Theme.ACCENT)
+        self.duration_metric = MetricCard("DURATION", "00:00", Theme.WARNING)
         self.cycles_metric = MetricCard("CYCLES", "0", Theme.ACCENT)
         for metric in (self.elapsed_metric, self.events_metric, self.duration_metric, self.cycles_metric):
             metrics.addWidget(metric, 1)
@@ -109,11 +108,11 @@ class ConsolePage(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
-        self.record_button = QPushButton("Enregistrer")
+        self.record_button = QPushButton("Record")
         self.record_button.setObjectName("PrimaryButton")
-        self.play_button = QPushButton("Lancer la macro")
+        self.play_button = QPushButton("Run macro")
         self.play_button.setObjectName("PrimaryButton")
-        self.stop_button = QPushButton("Stopper")
+        self.stop_button = QPushButton("Stop")
         self.stop_button.setObjectName("DangerButton")
         for button in (self.record_button, self.play_button, self.stop_button):
             button.setMinimumHeight(44)
@@ -123,13 +122,13 @@ class ConsolePage(QWidget):
         runtime_layout.addLayout(controls)
 
         lower = QHBoxLayout()
-        self.loop = QCheckBox("Lecture en boucle")
+        self.loop = QCheckBox("Loop")
         lower.addWidget(self.loop)
-        self.safeguard = QCheckBox("Arrêter si CoC disparaît")
-        self.safeguard.setToolTip("Coupe automatiquement la macro après plusieurs contrôles sans CoC détecté.")
+        self.safeguard = QCheckBox("Stop if CoC disappears")
+        self.safeguard.setToolTip("Stop the macro when CoC is no longer detected.")
         lower.addWidget(self.safeguard)
         lower.addStretch()
-        self.launch_button = QPushButton("Ouvrir CoC")
+        self.launch_button = QPushButton("Open CoC")
         lower.addWidget(self.launch_button)
         runtime_layout.addLayout(lower)
 
@@ -153,12 +152,12 @@ class ConsolePage(QWidget):
     def set_macro(self, macro) -> None:
         if macro and getattr(macro, "name", ""):
             self.macro_name.setText(macro.name)
-            self.macro_meta.setText(f"{macro.event_count():,} événements  ·  {fmt_seconds(macro.duration())}")
+            self.macro_meta.setText(f"{macro.event_count():,} events  ·  {fmt_seconds(macro.duration())}")
             self.duration_metric.set_value(fmt_seconds(macro.duration()))
             self.events_metric.set_value(f"{macro.event_count():,}")
         else:
-            self.macro_name.setText("Aucune macro sélectionnée")
-            self.macro_meta.setText("Crée ou sélectionne une macro pour commencer.")
+            self.macro_name.setText("No macro selected")
+            self.macro_meta.setText("Select a macro to begin.")
             self.duration_metric.set_value("00:00")
             self.events_metric.set_value("0")
             self.progress.setValue(0)
@@ -169,7 +168,7 @@ class ConsolePage(QWidget):
         recording = state_name == "RECORDING"
         playing = state_name == "PLAYING"
         busy = recording or playing or state_name == "STOPPING"
-        self.record_button.setText("Arrêter l’enregistrement" if recording else "Enregistrer")
+        self.record_button.setText("Stop recording" if recording else "Record")
         self.record_button.setEnabled(not playing and state_name != "STOPPING")
         self.play_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
@@ -177,18 +176,18 @@ class ConsolePage(QWidget):
 
     def set_coc_presence(self, snapshot) -> None:
         if snapshot.error:
-            self.coc_status.set_status("Détection indisponible", Theme.WARNING)
+            self.coc_status.set_status("Unavailable", Theme.WARNING)
         elif snapshot.present:
-            detail = "Processus détecté" if snapshot.process_found else "Fenêtre détectée"
+            detail = "Process detected" if snapshot.process_found else "Window detected"
             self.coc_status.set_status(detail, Theme.ACCENT)
         else:
-            self.coc_status.set_status("Non détecté", Theme.WARNING)
+            self.coc_status.set_status("Not detected", Theme.WARNING)
 
     def set_safeguard(self, enabled: bool) -> None:
         self.safeguard.blockSignals(True)
         self.safeguard.setChecked(enabled)
         self.safeguard.blockSignals(False)
-        self.safeguard_status.set_status("Actif" if enabled else "Désactivé", Theme.ACCENT if enabled else Theme.TEXT_MUTED)
+        self.safeguard_status.set_status("On" if enabled else "Off", Theme.ACCENT if enabled else Theme.TEXT_MUTED)
 
     def set_metrics(self, elapsed: float, events: int, duration: float, cycles: int, state_name: str, loop: bool) -> None:
         self.elapsed_metric.set_value(fmt_seconds(elapsed))

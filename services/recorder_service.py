@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Macro COC v3.0 — Services / Recorder Service
+AUTO-COC recorder and player services
 
 Classes Recorder et Player pour l'enregistrement/lecture de macros avec Pynput.
 """
