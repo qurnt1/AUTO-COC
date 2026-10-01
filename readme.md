@@ -1,177 +1,80 @@
-# 🎮 AUTO-COC v3.0
+# AUTO-COC
 
-<p align="center">
-  <img src="config/image.png" alt="AUTO-COC" width="120"/>
-</p>
+AUTO-COC enregistre et rejoue des macros clavier/souris sur Windows. L’interface React s’ouvre dans le navigateur; un service Rust local gère les macros, les raccourcis globaux, Telegram et les accès Windows.
 
-<p align="center">
-  <strong>Application d'automatisation macros avec contrôle Telegram</strong>
-</p>
+## Prérequis
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" alt="Python"/>
-  <img src="https://img.shields.io/badge/CustomTkinter-5.2+-green" alt="CTk"/>
-  <img src="https://img.shields.io/badge/Telegram-Bot%20API-0088cc?logo=telegram" alt="Telegram"/>
-  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"/>
-</p>
+- Windows 10 ou 11.
+- Rust et Cargo, installés avec [rustup](https://rustup.rs/).
+- Node.js `20.19+` ou `22.12+`, avec npm, pour construire l’interface React.
 
----
+## Construire et lancer
 
-## 📋 Description
+Depuis la racine du dépôt, construire d’abord les fichiers React, puis lancer le backend Rust en mode release :
 
-**AUTO-COC** est une application d'enregistrement et lecture de macros (clavier + souris) avec une interface moderne et un **contrôle à distance via Telegram**. Idéale pour automatiser des tâches répétitives sur Clash of Clans ou tout autre jeu/application.
-
-### ✨ Points forts
-
-| Fonctionnalité | Description |
-|----------------|-------------|
-| 🎯 **Précision temporelle** | Timing haute-précision avec `perf_counter` |
-| 🤖 **Contrôle Telegram** | Lancez, stoppez, capturez l'écran depuis votre téléphone |
-| 🔄 **Mode boucle** | Répétition automatique des macros |
-| 💾 **Sauvegarde atomique** | Aucune perte de données en cas de crash |
-| 🌙 **Interface sombre** | Design moderne avec CustomTkinter |
-
----
-
-## 🚀 Installation
-
-### Prérequis
-
-- **Python 3.10+** 
-- **Windows 10/11** (macOS/Linux non testé)
-
-### Installation rapide
-
-```bash
-# Cloner ou télécharger le projet
-cd "AUTO-COC"
-
-# Installer les dépendances
-pip install -r requirements.txt
-
-# Lancer l'application
-python main.py
+```powershell
+cd frontend
+npm ci
+npm run build
+cd ..
+cargo run --release --manifest-path backend/Cargo.toml
 ```
 
-### Dépendances principales
+Le backend intègre `frontend/dist` dans l’exécutable, choisit un port local sur `127.0.0.1` et ouvre l’interface dans le navigateur par défaut. Fermer l’onglet ne termine pas le service Rust. Laissez la fenêtre du terminal ouverte pendant l’utilisation; pour quitter, utilisez Réglages > Actions locales > Quitter AUTO-COC lorsque l’application est au repos, ou `Ctrl+C` dans le terminal.
 
-| Package | Utilisation |
-|---------|-------------|
-| `customtkinter` | Interface graphique moderne |
-| `python-telegram-bot` | API Telegram asynchrone |
-| `pynput` | Capture clavier/souris |
-| `keyboard` | Raccourcis globaux |
-| `Pillow` | Captures d'écran |
+Pour compiler sans lancer l’application :
 
----
+```powershell
+cargo build --release --manifest-path backend/Cargo.toml
+```
 
-## 🎮 Utilisation
+La commande release exige que `frontend/dist` existe. En mode debug, `cargo run --manifest-path backend/Cargo.toml` fonctionne aussi sans build React, mais le backend sert alors une page indiquant qu’il faut construire l’interface.
 
-### Interface locale
+## Développement de l’interface
 
-1. **Créer une macro** → Bouton `Nouveau`
-2. **Enregistrer** → Cliquez `Enregistrer`, attendez le bip, effectuez vos actions
-3. **Stopper** → Cliquez `Stopper` (les 3 dernières secondes sont auto-coupées)
-4. **Lire** → Sélectionnez la macro et cliquez `Lire`
+Lancer d’abord le backend Rust en mode debug et relever l’adresse `127.0.0.1:PORT` affichée dans le terminal. Dans un second terminal PowerShell :
 
-### Raccourcis clavier
+```powershell
+cd frontend
+npm ci
+$env:AUTO_COC_DEV_BACKEND_URL = "http://127.0.0.1:PORT"
+npm run dev
+```
+
+Remplacez `PORT` par le port affiché par le backend, puis ouvrez l’adresse Vite indiquée par npm (par défaut `http://127.0.0.1:5173`). Le proxy Vite transmet `/api` au backend. Cette origine de développement est acceptée uniquement par un backend compilé en mode debug.
+
+## Utiliser AUTO-COC
+
+Créez une macro dans l’atelier, sélectionnez-la, puis démarrez l’enregistrement. La capture commence après trois secondes de préparation. À l’arrêt, les trois dernières secondes sont retirées; un enregistrement de trois secondes ou moins produit une macro vide. La lecture reprend les événements enregistrés et peut être interrompue depuis l’atelier ou avec un raccourci.
+
+Les raccourcis initiaux sont :
 
 | Raccourci | Action |
-|-----------|--------|
-| `F1` | Toggle lecture/arrêt |
-| `Ctrl+Shift+1` | Lancer la macro |
-| `Ctrl+Shift+0` | Stopper |
+| --- | --- |
+| `F1` | Démarrer la macro sélectionnée au repos ou arrêter une lecture en cours |
+| `Ctrl+Shift+1` | Démarrer la lecture |
+| `Ctrl+Shift+0` | Arrêter la lecture ou finaliser l’enregistrement |
 
-### Contrôle Telegram
+Les raccourcis peuvent être modifiés dans Réglages. Windows doit accepter chaque combinaison; si une combinaison est déjà utilisée, l’application reste accessible et permet d’en choisir une autre.
 
-```
-┌─────────────────┬─────────────┐
-│ Paramètres ⚙️   │ Capture 📸  │
-├─────────────────┴─────────────┤
-│         Lancer CoC            │
-├───────────────┬───────────────┤
-│   Lancer ✅   │   Stop ❌     │
-└───────────────┴───────────────┘
-```
+Telegram est facultatif. Configurez votre bot dans Réglages, créez un code d’appairage, puis envoyez `/start CODE` au bot depuis une conversation privée. L’ancien identifiant de chat n’est pas repris comme autorisation. Les commandes texte disponibles incluent `stop`, `go`, `menu`, `capture`, `shutdown`, `relancer` et `launch`. La commande `gif` reçoit une réponse indiquant que la capture GIF n’est pas prise en charge.
 
-**Commandes texte :** `stop`, `go`, `menu`, `capture`, `shutdown`
+La page Aide de l’application décrit les commandes, les raccourcis et la migration des données d’une ancienne installation. Pour migrer, choisissez le dossier de l’ancien projet ou son sous-dossier `config`. Une sauvegarde CSV expurgée du token est créée avant l’import; les fichiers source restent à leur emplacement. Les macros illisibles ou incompatibles sont signalées et ne sont pas rejouées. Les données de la version Rust sont stockées sous `%LOCALAPPDATA%\AUTO-COC`; le token Telegram y est conservé séparément et protégé pour l’utilisateur Windows courant.
 
----
+## Vérifications Rust
 
-## ⚙️ Configuration
+Depuis le dossier `backend` :
 
-### 1. Configurer Telegram
-
-1. Créez un bot avec [@BotFather](https://t.me/BotFather)
-2. Copiez le **Token**
-3. Envoyez un message à votre bot, puis récupérez votre **Chat ID**
-4. Dans l'app : `Paramètres → Configurer Telegram...`
-
-> 💡 Un guide HTML détaillé est inclus : `Paramètres → Ouvrir le guide`
-
-### 2. Chemin CoC (optionnel)
-
-Pour le bouton "Lancer CoC", renseignez le chemin vers :
-- L'exécutable `.exe` du jeu, **ou**
-- Un raccourci `.lnk`
-
----
-
-## 📁 Architecture v3.0
-
-```
-Macro_COC/
-├── main.py                 # Point d'entrée
-├── requirements.txt
-├── models/
-│   └── macro.py            # Dataclasses Step/Macro
-├── services/
-│   ├── telegram_service.py # Bot Telegram async
-│   ├── recorder_service.py # Recorder/Player
-│   └── vision_service.py   # Computer Vision (v3.1)
-├── gui/
-│   ├── app.py              # Fenêtre principale
-│   ├── dialogs.py          # Popups
-│   ├── components.py       # Widgets
-│   └── theme.py            # Couleurs
-├── utils/
-│   ├── logger.py           # Logging rotatif
-│   ├── config.py           # I/O CSV/JSON
-│   └── system.py           # Processus, shutdown
-└── config/
-    ├── macros/             # Fichiers JSON
-    ├── data.csv            # Configuration
-    └── app.log             # Logs
+```powershell
+cargo fmt --check
+cargo check --all-targets
+cargo test
 ```
 
----
+## Structure
 
-## 🆕 Nouveautés v3.0
-
-- **Architecture modulaire** — Code séparé en packages maintenables
-- **Telegram async** — Migration vers `python-telegram-bot` v21+
-- **Dataclasses** — Modèles typés pour les macros
-- **Écriture atomique** — Sauvegarde sécurisée des fichiers
-- **Communication thread-safe** — Queue entre Telegram et GUI
-- **Selftests intégrés** — `python main.py --selftest`
-
----
-
-## 🧪 Tests
-
-```bash
-# Lancer les tests internes
-python main.py --selftest
+```text
+backend/    service Rust/Axum, accès Windows et tests
+frontend/   interface React/TypeScript
+config/     ressources suivies et fichiers locaux historiques ignorés par Git
 ```
-
----
-
-## 📜 Licence
-
-**MIT** — Libre d'utilisation et modification.
-
----
-
-<p align="center">
-  <sub>Made with ❤️ for automation enthusiasts</sub>
-</p>

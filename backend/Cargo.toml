@@ -1,0 +1,36 @@
+[package]
+name = "auto-coc"
+version = "4.0.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+csv = "1.4"
+mime_guess = "2.0"
+rand = "0.9"
+png = "0.18.1"
+rfd = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+rust-embed = { version = "8.7", features = ["interpolate-folder-path"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2.5"
+webbrowser = "1.0"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3.23"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

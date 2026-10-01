@@ -34,3 +34,9 @@ env/
 .vscode/
 .idea/
 .DS_Store
+
+# React and Rust build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+backend/target/
