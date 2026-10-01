@@ -1,9 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ActionRunner, ApiClient, MacroDetail, MacroStep, MacroSummary, Snapshot } from "../api";
 import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
 import { formatDuration } from "./formatDuration";
+import {
+  getSequencePageBounds,
+  getTimelineMarkers,
+  nextSequencePageStart,
+  previousSequencePageStart,
+} from "./sequence";
 
 type DialogState = { kind: "create" } | { kind: "rename"; macro: MacroSummary } | { kind: "delete"; macro: MacroSummary } | null;
 type PageProps = { api: ApiClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void };
@@ -52,7 +58,8 @@ function MacroDialog({ dialog, busy, onClose, onSubmit }: {
 }
 
 function Sequence({ detail, summary }: { detail: MacroDetail | null; summary: MacroSummary }) {
-  const [expanded, setExpanded] = useState(false);
+  const [pageStart, setPageStart] = useState(0);
+  const timelineMarkers = useMemo(() => detail ? getTimelineMarkers(detail.steps) : [], [detail]);
   if (summary.eventCount === 0) {
     return (
       <div className="sequence-empty">
@@ -64,26 +71,37 @@ function Sequence({ detail, summary }: { detail: MacroDetail | null; summary: Ma
   }
   if (!detail) return <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div>;
 
-  const steps = expanded ? detail.steps : detail.steps.slice(0, 8);
-  const maxTime = Math.max(detail.steps.reduce((total, step) => total + Math.max(0, step.t), 0), 0.001);
-  let elapsed = 0;
+  const page = getSequencePageBounds(detail.steps.length, pageStart);
+  const steps = detail.steps.slice(page.start, page.end);
+  const pageHasInternalScroll = steps.length > 9;
   return (
     <div className="sequence-wrap">
       <div className="trace-heading"><span>Déroulé réel</span><span>{detail.steps.length} événements</span></div>
       <div className="trace-track" aria-hidden="true">
-        {detail.steps.map((step, index) => {
-          const left = `${Math.min(99, Math.max(1, (elapsed / maxTime) * 100))}%`;
-          elapsed += Math.max(0, step.t);
-          return <span key={`${index}-${step.t}-${step.type}`} className={`trace-node ${step.type === "mouse_click" ? "is-click" : step.type.startsWith("key") ? "is-key" : ""}`} style={{ left }} title={`${index + 1}. ${eventNames[step.type]?.label ?? step.type}`} />;
-        })}
+        {timelineMarkers.map(({ step, index, left }) => <span key={`${index}-${step.t}-${step.type}`} className={`trace-node ${step.type === "mouse_click" ? "is-click" : step.type.startsWith("key") ? "is-key" : ""}`} style={{ left }} title={`${index + 1}. ${eventNames[step.type]?.label ?? step.type}`} />)}
       </div>
-      <ol className="sequence-list">
-        {steps.map((step, index) => <SequenceRow key={`${index}-${step.t}-${step.type}`} step={step} index={index} />)}
+      {pageHasInternalScroll && <p id="sequence-scroll-hint" className="sequence-scroll-hint">Faites défiler la liste pour parcourir cette page.</p>}
+      <ol
+        key={page.start}
+        className="sequence-list"
+        tabIndex={0}
+        aria-label={`Événements ${page.start + 1} à ${page.end} sur ${detail.steps.length}`}
+        aria-describedby={pageHasInternalScroll ? "sequence-scroll-hint" : undefined}
+      >
+        {steps.map((step, index) => <SequenceRow key={`${page.start + index}-${step.t}-${step.type}`} step={step} index={page.start + index} />)}
       </ol>
       {detail.steps.length > 8 && (
-        <button className="text-button sequence-more" type="button" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? "Réduire la séquence" : `Afficher les ${detail.steps.length - 8} événements suivants`}
-        </button>
+        <nav className="sequence-more" aria-label="Navigation des événements">
+          <button className="text-button" type="button" disabled={page.start === 0} onClick={() => setPageStart(previousSequencePageStart(page.start))}>
+            Précédent
+          </button>
+          <span role="status" aria-live="polite" aria-atomic="true">
+            Événements {page.start + 1} à {page.end} sur {detail.steps.length}
+          </span>
+          <button className="text-button" type="button" disabled={page.end >= detail.steps.length} onClick={() => setPageStart(nextSequencePageStart(detail.steps.length, page.start))}>
+            Suivant
+          </button>
+        </nav>
       )}
     </div>
   );
@@ -250,7 +268,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               </div>
               <p className="recording-note">La préparation dure 3 s. À l’arrêt, les 3 dernières secondes sont retirées; une capture de 3 s ou moins laisse la macro vide.</p>
               <div className="sequence-panel">
-                {recordingSelectedMacro ? <div className="recording-progress"><span className={`recording-mark ${snapshot.status.kind === "recording" ? snapshot.status.phase : ""}`}><Icon name="record" size={17} /></span><div><strong>{snapshot.status.kind === "recording" && snapshot.status.phase === "preparing" ? `Préparation · ${snapshot.status.countdownSeconds} s` : "Capture des actions en cours"}</strong><span>La séquence sera actualisée à l’arrêt de l’enregistrement.</span></div></div> : selected.readable ? detailLoading ? <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div> : detailError ? <div className="sequence-failed">Impossible de charger le détail des événements.</div> : <Sequence detail={detail} summary={selected} /> : null}
+                {recordingSelectedMacro ? <div className="recording-progress"><span className={`recording-mark ${snapshot.status.kind === "recording" ? snapshot.status.phase : ""}`}><Icon name="record" size={17} /></span><div><strong>{snapshot.status.kind === "recording" && snapshot.status.phase === "preparing" ? `Préparation · ${snapshot.status.countdownSeconds} s` : "Capture des actions en cours"}</strong><span>La séquence sera actualisée à l’arrêt de l’enregistrement.</span></div></div> : selected.readable ? detailLoading ? <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div> : detailError ? <div className="sequence-failed">Impossible de charger le détail des événements.</div> : <Sequence key={selected.name} detail={detail} summary={selected} /> : null}
               </div>
             </section>
 
