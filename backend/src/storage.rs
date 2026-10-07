@@ -431,9 +431,18 @@ impl Store {
     }
 
     pub fn set_loop(&mut self, value: bool) -> Result<(), StoreError> {
+        let old_value = self.state.settings.loop_playback;
+        let was_present = self.state.present.contains("loop");
         self.state.settings.loop_playback = value;
         self.state.present.insert("loop".into());
-        self.persist_settings()
+        if let Err(error) = self.persist_settings() {
+            self.state.settings.loop_playback = old_value;
+            if !was_present {
+                self.state.present.remove("loop");
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn update_settings(
@@ -447,6 +456,10 @@ impl Store {
         {
             return Err(StoreError::InvalidData);
         }
+        let old_loop_playback = self.state.settings.loop_playback;
+        let old_coc_path = self.state.settings.coc_path.clone();
+        let had_loop = self.state.present.contains("loop");
+        let had_coc_path = self.state.present.contains("cocPath");
         if let Some(value) = loop_playback {
             self.state.settings.loop_playback = value;
             self.state.present.insert("loop".into());
@@ -455,7 +468,18 @@ impl Store {
             self.state.settings.coc_path = value;
             self.state.present.insert("cocPath".into());
         }
-        self.persist_settings()
+        if let Err(error) = self.persist_settings() {
+            self.state.settings.loop_playback = old_loop_playback;
+            self.state.settings.coc_path = old_coc_path;
+            if !had_loop {
+                self.state.present.remove("loop");
+            }
+            if !had_coc_path {
+                self.state.present.remove("cocPath");
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn set_shortcuts(
@@ -480,13 +504,23 @@ impl Store {
         if let Some(ref name) = name {
             self.get_macro(name)?;
         }
+        let old_selected = self.state.selected_macro.clone();
         self.state.selected_macro = name;
-        self.persist_settings()
+        if let Err(error) = self.persist_settings() {
+            self.state.selected_macro = old_selected;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn complete_onboarding(&mut self) -> Result<(), StoreError> {
+        let was_complete = self.state.onboarding_complete;
         self.state.onboarding_complete = true;
-        self.persist_settings()
+        if let Err(error) = self.persist_settings() {
+            self.state.onboarding_complete = was_complete;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn summaries(&self) -> Result<Vec<MacroSummary>, StoreError> {
@@ -1480,6 +1514,77 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn failed_loop_and_settings_persistence_restore_memory_state() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        let settings_path = store.settings_path.clone();
+        let blocked_parent = dir.path().join("settings-parent-is-file");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        store.settings_path = blocked_parent.join("settings.json");
+
+        assert!(matches!(store.set_loop(true), Err(StoreError::Io(_))));
+        assert!(!store.settings().loop_playback);
+        assert!(!store.state.present.contains("loop"));
+
+        store.settings_path = settings_path.clone();
+        store
+            .update_settings(None, Some("C:\\Games\\CoC.exe".into()))
+            .unwrap();
+        store.settings_path = blocked_parent.join("settings.json");
+
+        assert!(matches!(
+            store.update_settings(Some(true), Some("C:\\Games\\Other.exe".into())),
+            Err(StoreError::Io(_))
+        ));
+        assert!(!store.settings().loop_playback);
+        assert_eq!(store.settings().coc_path, "C:\\Games\\CoC.exe");
+        assert!(!store.state.present.contains("loop"));
+        assert!(store.state.present.contains("cocPath"));
+
+        let persisted = read_settings(&settings_path).unwrap();
+        assert!(!persisted.settings.loop_playback);
+        assert_eq!(persisted.settings.coc_path, "C:\\Games\\CoC.exe");
+    }
+
+    #[test]
+    fn failed_selected_macro_persistence_restores_memory_state() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Existing").unwrap();
+        let settings_path = store.settings_path.clone();
+        let blocked_parent = dir.path().join("settings-parent-is-file");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        store.settings_path = blocked_parent.join("settings.json");
+
+        assert!(matches!(store.set_selected(None), Err(StoreError::Io(_))));
+        assert_eq!(store.selected_macro(), Some("Existing"));
+        assert_eq!(
+            read_settings(&settings_path)
+                .unwrap()
+                .selected_macro
+                .as_deref(),
+            Some("Existing")
+        );
+    }
+
+    #[test]
+    fn failed_onboarding_persistence_restores_memory_state() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        let settings_path = store.settings_path.clone();
+        let blocked_parent = dir.path().join("settings-parent-is-file");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        store.settings_path = blocked_parent.join("settings.json");
+
+        assert!(matches!(
+            store.complete_onboarding(),
+            Err(StoreError::Io(_))
+        ));
+        assert!(!store.onboarding_complete());
+        assert!(!read_settings(&settings_path).unwrap().onboarding_complete);
+    }
 
     #[test]
     fn clearing_token_removes_blob_and_tolerates_a_missing_file() {
