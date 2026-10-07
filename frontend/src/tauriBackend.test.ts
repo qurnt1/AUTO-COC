@@ -44,7 +44,85 @@ function makeBridge(respond: (command: string, args?: Record<string, unknown>) =
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
 describe("TauriBackendClient", () => {
+  it("does not register a listener for an already-aborted connection", async () => {
+    const listen = vi.fn() as TauriBridge["listen"];
+    const bridge: TauriBridge = {
+      invoke: async <T>() => snapshot(1) as T,
+      listen,
+    };
+    const client = new TauriBackendClient(bridge);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(client.connect(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(listen).not.toHaveBeenCalled();
+  });
+
+  it("keeps a shared listener when one connecting caller aborts", async () => {
+    const registration = deferred<() => void>();
+    const listen = vi.fn(() => registration.promise);
+    const bridge: TauriBridge = {
+      invoke: async <T>() => snapshot(1) as T,
+      listen: listen as TauriBridge["listen"],
+    };
+    const client = new TauriBackendClient(bridge);
+    const firstRequest = new AbortController();
+
+    const firstConnect = client.connect(firstRequest.signal);
+    const secondConnect = client.connect();
+    firstRequest.abort();
+
+    await expect(firstConnect).rejects.toMatchObject({ name: "AbortError" });
+    expect(listen).toHaveBeenCalledOnce();
+
+    const unlisten = vi.fn();
+    registration.resolve(unlisten);
+    await expect(secondConnect).resolves.toMatchObject({ revision: 1 });
+    expect(unlisten).not.toHaveBeenCalled();
+
+    client.dispose();
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a disposed connection cancel the listener after remount", async () => {
+    const registrations = [deferred<() => void>(), deferred<() => void>()];
+    const listen = vi.fn(() => registrations[listen.mock.calls.length - 1].promise);
+    const bridge: TauriBridge = {
+      invoke: async <T>() => snapshot(1) as T,
+      listen: listen as TauriBridge["listen"],
+    };
+    const client = new TauriBackendClient(bridge);
+    const firstRequest = new AbortController();
+
+    const firstConnect = client.connect(firstRequest.signal);
+    client.dispose();
+    firstRequest.abort();
+    const remountedConnect = client.connect();
+
+    await expect(firstConnect).rejects.toMatchObject({ name: "AbortError" });
+    expect(listen).toHaveBeenCalledTimes(2);
+
+    const staleUnlisten = vi.fn();
+    registrations[0].resolve(staleUnlisten);
+    await Promise.resolve();
+    expect(staleUnlisten).toHaveBeenCalledOnce();
+
+    const currentUnlisten = vi.fn();
+    registrations[1].resolve(currentUnlisten);
+    await expect(remountedConnect).resolves.toMatchObject({ revision: 1 });
+    expect(currentUnlisten).not.toHaveBeenCalled();
+
+    client.dispose();
+    expect(currentUnlisten).toHaveBeenCalledOnce();
+  });
+
   it("listens before the initial snapshot and keeps the newest event revision", async () => {
     const fake = makeBridge((command) => {
       if (command === "get_snapshot") {

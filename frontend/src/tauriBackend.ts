@@ -99,16 +99,12 @@ export class TauriBackendClient implements BackendClient {
   constructor(private readonly bridge: TauriBridge = defaultBridge) {}
 
   async connect(signal?: AbortSignal): Promise<Snapshot> {
-    await this.ensureListener(signal);
-    try {
-      const initial = await this.invoke<Snapshot>("get_snapshot", undefined, signal);
-      if (!isSnapshot(initial)) throw new BackendClientError("Le service a renvoyé un état illisible.", undefined, "invalid_response");
-      this.publish(initial, false);
-      return this.latest ?? initial;
-    } catch (error) {
-      if (!this.latest) this.stopListening();
-      throw error;
-    }
+    if (signal?.aborted) throw abortError();
+    await withSignal(this.ensureListener(), signal);
+    const initial = await this.invoke<Snapshot>("get_snapshot", undefined, signal);
+    if (!isSnapshot(initial)) throw new BackendClientError("Le service a renvoyé un état illisible.", undefined, "invalid_response");
+    this.publish(initial, false);
+    return this.latest ?? initial;
   }
 
   async getSnapshot(signal?: AbortSignal): Promise<Snapshot> {
@@ -122,7 +118,7 @@ export class TauriBackendClient implements BackendClient {
     if (signal?.aborted) throw abortError();
     const afterEventSequence = this.eventSequence;
     if (this.latest && this.latest.revision > after) return this.latest;
-    await this.ensureListener(signal);
+    await withSignal(this.ensureListener(), signal);
     if (signal?.aborted) throw abortError();
     if (this.latest && this.latest.revision > after) return this.latest;
     if (this.eventSequence > afterEventSequence && this.latest && this.latest.revision >= after) return this.latest;
@@ -301,14 +297,13 @@ export class TauriBackendClient implements BackendClient {
     this.eventSequence = 0;
   }
 
-  private async ensureListener(signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw abortError();
+  private async ensureListener(): Promise<void> {
+    const lifecycle = this.lifecycle;
     if (!this.unlisten && !this.listenerPromise) {
-      const lifecycle = this.lifecycle;
       const registration = this.bridge.listen<Snapshot>("snapshot-updated", (event) => {
-        if (this.lifecycle === lifecycle && !signal?.aborted) this.publish(event.payload, true);
+        if (this.lifecycle === lifecycle) this.publish(event.payload, true);
       }).then((unlisten) => {
-        if (this.lifecycle !== lifecycle || signal?.aborted) {
+        if (this.lifecycle !== lifecycle) {
           unlisten();
           return;
         }
@@ -322,9 +317,9 @@ export class TauriBackendClient implements BackendClient {
         () => { if (this.listenerPromise === registration) this.listenerPromise = undefined; },
       );
     }
-    if (this.listenerPromise) await this.listenerPromise;
-    if (signal?.aborted) throw abortError();
-    if (!this.unlisten) throw abortError();
+    const registration = this.listenerPromise;
+    if (registration) await registration;
+    if (this.lifecycle !== lifecycle || !this.unlisten) throw abortError();
   }
 
   private publish(snapshot: unknown, fromEvent: boolean): void {
