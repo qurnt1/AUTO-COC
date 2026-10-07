@@ -61,6 +61,9 @@ jobs:
       - name: Test backend
         run: cargo test --locked --manifest-path backend/Cargo.toml
 
+      - name: Test desktop host
+        run: cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
 
@@ -70,6 +73,14 @@ jobs:
           projectPath: frontend
           tauriScript: cargo tauri
           args: --bundles nsis --target x86_64-pc-windows-msvc
+
+      - name: Smoke test installed desktop app (diagnostic)
+        # Keep this non-blocking until HWND behavior is confirmed; hosted CI does not prove focus or rendered pixels.
+        continue-on-error: true
+        shell: pwsh
+        run: >-
+          ./.github/scripts/windows-runtime-smoke.ps1
+          -BundleDirectory frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis
 
       - name: Upload pull request installer
         if: github.event_name == 'pull_request'
