@@ -105,6 +105,8 @@ impl Default for TelegramSettings {
 pub struct Settings {
     #[serde(rename = "loop")]
     pub loop_playback: bool,
+    #[serde(default)]
+    pub require_coc_foreground: bool,
     pub coc_path: String,
     pub shortcuts: ShortcutSettings,
     pub telegram: TelegramSettings,
@@ -114,6 +116,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             loop_playback: false,
+            require_coc_foreground: false,
             coc_path: String::new(),
             shortcuts: ShortcutSettings::default(),
             telegram: TelegramSettings::default(),
@@ -277,6 +280,25 @@ mod tests {
         let json = serde_json::to_value(result).unwrap();
         assert!(json.get("fingerprint").is_none());
     }
+
+    #[test]
+    fn legacy_settings_default_to_not_requiring_coc_foreground() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "loop": false,
+            "cocPath": "",
+            "shortcuts": {"toggle": "F1", "play": "Ctrl+Shift+1", "stop": "Ctrl+Shift+0"},
+            "telegram": {
+                "tokenConfigured": false,
+                "paired": false,
+                "status": "not_configured",
+                "pairingCode": null,
+                "pairingExpiresAt": null
+            }
+        }))
+        .unwrap();
+
+        assert!(!settings.require_coc_foreground);
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -298,5 +320,6 @@ pub struct MacroFile {
 pub struct SettingsPatch {
     #[serde(rename = "loop")]
     pub loop_playback: Option<bool>,
+    pub require_coc_foreground: Option<bool>,
     pub coc_path: Option<String>,
 }

@@ -50,6 +50,7 @@ export type Snapshot = {
   settings: {
     loop: boolean;
     cocPath: string;
+    requireCocForeground: boolean;
     shortcuts: { toggle: string; play: string; stop: string };
     telegram: {
       tokenConfigured: boolean;
@@ -91,7 +92,7 @@ export interface BackendClient {
   stopRecording(): Promise<Snapshot>;
   startPlayback(): Promise<Snapshot>;
   stopPlayback(): Promise<Snapshot>;
-  updateSettings(settings: { loop?: boolean; cocPath?: string }): Promise<Snapshot>;
+  updateSettings(settings: { loop?: boolean; cocPath?: string; requireCocForeground?: boolean }): Promise<Snapshot>;
   updateShortcuts(shortcuts: Snapshot["settings"]["shortcuts"]): Promise<Snapshot>;
   launchCoc(): Promise<Snapshot>;
   saveTelegramToken(token: string): Promise<Snapshot>;

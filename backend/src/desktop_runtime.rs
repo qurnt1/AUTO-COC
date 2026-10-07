@@ -111,7 +111,11 @@ impl DesktopRuntime {
     ) -> Result<Snapshot, DesktopRuntimeError> {
         Ok(self
             .controller
-            .set_settings(settings.loop_playback, settings.coc_path)
+            .set_settings(
+                settings.loop_playback,
+                settings.coc_path,
+                settings.require_coc_foreground,
+            )
             .await?)
     }
 

@@ -61,6 +61,10 @@ impl From<ServiceError> for CommandError {
                 "native_input_unavailable",
                 "Le moteur clavier/souris Windows n’est pas disponible.",
             ),
+            ServiceError::CocNotForeground => Self::new(
+                "coc_not_foreground",
+                "Affichez Clash of Clans au premier plan avant de démarrer la macro.",
+            ),
             ServiceError::InvalidShortcut => Self::new(
                 "invalid_shortcut",
                 "Le raccourci doit contenir une combinaison de touches prise en charge.",

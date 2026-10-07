@@ -1,5 +1,33 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { ActionRunner, BackendClient, Snapshot } from "../api";
+import { Settings } from "./Settings";
 import { normalizeShortcut } from "./normalizeShortcut";
+
+const snapshot: Snapshot = {
+  revision: 1,
+  status: { kind: "idle" },
+  selectedMacro: null,
+  macros: [],
+  settings: {
+    loop: false,
+    cocPath: "",
+    requireCocForeground: true,
+    shortcuts: { toggle: "F1", play: "Ctrl+Shift+1", stop: "Ctrl+Shift+0" },
+    telegram: {
+      tokenConfigured: false,
+      paired: false,
+      status: "not_configured",
+      pairingCode: null,
+      pairingExpiresAt: null,
+    },
+  },
+  session: { elapsedSeconds: 0, cycles: 0 },
+  migration: { sourceSelected: false, available: false, alreadyImported: false },
+  onboardingComplete: true,
+  lastError: null,
+};
 
 function keyboardEvent(code: string, key: string): KeyboardEvent {
   return { code, key, ctrlKey: true, altKey: false, shiftKey: true, metaKey: false } as KeyboardEvent;
@@ -11,5 +39,34 @@ describe("normalizeShortcut", () => {
     { code: "Numpad1", key: "1", expected: "Ctrl+Shift+Numpad1" },
   ])("uses the canonical key for $code", ({ code, key, expected }) => {
     expect(normalizeShortcut(keyboardEvent(code, key))).toBe(expected);
+  });
+});
+
+describe("Settings safety option", () => {
+  function renderSettings(requireCocForeground: boolean) {
+    return renderToStaticMarkup(createElement(Settings, {
+      api: {} as BackendClient,
+      snapshot: { ...snapshot, settings: { ...snapshot.settings, requireCocForeground } },
+      busy: null,
+      run: (async (_label, action) => action()) as ActionRunner,
+      online: true,
+    }));
+  }
+
+  it("explains automatic stop without resuming and reflects the saved value", () => {
+    const html = renderSettings(true);
+
+    expect(html).toContain("Exiger Clash of Clans au premier plan");
+    expect(html).toContain("La lecture et la capture ne démarrent que lorsque le jeu est au premier plan.");
+    expect(html).toContain("S’il est fermé ou perd le premier plan, l’action en cours s’arrête sans reprise automatique.");
+    expect(html).toContain('type="checkbox" checked=""');
+  });
+
+  it("renders the foreground requirement unchecked when it is disabled", () => {
+    const html = renderSettings(false);
+    const control = html.match(/<label class="switch-control"><span class="sr-only">Exiger Clash of Clans au premier plan<\/span>(.*?)<\/label>/)?.[1];
+
+    expect(control).toContain('type="checkbox"');
+    expect(control).not.toContain("checked");
   });
 });

@@ -39,6 +39,8 @@ pub enum ControllerError {
     ShortcutUnavailable,
     #[error("native input operation failed")]
     NativeInputFailed,
+    #[error("Clash of Clans must be the active foreground window")]
+    CocNotForeground,
     #[error("recorded steps could not be saved and remain available for retry")]
     RecordingSavePending,
     #[error("recording reached the event limit and only its collected events were saved")]
@@ -103,6 +105,7 @@ struct Machine {
     migration_source: Option<PathBuf>,
     migration_preview: Option<MigrationPreview>,
     migration_already_imported: bool,
+    foreground_loss_handled: bool,
 }
 
 pub struct Controller {
@@ -147,6 +150,7 @@ impl Controller {
                 migration_source: None,
                 migration_preview: None,
                 migration_already_imported,
+                foreground_loss_handled: false,
             }),
             native: Mutex::new(None),
             native_events_tx,
@@ -197,6 +201,8 @@ impl Controller {
         let controller = Arc::downgrade(self);
         let mut shutdown = self.native_event_loop_shutdown.subscribe();
         let task = tokio::spawn(async move {
+            let mut foreground_poll = tokio::time::interval(Duration::from_millis(100));
+            foreground_poll.tick().await;
             loop {
                 let event = tokio::select! {
                     biased;
@@ -210,6 +216,13 @@ impl Controller {
                         Some(event) => event,
                         None => break,
                     },
+                    _ = foreground_poll.tick() => {
+                        let Some(controller) = controller.upgrade() else {
+                            break;
+                        };
+                        controller.monitor_coc_foreground().await;
+                        continue;
+                    }
                 };
                 let Some(controller) = controller.upgrade() else {
                     break;
@@ -298,8 +311,75 @@ impl Controller {
                     self.changed(&mut machine).await?;
                 }
             }
+            NativeEvent::PlaybackGuardLost {
+                playback_id,
+                release_failed,
+            } => {
+                let mut machine = self.machine.lock().await;
+                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
+                {
+                    machine.operation = Operation::Idle;
+                    machine.foreground_loss_handled = false;
+                    machine.last_error = Some(if release_failed {
+                        "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée, mais AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris.".into()
+                    } else {
+                        "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée et ne reprendra pas automatiquement.".into()
+                    });
+                    self.changed(&mut machine).await?;
+                }
+            }
         }
         Ok(())
+    }
+
+    async fn monitor_coc_foreground(&self) {
+        let operation = {
+            let machine = self.machine.lock().await;
+            if !machine.store.settings().require_coc_foreground {
+                return;
+            }
+            if machine.foreground_loss_handled
+                && matches!(machine.operation, Operation::Recording { .. })
+            {
+                return;
+            }
+            match &machine.operation {
+                Operation::Recording { .. } => machine.operation.clone(),
+                Operation::Idle | Operation::Playing { .. } => return,
+            }
+        };
+        let foreground = self
+            .native
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(NativeInput::cached_coc_is_foreground);
+        if foreground {
+            return;
+        }
+
+        {
+            let mut machine = self.machine.lock().await;
+            if !machine.store.settings().require_coc_foreground
+                || machine.foreground_loss_handled
+                || !same_operation(&machine.operation, &operation)
+            {
+                return;
+            }
+            machine.foreground_loss_handled = true;
+        }
+
+        let stop_result = self.stop_recording().await;
+        let mut machine = self.machine.lock().await;
+        let Some(message) = foreground_loss_message(&machine.operation, &operation, &stop_result)
+        else {
+            return;
+        };
+        machine.last_error = Some(message.into());
+        if matches!(machine.operation, Operation::Idle) {
+            machine.foreground_loss_handled = false;
+        }
+        let _ = self.changed(&mut machine).await;
     }
 
     pub async fn shutdown_services(&self) -> Result<(), ControllerError> {
@@ -464,10 +544,13 @@ impl Controller {
         &self,
         loop_playback: Option<bool>,
         coc_path: Option<String>,
+        require_coc_foreground: Option<bool>,
     ) -> Result<Snapshot, ControllerError> {
         let mut machine = self.machine.lock().await;
         ensure_idle(&machine)?;
-        machine.store.update_settings(loop_playback, coc_path)?;
+        machine
+            .store
+            .update_settings(loop_playback, coc_path, require_coc_foreground)?;
         self.changed(&mut machine).await
     }
 
@@ -590,17 +673,24 @@ impl Controller {
             .selected_macro()
             .ok_or(StoreError::NotFound)?
             .to_owned();
+        let require_coc_foreground = machine.store.settings().require_coc_foreground;
         let native = self.native.lock().await;
-        native
+        let native = native
             .as_ref()
-            .ok_or(ControllerError::NativeInputUnavailable)?
-            .start_recording()
+            .ok_or(ControllerError::NativeInputUnavailable)?;
+        ensure_start_foreground(
+            require_coc_foreground,
+            !require_coc_foreground || native.coc_is_foreground(),
+        )?;
+        native
+            .start_recording(require_coc_foreground)
             .await
             .map_err(map_native_error)?;
         machine.operation = Operation::Recording {
             macro_name,
             started: Instant::now(),
         };
+        machine.foreground_loss_handled = false;
         machine.last_error = None;
         self.changed(&mut machine).await
     }
@@ -641,6 +731,7 @@ impl Controller {
             }
         };
         machine.operation = Operation::Idle;
+        machine.foreground_loss_handled = false;
         machine.last_error = overflowed.then(|| {
             "La limite d’événements a été atteinte. Les événements déjà capturés ont été sauvegardés; la macro peut être incomplète.".into()
         });
@@ -696,11 +787,17 @@ impl Controller {
         }
         let macro_name = name.to_owned();
         let looped = use_saved_loop && machine.store.settings().loop_playback;
+        let require_coc_foreground = machine.store.settings().require_coc_foreground;
         let native = self.native.lock().await;
-        let playback_id = native
+        let native = native
             .as_ref()
-            .ok_or(ControllerError::NativeInputUnavailable)?
-            .start_playback(macro_file.steps, looped)
+            .ok_or(ControllerError::NativeInputUnavailable)?;
+        ensure_start_foreground(
+            require_coc_foreground,
+            !require_coc_foreground || native.coc_is_foreground(),
+        )?;
+        let playback_id = native
+            .start_playback(macro_file.steps, looped, require_coc_foreground)
             .await
             .map_err(map_native_error)?;
         machine.operation = Operation::Playing {
@@ -709,6 +806,7 @@ impl Controller {
             playback_id,
         };
         machine.cycles = 0;
+        machine.foreground_loss_handled = false;
         machine.last_error = None;
         self.changed(&mut machine).await
     }
@@ -883,6 +981,7 @@ impl Controller {
             .await
             .map_err(map_native_error)?;
         machine.operation = Operation::Idle;
+        machine.foreground_loss_handled = false;
         self.changed(&mut machine).await
     }
 
@@ -1257,6 +1356,67 @@ fn ensure_idle(machine: &Machine) -> Result<(), ControllerError> {
     }
 }
 
+fn ensure_start_foreground(required: bool, foreground: bool) -> Result<(), ControllerError> {
+    if required && !foreground {
+        Err(ControllerError::CocNotForeground)
+    } else {
+        Ok(())
+    }
+}
+
+fn same_operation(current: &Operation, expected: &Operation) -> bool {
+    match (current, expected) {
+        (
+            Operation::Recording {
+                started: current, ..
+            },
+            Operation::Recording {
+                started: expected, ..
+            },
+        ) => current == expected,
+        (
+            Operation::Playing {
+                playback_id: current,
+                ..
+            },
+            Operation::Playing {
+                playback_id: expected,
+                ..
+            },
+        ) => current == expected,
+        _ => false,
+    }
+}
+
+fn foreground_loss_message(
+    current: &Operation,
+    expected: &Operation,
+    stop_result: &Result<Snapshot, ControllerError>,
+) -> Option<&'static str> {
+    let ended_by_monitor = matches!(current, Operation::Idle)
+        && matches!(
+            stop_result,
+            Ok(_) | Err(ControllerError::RecordingEventLimit)
+        );
+    if !same_operation(current, expected) && !ended_by_monitor {
+        return None;
+    }
+    Some(match stop_result {
+        Ok(_) => {
+            "Clash of Clans n’est plus la fenêtre active. L’opération a été arrêtée; elle ne reprendra pas automatiquement."
+        }
+        Err(ControllerError::RecordingEventLimit) => {
+            "Clash of Clans n’est plus la fenêtre active. La partie capturée a été sauvegardée, mais la macro peut être incomplète."
+        }
+        Err(ControllerError::RecordingSavePending) => {
+            "Clash of Clans n’est plus la fenêtre active. L’enregistrement a été arrêté, mais sa sauvegarde a échoué. Utilisez Arrêter pour réessayer."
+        }
+        Err(_) => {
+            "Clash of Clans n’est plus la fenêtre active. AUTO-COC n’a pas pu terminer l’arrêt proprement."
+        }
+    })
+}
+
 fn telegram_is_authorized(
     machine: &Machine,
     token: &str,
@@ -1319,6 +1479,7 @@ fn save_pending_recording(machine: &mut Machine) -> Result<bool, ControllerError
 fn map_native_error(error: std::io::Error) -> ControllerError {
     match error.kind() {
         std::io::ErrorKind::Unsupported => ControllerError::NativeInputUnavailable,
+        std::io::ErrorKind::PermissionDenied => ControllerError::CocNotForeground,
         _ => ControllerError::NativeInputFailed,
     }
 }
@@ -1349,6 +1510,178 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn start_guard_requires_foreground_only_when_enabled() {
+        assert!(matches!(
+            ensure_start_foreground(true, false),
+            Err(ControllerError::CocNotForeground)
+        ));
+        assert!(ensure_start_foreground(true, true).is_ok());
+        assert!(ensure_start_foreground(false, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn foreground_loss_stops_and_saves_the_partial_recording() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Focus guard").unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        let partial = vec![serde_json::json!({"t": 0.0, "type": "nop", "data": {}})];
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::Recording {
+                macro_name: "Focus guard".into(),
+                started: Instant::now(),
+            };
+            machine.pending_recording = Some(("Focus guard".into(), partial.clone(), false));
+        }
+
+        controller.monitor_coc_foreground().await;
+
+        let snapshot = controller.snapshot().await.unwrap();
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert!(
+            snapshot
+                .last_error
+                .unwrap()
+                .contains("ne reprendra pas automatiquement")
+        );
+        assert_eq!(
+            controller.macro_file("Focus guard").await.unwrap()["steps"]
+                .as_array()
+                .unwrap(),
+            &partial
+        );
+    }
+
+    #[test]
+    fn foreground_monitor_keeps_the_manual_stop_result_after_operation_ends() {
+        let expected = Operation::Recording {
+            macro_name: "Focus guard".into(),
+            started: Instant::now(),
+        };
+
+        assert_eq!(
+            foreground_loss_message(
+                &Operation::Idle,
+                &expected,
+                &Err(ControllerError::InvalidState)
+            ),
+            None
+        );
+        assert!(
+            foreground_loss_message(
+                &Operation::Idle,
+                &expected,
+                &Err(ControllerError::RecordingEventLimit)
+            )
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_guard_setting_cannot_change_during_an_operation() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::Recording {
+                macro_name: "Test".into(),
+                started: Instant::now(),
+            };
+        }
+
+        assert!(matches!(
+            controller.set_settings(None, None, Some(true)).await,
+            Err(ControllerError::InvalidState)
+        ));
+        assert!(
+            !controller
+                .snapshot()
+                .await
+                .unwrap()
+                .settings
+                .require_coc_foreground
+        );
+    }
+
+    #[tokio::test]
+    async fn playback_guard_loss_is_reported_after_native_release() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::Playing {
+                macro_name: "Test".into(),
+                started: Instant::now(),
+                playback_id: 42,
+            };
+        }
+
+        controller
+            .handle_native_event(NativeEvent::PlaybackGuardLost {
+                playback_id: 42,
+                release_failed: false,
+            })
+            .await
+            .unwrap();
+
+        let snapshot = controller.snapshot().await.unwrap();
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert!(
+            snapshot
+                .last_error
+                .unwrap()
+                .contains("ne reprendra pas automatiquement")
+        );
+
+        controller.machine.lock().await.operation = Operation::Playing {
+            macro_name: "Test".into(),
+            started: Instant::now(),
+            playback_id: 43,
+        };
+        controller
+            .handle_native_event(NativeEvent::PlaybackGuardLost {
+                playback_id: 43,
+                release_failed: true,
+            })
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .snapshot()
+                .await
+                .unwrap()
+                .last_error
+                .unwrap()
+                .contains("n’a pas pu relâcher")
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_monitor_leaves_playback_cancellation_to_native_worker() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::Playing {
+                macro_name: "Test".into(),
+                started: Instant::now(),
+                playback_id: 44,
+            };
+        }
+
+        controller.monitor_coc_foreground().await;
+
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Playing { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn macro_crud_updates_revision_and_selection() {
@@ -1854,6 +2187,7 @@ mod tests {
             migration_source: None,
             migration_preview: None,
             migration_already_imported: false,
+            foreground_loss_handled: false,
         };
 
         assert!(matches!(

@@ -156,6 +156,10 @@ export function Settings({ api, snapshot, busy, run, online }: Props) {
                 <div className="setting-row-copy"><strong>Répéter les macros</strong><span>La boucle s’applique au prochain lancement.</span></div>
                 <label className="switch-control"><span className="sr-only">Activer la boucle</span><input type="checkbox" checked={snapshot.settings.loop} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("loop-setting", () => api.updateSettings({ loop: event.target.checked }), event.target.checked ? "Boucle activée." : "Boucle désactivée.")} /><i aria-hidden="true" /></label>
               </div>
+              <div className="setting-row">
+                <div className="setting-row-copy"><strong>Exiger Clash of Clans au premier plan</strong><span>La lecture et la capture ne démarrent que lorsque le jeu est au premier plan. S’il est fermé ou perd le premier plan, l’action en cours s’arrête sans reprise automatique.</span></div>
+                <label className="switch-control"><span className="sr-only">Exiger Clash of Clans au premier plan</span><input type="checkbox" checked={snapshot.settings.requireCocForeground} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("coc-foreground-setting", () => api.updateSettings({ requireCocForeground: event.target.checked }), event.target.checked ? "Arrêt automatique activé." : "Arrêt automatique désactivé.")} /><i aria-hidden="true" /></label>
+              </div>
               <div className="setting-row coc-launch-row">
                 <div className="setting-row-copy"><strong>Lancer Clash of Clans</strong><span>{snapshot.settings.cocPath ? "Utilise le chemin enregistré ci-dessus." : "Ajoutez d’abord le chemin de l’application."}</span></div>
                 <button className="button quiet" type="button" disabled={!online || !snapshot.settings.cocPath || busy !== null || snapshot.status.kind !== "idle"} onClick={() => void run("launch-coc", () => api.launchCoc(), "Demande de lancement envoyée.")}><Icon name="arrow" size={15} />Lancer</button>

@@ -47,6 +47,10 @@ pub enum NativeEvent {
         playback_id: u64,
         reason: PlaybackFailure,
     },
+    PlaybackGuardLost {
+        playback_id: u64,
+        release_failed: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,13 +130,36 @@ impl NativeInput {
         }
     }
 
-    pub async fn start_recording(&self) -> io::Result<()> {
+    pub fn coc_is_foreground(&self) -> bool {
         #[cfg(windows)]
         {
-            self.inner.start_recording()
+            self.inner.resolve_coc_foreground()
         }
         #[cfg(not(windows))]
         {
+            false
+        }
+    }
+
+    pub fn cached_coc_is_foreground(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.inner.cached_coc_is_foreground()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub async fn start_recording(&self, require_coc_foreground: bool) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.start_recording(require_coc_foreground)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = require_coc_foreground;
             Err(unsupported())
         }
     }
@@ -148,14 +175,21 @@ impl NativeInput {
         }
     }
 
-    pub async fn start_playback(&self, steps: Vec<Value>, looped: bool) -> io::Result<u64> {
+    pub async fn start_playback(
+        &self,
+        steps: Vec<Value>,
+        looped: bool,
+        require_coc_foreground: bool,
+    ) -> io::Result<u64> {
         #[cfg(windows)]
         {
-            self.inner.start_playback(steps, looped).await
+            self.inner
+                .start_playback(steps, looped, require_coc_foreground)
+                .await
         }
         #[cfg(not(windows))]
         {
-            let _ = (steps, looped);
+            let _ = (steps, looped, require_coc_foreground);
             Err(unsupported())
         }
     }
@@ -206,6 +240,35 @@ fn unsupported() -> io::Error {
 
 fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn ensure_coc_foreground(required: bool, foreground: bool) -> io::Result<()> {
+    if required && !foreground {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Clash of Clans is not the foreground window",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_coc_window_identity(title: &str, image_path: &str) -> bool {
+    let process_name = image_path.rsplit(['\\', '/']).next().unwrap_or(image_path);
+    title.to_lowercase().contains("clash of clans")
+        && process_name.eq_ignore_ascii_case("crosvm.exe")
+}
+
+fn same_process_instance(
+    expected_pid: u32,
+    expected_creation_time: u64,
+    current_pid: u32,
+    current_creation_time: u64,
+) -> bool {
+    expected_pid != 0
+        && expected_pid == current_pid
+        && expected_creation_time != 0
+        && expected_creation_time == current_creation_time
 }
 
 fn parse_shortcuts(shortcuts: &ShortcutSettings) -> io::Result<[ParsedHotkey; 3]> {
@@ -604,7 +667,7 @@ mod win {
         collections::HashMap,
         sync::{
             Arc, Mutex, PoisonError,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
             mpsc as std_mpsc,
         },
         thread::{self, JoinHandle},
@@ -617,10 +680,14 @@ mod win {
         time::sleep_until,
     };
     use windows_sys::Win32::{
-        Foundation::{LPARAM, WPARAM},
+        Foundation::{CloseHandle, FILETIME, HWND, LPARAM, WPARAM},
         System::{
-            Diagnostics::Debug::Beep, LibraryLoader::GetModuleHandleW,
-            Threading::GetCurrentThreadId,
+            Diagnostics::Debug::Beep,
+            LibraryLoader::GetModuleHandleW,
+            Threading::{
+                GetCurrentThreadId, GetProcessTimes, OpenProcess,
+                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            },
         },
         UI::{
             Input::KeyboardAndMouse::{
@@ -631,7 +698,8 @@ mod win {
                 MOUSEEVENTF_WHEEL, MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
+                CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetWindowTextW,
+                GetWindowThreadProcessId, IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
                 LLKHF_LOWER_IL_INJECTED, LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED, MSG,
                 MSLLHOOKSTRUCT, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW,
                 SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
@@ -664,12 +732,167 @@ mod win {
 
     struct Shared {
         recording: Mutex<Option<Recording>>,
+        recording_guard: AtomicBool,
+        coc_identity_valid: AtomicBool,
+        coc_window: AtomicIsize,
+        coc_process_id: AtomicU32,
+        coc_process_created_at: AtomicU64,
         shortcuts: Mutex<[ParsedHotkey; 3]>,
         injected_keys: Mutex<HashSet<u16>>,
         suppressed_hotkeys: Mutex<HashMap<i32, Instant>>,
         events: mpsc::UnboundedSender<NativeEvent>,
         playback: AsyncMutex<Option<PlaybackControl>>,
         next_playback_id: AtomicU64,
+    }
+
+    impl Shared {
+        fn cached_coc_is_foreground(&self) -> bool {
+            if !self.coc_identity_valid.load(Ordering::Acquire) {
+                return false;
+            }
+            let target = self.coc_window.load(Ordering::Acquire) as HWND;
+            let process_id = self.coc_process_id.load(Ordering::Acquire);
+            if target.is_null() || process_id == 0 {
+                return false;
+            }
+            let foreground = unsafe { GetForegroundWindow() };
+            if foreground != target || unsafe { IsWindowVisible(target) } == 0 {
+                self.coc_identity_valid.store(false, Ordering::Release);
+                return false;
+            }
+            let mut foreground_process = 0;
+            unsafe { GetWindowThreadProcessId(foreground, &mut foreground_process) };
+            if foreground_process != process_id {
+                self.coc_identity_valid.store(false, Ordering::Release);
+                return false;
+            }
+            true
+        }
+
+        fn cached_coc_identity_is_foreground(&self) -> bool {
+            if !self.cached_coc_is_foreground() {
+                return false;
+            }
+            let target = self.coc_window.load(Ordering::Acquire) as HWND;
+            let process_id = self.coc_process_id.load(Ordering::Acquire);
+            let expected_created_at = self.coc_process_created_at.load(Ordering::Acquire);
+            let is_valid = window_title_matches(target)
+                && process_image_and_creation_time(process_id).is_some_and(
+                    |(path, current_created_at)| {
+                        is_coc_window_identity(&window_title(target), &path)
+                            && same_process_instance(
+                                process_id,
+                                expected_created_at,
+                                process_id,
+                                current_created_at,
+                            )
+                    },
+                );
+            self.coc_identity_valid.store(is_valid, Ordering::Release);
+            is_valid
+        }
+
+        fn cached_coc_instance_is_foreground(&self) -> bool {
+            if !self.cached_coc_is_foreground() {
+                return false;
+            }
+            let process_id = self.coc_process_id.load(Ordering::Acquire);
+            let expected_created_at = self.coc_process_created_at.load(Ordering::Acquire);
+            let is_valid = process_creation_time(process_id).is_some_and(|current_created_at| {
+                same_process_instance(
+                    process_id,
+                    expected_created_at,
+                    process_id,
+                    current_created_at,
+                )
+            });
+            self.coc_identity_valid.store(is_valid, Ordering::Release);
+            is_valid
+        }
+    }
+
+    fn current_foreground_coc_window() -> Option<(HWND, u32, u64)> {
+        let window = unsafe { GetForegroundWindow() };
+        if window.is_null() || unsafe { IsWindowVisible(window) } == 0 {
+            return None;
+        }
+        let mut process_id = 0;
+        unsafe { GetWindowThreadProcessId(window, &mut process_id) };
+        let title = window_title(window);
+        if process_id == 0 || !title.to_ascii_lowercase().contains("clash of clans") {
+            return None;
+        }
+
+        let (image_path, created_at) = process_image_and_creation_time(process_id)?;
+        is_coc_window_identity(&title, &image_path).then_some((window, process_id, created_at))
+    }
+
+    fn process_image_and_creation_time(process_id: u32) -> Option<(String, u64)> {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if process.is_null() {
+            return None;
+        }
+        let mut image_path = [0u16; 1024];
+        let mut length = image_path.len() as u32;
+        let image_read = unsafe {
+            QueryFullProcessImageNameW(process, 0, image_path.as_mut_ptr(), &mut length) != 0
+        };
+        let created_at = process_creation_time_from_handle(process);
+        unsafe { CloseHandle(process) };
+        if !image_read {
+            return None;
+        }
+        Some((
+            String::from_utf16_lossy(&image_path[..length as usize]),
+            created_at?,
+        ))
+    }
+
+    fn process_creation_time(process_id: u32) -> Option<u64> {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if process.is_null() {
+            return None;
+        }
+        let created_at = process_creation_time_from_handle(process);
+        unsafe { CloseHandle(process) };
+        created_at
+    }
+
+    fn process_creation_time_from_handle(
+        process: windows_sys::Win32::Foundation::HANDLE,
+    ) -> Option<u64> {
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exited = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        (unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }
+            != 0)
+            .then_some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+            .filter(|created_at| *created_at != 0)
+    }
+
+    fn window_title(window: HWND) -> String {
+        let mut title = [0u16; 512];
+        let length = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
+        String::from_utf16_lossy(&title[..length.max(0) as usize])
+    }
+
+    fn window_title_matches(window: HWND) -> bool {
+        window_title(window)
+            .to_ascii_lowercase()
+            .contains("clash of clans")
     }
 
     struct PlaybackControl {
@@ -705,6 +928,11 @@ mod win {
         ) -> io::Result<Self> {
             let shared = Arc::new(Shared {
                 recording: Mutex::new(None),
+                recording_guard: AtomicBool::new(false),
+                coc_identity_valid: AtomicBool::new(false),
+                coc_window: AtomicIsize::new(0),
+                coc_process_id: AtomicU32::new(0),
+                coc_process_created_at: AtomicU64::new(0),
                 shortcuts: Mutex::new(bindings),
                 injected_keys: Mutex::new(HashSet::new()),
                 suppressed_hotkeys: Mutex::new(HashMap::new()),
@@ -741,7 +969,31 @@ mod win {
             })
         }
 
-        pub fn start_recording(&self) -> io::Result<()> {
+        pub fn resolve_coc_foreground(&self) -> bool {
+            if let Some((window, process_id, created_at)) = current_foreground_coc_window() {
+                self.shared
+                    .coc_window
+                    .store(window as isize, Ordering::Release);
+                self.shared
+                    .coc_process_id
+                    .store(process_id, Ordering::Release);
+                self.shared
+                    .coc_process_created_at
+                    .store(created_at, Ordering::Release);
+                self.shared
+                    .coc_identity_valid
+                    .store(true, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        }
+
+        pub fn cached_coc_is_foreground(&self) -> bool {
+            self.shared.cached_coc_identity_is_foreground()
+        }
+
+        pub fn start_recording(&self, require_coc_foreground: bool) -> io::Result<()> {
             let mut recording = lock(&self.shared.recording);
             if recording.is_some() {
                 return Err(io::Error::new(
@@ -749,6 +1001,12 @@ mod win {
                     "recording is already active",
                 ));
             }
+            if require_coc_foreground {
+                ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
+            }
+            self.shared
+                .recording_guard
+                .store(require_coc_foreground, Ordering::Release);
             *recording = Some(Recording {
                 captures_at: Instant::now() + PREPARATION,
                 last_event_at: None,
@@ -767,11 +1025,20 @@ mod win {
                     "recording is not active",
                 ));
             };
+            self.shared.recording_guard.store(false, Ordering::Release);
             Ok(finish_recording(recording.steps, recording.overflowed))
         }
 
-        pub async fn start_playback(&self, steps: Vec<Value>, looped: bool) -> io::Result<u64> {
+        pub async fn start_playback(
+            &self,
+            steps: Vec<Value>,
+            looped: bool,
+            require_coc_foreground: bool,
+        ) -> io::Result<u64> {
             let parsed = parse_steps(&steps)?;
+            if require_coc_foreground {
+                ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
+            }
             let mut playback = self.shared.playback.lock().await;
             if playback.is_some() {
                 return Err(io::Error::new(
@@ -783,7 +1050,15 @@ mod win {
             let (cancel, cancel_rx) = watch::channel(false);
             let shared = Arc::clone(&self.shared);
             let task = tokio::spawn(async move {
-                run_playback(shared, id, parsed, looped, cancel_rx).await;
+                run_playback(
+                    shared,
+                    id,
+                    parsed,
+                    looped,
+                    require_coc_foreground,
+                    cancel_rx,
+                )
+                .await;
             });
             *playback = Some(PlaybackControl { id, cancel, task });
             Ok(id)
@@ -1143,6 +1418,9 @@ mod win {
     }
 
     fn record(shared: &Shared, kind: &str, payload: Value) {
+        if shared.recording_guard.load(Ordering::Acquire) && !shared.cached_coc_is_foreground() {
+            return;
+        }
         let beep = {
             let mut current = lock(&shared.recording);
             let Some(recording) = current.as_mut() else {
@@ -1228,33 +1506,66 @@ mod win {
         id: u64,
         steps: Vec<ReplayStep>,
         looped: bool,
+        require_coc_foreground: bool,
         mut cancel: watch::Receiver<bool>,
     ) {
-        let mut guard = PlaybackGuard::default();
+        let mut guard = PlaybackGuard {
+            held: HeldInputs::default(),
+            shared: Arc::clone(&shared),
+        };
         let mut input_failed = false;
+        let mut foreground_lost = false;
+        let mut last_identity_check = None;
         'playback: loop {
             let start = tokio::time::Instant::now();
             let mut elapsed = Duration::ZERO;
             let mut cancelled = false;
             for step in &steps {
                 elapsed = elapsed.saturating_add(step.delay);
-                tokio::select! {
-                    changed = cancel.changed() => {
-                        if changed.is_err() || *cancel.borrow() {
-                            cancelled = true;
-                            break;
+                match wait_for_replay_step(
+                    start + elapsed,
+                    &mut cancel,
+                    require_coc_foreground,
+                    || {
+                        let now = Instant::now();
+                        if last_identity_check.is_none_or(|last| {
+                            now.duration_since(last) >= Duration::from_millis(100)
+                        }) {
+                            last_identity_check = Some(now);
+                            shared.cached_coc_identity_is_foreground()
+                        } else {
+                            shared.cached_coc_is_foreground()
                         }
+                    },
+                )
+                .await
+                {
+                    ReplayWait::Ready => {}
+                    ReplayWait::Cancelled => {
+                        cancelled = true;
+                        break;
                     }
-                    _ = sleep_until(start + elapsed) => {}
+                    ReplayWait::ForegroundLost => {
+                        foreground_lost = true;
+                        break;
+                    }
                 }
-                if *cancel.borrow() {
-                    cancelled = true;
+                if let Err(error) = apply_event(
+                    &shared,
+                    &step.event,
+                    &mut guard.held,
+                    require_coc_foreground,
+                ) {
+                    if error.kind() == io::ErrorKind::PermissionDenied {
+                        foreground_lost = true;
+                    } else {
+                        input_failed = true;
+                    }
                     break;
                 }
-                if apply_event(&step.event, &mut guard.held).is_err() {
-                    input_failed = true;
-                    break;
-                }
+            }
+            if foreground_lost {
+                break 'playback;
             }
             let Some(cycle_event) = playback_cycle_event(id, input_failed, cancelled) else {
                 break 'playback;
@@ -1265,9 +1576,15 @@ mod win {
             }
         }
         let release_failed = guard.release().is_err();
-        let _ = shared
-            .events
-            .send(playback_completion_event(id, input_failed, release_failed));
+        let completion = if foreground_lost {
+            NativeEvent::PlaybackGuardLost {
+                playback_id: id,
+                release_failed,
+            }
+        } else {
+            playback_completion_event(id, input_failed, release_failed)
+        };
+        let _ = shared.events.send(completion);
         let mut playback = shared.playback.lock().await;
         if playback.as_ref().is_some_and(|control| control.id == id) {
             playback.take();
@@ -1280,14 +1597,14 @@ mod win {
         buttons: HashSet<MouseButton>,
     }
 
-    #[derive(Default)]
     struct PlaybackGuard {
         held: HeldInputs,
+        shared: Arc<Shared>,
     }
 
     impl PlaybackGuard {
         fn release(&mut self) -> io::Result<()> {
-            release_inputs(&mut self.held)
+            release_inputs(&self.shared, &mut self.held)
         }
     }
 
@@ -1297,11 +1614,51 @@ mod win {
         }
     }
 
-    fn apply_event(event: &ReplayEvent, held: &mut HeldInputs) -> io::Result<()> {
+    enum ReplayWait {
+        Ready,
+        Cancelled,
+        ForegroundLost,
+    }
+
+    async fn wait_for_replay_step(
+        deadline: tokio::time::Instant,
+        cancel: &mut watch::Receiver<bool>,
+        require_coc_foreground: bool,
+        mut coc_is_foreground: impl FnMut() -> bool,
+    ) -> ReplayWait {
+        loop {
+            if cancel.has_changed().is_err() || *cancel.borrow() {
+                return ReplayWait::Cancelled;
+            }
+            if require_coc_foreground && !coc_is_foreground() {
+                return ReplayWait::ForegroundLost;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return ReplayWait::Ready;
+            }
+            let next_check = (now + Duration::from_millis(100)).min(deadline);
+            tokio::select! {
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        return ReplayWait::Cancelled;
+                    }
+                }
+                _ = sleep_until(next_check) => {}
+            }
+        }
+    }
+
+    fn apply_event(
+        shared: &Shared,
+        event: &ReplayEvent,
+        held: &mut HeldInputs,
+        require_coc_foreground: bool,
+    ) -> io::Result<()> {
         match event {
-            ReplayEvent::Move { x, y } => send_mouse_move(*x, *y),
+            ReplayEvent::Move { x, y } => send_mouse_move(shared, *x, *y, require_coc_foreground),
             ReplayEvent::Click { button, down } => {
-                send_mouse_button(*button, *down)?;
+                send_mouse_button(shared, *button, *down, require_coc_foreground)?;
                 if *down {
                     held.buttons.insert(*button);
                 } else {
@@ -1309,9 +1666,9 @@ mod win {
                 }
                 Ok(())
             }
-            ReplayEvent::Scroll { dx, dy } => send_scroll(*dx, *dy),
+            ReplayEvent::Scroll { dx, dy } => send_scroll(shared, *dx, *dy, require_coc_foreground),
             ReplayEvent::Key { virtual_key, down } => {
-                send_key(*virtual_key, *down)?;
+                send_key(shared, *virtual_key, *down, require_coc_foreground)?;
                 if *down {
                     held.keys.insert(*virtual_key);
                 } else {
@@ -1323,10 +1680,17 @@ mod win {
         }
     }
 
-    fn release_inputs(held: &mut HeldInputs) -> io::Result<()> {
+    fn release_inputs(shared: &Shared, held: &mut HeldInputs) -> io::Result<()> {
+        release_inputs_with(held, |input| send_inputs(shared, &[input], false))
+    }
+
+    fn release_inputs_with(
+        held: &mut HeldInputs,
+        mut send: impl FnMut(INPUT) -> io::Result<()>,
+    ) -> io::Result<()> {
         let mut first_error = None;
         for key in held.keys.iter().copied().collect::<Vec<_>>() {
-            match send_inputs(&[key_input(key, false)]) {
+            match send(key_input(key, false)) {
                 Ok(()) => {
                     held.keys.remove(&key);
                 }
@@ -1335,7 +1699,7 @@ mod win {
             }
         }
         for button in held.buttons.iter().copied().collect::<Vec<_>>() {
-            match send_inputs(&[mouse_button_input(button, false)]) {
+            match send(mouse_button_input(button, false)) {
                 Ok(()) => {
                     held.buttons.remove(&button);
                 }
@@ -1346,8 +1710,17 @@ mod win {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn send_key(virtual_key: u16, down: bool) -> io::Result<()> {
-        send_inputs(&[key_input(virtual_key, down)])
+    fn send_key(
+        shared: &Shared,
+        virtual_key: u16,
+        down: bool,
+        require_coc_foreground: bool,
+    ) -> io::Result<()> {
+        send_inputs(
+            shared,
+            &[key_input(virtual_key, down)],
+            require_coc_foreground,
+        )
     }
 
     fn key_input(virtual_key: u16, down: bool) -> INPUT {
@@ -1376,7 +1749,12 @@ mod win {
         )
     }
 
-    fn send_mouse_move(x: i32, y: i32) -> io::Result<()> {
+    fn send_mouse_move(
+        shared: &Shared,
+        x: i32,
+        y: i32,
+        require_coc_foreground: bool,
+    ) -> io::Result<()> {
         let left = unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_XVIRTUALSCREEN)
         };
@@ -1396,19 +1774,23 @@ mod win {
         }
         let normalized_x = normalize_coordinate(x, left, width);
         let normalized_y = normalize_coordinate(y, top, height);
-        send_inputs(&[INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: normalized_x,
-                    dy: normalized_y,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-                    time: 0,
-                    dwExtraInfo: INJECTION_TAG,
+        send_inputs(
+            shared,
+            &[INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: normalized_x,
+                        dy: normalized_y,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                        time: 0,
+                        dwExtraInfo: INJECTION_TAG,
+                    },
                 },
-            },
-        }])
+            }],
+            require_coc_foreground,
+        )
     }
 
     fn normalize_coordinate(value: i32, origin: i32, extent: i32) -> i32 {
@@ -1419,8 +1801,17 @@ mod win {
             / i64::from(extent - 1)) as i32
     }
 
-    fn send_mouse_button(button: MouseButton, down: bool) -> io::Result<()> {
-        send_inputs(&[mouse_button_input(button, down)])
+    fn send_mouse_button(
+        shared: &Shared,
+        button: MouseButton,
+        down: bool,
+        require_coc_foreground: bool,
+    ) -> io::Result<()> {
+        send_inputs(
+            shared,
+            &[mouse_button_input(button, down)],
+            require_coc_foreground,
+        )
     }
 
     fn mouse_button_input(button: MouseButton, down: bool) -> INPUT {
@@ -1447,7 +1838,12 @@ mod win {
         }
     }
 
-    fn send_scroll(dx: i32, dy: i32) -> io::Result<()> {
+    fn send_scroll(
+        shared: &Shared,
+        dx: i32,
+        dy: i32,
+        require_coc_foreground: bool,
+    ) -> io::Result<()> {
         let mut inputs = Vec::with_capacity(2);
         if dy != 0 {
             inputs.push(scroll_input(dy, false)?);
@@ -1455,7 +1851,7 @@ mod win {
         if dx != 0 {
             inputs.push(scroll_input(dx, true)?);
         }
-        send_inputs(&inputs)
+        send_inputs(shared, &inputs, require_coc_foreground)
     }
 
     fn scroll_input(amount: i32, horizontal: bool) -> io::Result<INPUT> {
@@ -1481,9 +1877,16 @@ mod win {
         })
     }
 
-    fn send_inputs(inputs: &[INPUT]) -> io::Result<()> {
+    fn send_inputs(
+        shared: &Shared,
+        inputs: &[INPUT],
+        require_coc_foreground: bool,
+    ) -> io::Result<()> {
         if inputs.is_empty() {
             return Ok(());
+        }
+        if require_coc_foreground {
+            ensure_coc_foreground(true, shared.cached_coc_instance_is_foreground())?;
         }
         let sent = unsafe {
             SendInput(
@@ -1504,7 +1907,13 @@ mod win {
 
     #[cfg(test)]
     mod tests {
-        use super::is_extended_key;
+        use super::{
+            HeldInputs, MouseButton, ReplayWait, is_extended_key, release_inputs_with,
+            wait_for_replay_step,
+        };
+        use std::collections::HashSet;
+        use std::time::Duration;
+        use tokio::sync::watch;
 
         #[test]
         fn pynput_media_keys_use_extended_key_flags() {
@@ -1512,12 +1921,80 @@ mod win {
                 assert!(is_extended_key(key));
             }
         }
+
+        #[test]
+        fn focus_loss_releases_every_held_key_and_mouse_button() {
+            let mut held = HeldInputs {
+                keys: HashSet::from([0x41]),
+                buttons: HashSet::from([MouseButton::Left]),
+            };
+            let mut released = 0;
+
+            release_inputs_with(&mut held, |_| {
+                released += 1;
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(released, 2);
+            assert!(held.keys.is_empty());
+            assert!(held.buttons.is_empty());
+        }
+
+        #[tokio::test]
+        async fn playback_wait_cancels_as_soon_as_focus_is_lost() {
+            let (_cancel_tx, mut cancel) = watch::channel(false);
+            let result = wait_for_replay_step(
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                &mut cancel,
+                true,
+                || false,
+            )
+            .await;
+
+            assert!(matches!(result, ReplayWait::ForegroundLost));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_guard_rejects_input_without_the_game_focus() {
+        assert_eq!(
+            ensure_coc_foreground(true, false).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(ensure_coc_foreground(true, true).is_ok());
+        assert!(ensure_coc_foreground(false, false).is_ok());
+    }
+
+    #[test]
+    fn coc_window_identity_requires_game_title_and_google_play_process() {
+        assert!(is_coc_window_identity(
+            "Clash of Clans - qurnt12",
+            r"C:\Program Files\Google\Play Games\crosvm.exe"
+        ));
+        assert!(!is_coc_window_identity(
+            "Google Play Games",
+            r"C:\Program Files\Google\Play Games\crosvm.exe"
+        ));
+        assert!(!is_coc_window_identity(
+            "Clash of Clans - qurnt12",
+            r"C:\Games\other.exe"
+        ));
+    }
+
+    #[test]
+    fn process_instance_requires_the_captured_pid_and_creation_time() {
+        assert!(same_process_instance(41, 100, 41, 100));
+        assert!(!same_process_instance(41, 100, 41, 101));
+        assert!(!same_process_instance(41, 100, 42, 100));
+        assert!(!same_process_instance(0, 100, 0, 100));
+        assert!(!same_process_instance(41, 0, 41, 0));
+    }
 
     #[test]
     fn playback_completion_distinguishes_cancellation_from_injection_failures() {

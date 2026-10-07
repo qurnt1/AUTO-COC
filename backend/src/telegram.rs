@@ -626,6 +626,7 @@ async fn execute_command(
         "GO" => match controller.start_playback_for_telegram(token, owner).await {
             Ok(_) => send_text(client, chat_id, "Lecture démarrée.").await,
             Err(ControllerError::EmptyMacro) => send_text(client, chat_id, "La macro sélectionnée est vide.").await,
+            Err(ControllerError::CocNotForeground) => send_text(client, chat_id, "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro.").await,
             Err(ControllerError::TelegramUnauthorized) => return,
             Err(_) => send_text(client, chat_id, "La lecture n’a pas pu démarrer. Vérifiez l’état de l’application et la macro sélectionnée.").await,
         },
@@ -682,9 +683,11 @@ async fn execute_command(
             let name = if command == "RELOAD_COC" { "Recharger COC" } else { "Valider arrivée" };
             match controller.play_named_macro_for_telegram(name, token, owner).await {
                 Ok(_) => send_text(client, chat_id, &format!("Lecture de « {name} » démarrée.")).await,
-                Err(ControllerError::EmptyMacro) => send_text(client, chat_id, &format!("La macro « {name} » est vide.")).await,
                 Err(ControllerError::TelegramUnauthorized) => return,
-                Err(_) => send_text(client, chat_id, &format!("La macro « {name} » n’a pas pu démarrer.")).await,
+                Err(error) => {
+                    let message = named_macro_playback_error(name, &error);
+                    send_text(client, chat_id, &message).await;
+                }
             }
         }
         "SELECT_MACRO_LIST" => match controller.telegram_macro_names().await {
@@ -713,6 +716,16 @@ async fn execute_command(
 
 async fn send_text(client: &TelegramClient, chat_id: i64, text: &str) {
     let _ = client.send_message(chat_id, text, None).await;
+}
+
+fn named_macro_playback_error(name: &str, error: &ControllerError) -> String {
+    match error {
+        ControllerError::CocNotForeground => {
+            "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro.".into()
+        }
+        ControllerError::EmptyMacro => format!("La macro « {name} » est vide."),
+        _ => format!("La macro « {name} » n’a pas pu démarrer."),
+    }
 }
 
 fn controls_keyboard(coc_launched: bool) -> Value {
@@ -855,5 +868,15 @@ mod tests {
             callback_command("SELECT_MACRO:Macro 2"),
             Some("SELECT_MACRO:Macro 2")
         );
+    }
+
+    #[test]
+    fn named_macro_playback_reports_foreground_guard_to_telegram() {
+        for name in ["Recharger COC", "Valider arrivée"] {
+            assert_eq!(
+                named_macro_playback_error(name, &ControllerError::CocNotForeground),
+                "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro."
+            );
+        }
     }
 }

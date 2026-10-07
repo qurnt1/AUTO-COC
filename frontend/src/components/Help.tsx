@@ -130,6 +130,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
             <h2>Vos données restent sur ce PC</h2>
             <p>AUTO-COC est une application Tauri : son backend Rust fait partie de l’application et fonctionne sur ce PC. Aucun service distinct n’est à lancer. Le token Telegram n’est jamais affiché dans l’aide ni dans les diagnostics.</p>
             <p>Tant qu’AUTO-COC est ouvert, ses raccourcis globaux et ses hooks Windows clavier/souris restent actifs. Hors d’un enregistrement démarré explicitement avec le bouton Enregistrer, aucun événement n’est ajouté à une macro. Après le délai de préparation de 3 secondes, les événements capturés sont sauvegardés dans la macro à l’arrêt.</p>
+            <p>Si « Exiger Clash of Clans au premier plan » est activé dans Réglages &gt; Général, la lecture et la capture ne démarrent que lorsque le jeu est au premier plan. Si le jeu perd le focus ou se ferme, l’action en cours s’arrête sans reprise automatique.</p>
             <p>Pour fermer AUTO-COC et désactiver ses raccourcis globaux, utilisez Réglages &gt; Outils de cet ordinateur &gt; Quitter AUTO-COC ou fermez complètement la fenêtre. Arrêtez tout enregistrement ou replay en cours avant de quitter.</p>
           </section>
         </aside>

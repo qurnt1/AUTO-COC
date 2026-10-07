@@ -449,6 +449,7 @@ impl Store {
         &mut self,
         loop_playback: Option<bool>,
         coc_path: Option<String>,
+        require_coc_foreground: Option<bool>,
     ) -> Result<(), StoreError> {
         if coc_path
             .as_ref()
@@ -458,8 +459,10 @@ impl Store {
         }
         let old_loop_playback = self.state.settings.loop_playback;
         let old_coc_path = self.state.settings.coc_path.clone();
+        let old_require_coc_foreground = self.state.settings.require_coc_foreground;
         let had_loop = self.state.present.contains("loop");
         let had_coc_path = self.state.present.contains("cocPath");
+        let had_require_coc_foreground = self.state.present.contains("requireCocForeground");
         if let Some(value) = loop_playback {
             self.state.settings.loop_playback = value;
             self.state.present.insert("loop".into());
@@ -468,14 +471,22 @@ impl Store {
             self.state.settings.coc_path = value;
             self.state.present.insert("cocPath".into());
         }
+        if let Some(value) = require_coc_foreground {
+            self.state.settings.require_coc_foreground = value;
+            self.state.present.insert("requireCocForeground".into());
+        }
         if let Err(error) = self.persist_settings() {
             self.state.settings.loop_playback = old_loop_playback;
             self.state.settings.coc_path = old_coc_path;
+            self.state.settings.require_coc_foreground = old_require_coc_foreground;
             if !had_loop {
                 self.state.present.remove("loop");
             }
             if !had_coc_path {
                 self.state.present.remove("cocPath");
+            }
+            if !had_require_coc_foreground {
+                self.state.present.remove("requireCocForeground");
             }
             return Err(error);
         }
@@ -1530,12 +1541,12 @@ mod tests {
 
         store.settings_path = settings_path.clone();
         store
-            .update_settings(None, Some("C:\\Games\\CoC.exe".into()))
+            .update_settings(None, Some("C:\\Games\\CoC.exe".into()), None)
             .unwrap();
         store.settings_path = blocked_parent.join("settings.json");
 
         assert!(matches!(
-            store.update_settings(Some(true), Some("C:\\Games\\Other.exe".into())),
+            store.update_settings(Some(true), Some("C:\\Games\\Other.exe".into()), None),
             Err(StoreError::Io(_))
         ));
         assert!(!store.settings().loop_playback);
@@ -1546,6 +1557,30 @@ mod tests {
         let persisted = read_settings(&settings_path).unwrap();
         assert!(!persisted.settings.loop_playback);
         assert_eq!(persisted.settings.coc_path, "C:\\Games\\CoC.exe");
+    }
+
+    #[test]
+    fn old_settings_load_guard_disabled_and_new_value_persists() {
+        let dir = tempdir().unwrap();
+        let store = Store::open_at(dir.path()).unwrap();
+        let settings_path = store.settings_path.clone();
+        let mut old_json = serde_json::to_value(&store.state).unwrap();
+        old_json["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("requireCocForeground");
+        fs::write(&settings_path, serde_json::to_vec(&old_json).unwrap()).unwrap();
+
+        let mut store = Store::open_at(dir.path()).unwrap();
+        assert!(!store.settings().require_coc_foreground);
+        store.update_settings(None, None, Some(true)).unwrap();
+        assert!(store.settings().require_coc_foreground);
+        assert!(
+            read_settings(&settings_path)
+                .unwrap()
+                .settings
+                .require_coc_foreground
+        );
     }
 
     #[test]
