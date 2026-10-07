@@ -12,6 +12,7 @@ function Start-SmokeProcess {
         [string]$Arguments = '',
         [string]$WorkingDirectory = (Get-Location).Path,
         [switch]$Hidden,
+        [switch]$CaptureOutput,
         [hashtable]$Environment = @{}
     )
 
@@ -27,11 +28,18 @@ function Start-SmokeProcess {
     else {
         [System.Diagnostics.ProcessWindowStyle]::Normal
     }
+    if ($CaptureOutput) {
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new()
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new()
+    }
     foreach ($entry in $Environment.GetEnumerator()) {
         $startInfo.EnvironmentVariables[$entry.Key] = $entry.Value
     }
 
-    return [System.Diagnostics.Process]::Start($startInfo)
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    return $process
 }
 
 function Get-AppProcessIds {
@@ -56,6 +64,22 @@ function Get-NormalizedFullPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
+
+function Write-CapturedProcessOutput {
+    param(
+        [Parameter(Mandatory = $true)]$StandardOutputTask,
+        [Parameter(Mandatory = $true)]$StandardErrorTask
+    )
+
+    $standardOutput = $StandardOutputTask.GetAwaiter().GetResult()
+    $standardError = $StandardErrorTask.GetAwaiter().GetResult()
+    if (-not [string]::IsNullOrWhiteSpace($standardOutput)) {
+        Write-Host $standardOutput.TrimEnd()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($standardError)) {
+        Write-Warning $standardError.TrimEnd()
+    }
 }
 
 function Stop-SmokeProcess {
@@ -172,6 +196,7 @@ $mainProcess = $null
 $secondProcess = $null
 $installerProcess = $null
 $uninstallerProcess = $null
+$uiAutomationProcess = $null
 $junctionCreated = $false
 $allSmokeProcessesStopped = $true
 $junctionSafeForTargetCleanup = $true
@@ -223,6 +248,56 @@ try {
     $mainWindow = Wait-ForMainWindow -Process $mainProcess -TimeoutSeconds 60
     Write-Host "Main window found: PID $($mainProcess.Id), HWND $mainWindow, title AUTO-COC."
 
+    $uiAutomationScript = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-ui-smoke.ps1')).Path
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $macroSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 12)
+    $macroName = "CI-SMOKE-$macroSuffix"
+    $renamedMacroName = "CI-RENAMED-$macroSuffix"
+    $uiAutomationArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$uiAutomationScript`" -WindowHandle $($mainWindow.ToInt64()) -AppProcessId $($mainProcess.Id) -MacroName $macroName -RenamedMacroName $renamedMacroName"
+    Write-Host 'Exercising macro creation and rename through Windows UI Automation.'
+    $uiAutomationProcess = Start-SmokeProcess -Path $windowsPowerShell -Arguments $uiAutomationArguments `
+        -WorkingDirectory $smokeRoot -Hidden -CaptureOutput
+    $uiOutputTask = $uiAutomationProcess.StandardOutput.ReadToEndAsync()
+    $uiErrorTask = $uiAutomationProcess.StandardError.ReadToEndAsync()
+    if (-not $uiAutomationProcess.WaitForExit(120000)) {
+        Write-Warning 'Windows UI Automation smoke timed out after 120 seconds; terminating its process tree.'
+        $uiAutomationProcess.Refresh()
+        if (-not $uiAutomationProcess.HasExited) {
+            try {
+                $uiAutomationProcess.Kill($true)
+            }
+            catch [System.InvalidOperationException] {
+                $uiAutomationProcess.Refresh()
+                if (-not $uiAutomationProcess.HasExited) {
+                    Write-Warning 'The UI Automation helper could not be terminated after its timeout.'
+                }
+            }
+        }
+        if ($uiAutomationProcess.WaitForExit(5000)) {
+            Write-CapturedProcessOutput -StandardOutputTask $uiOutputTask -StandardErrorTask $uiErrorTask
+        }
+        else {
+            Write-Warning 'Windows UI Automation helper remained active 5 seconds after forced termination.'
+        }
+        throw 'Windows UI Automation smoke timed out after 120 seconds.'
+    }
+    Write-CapturedProcessOutput -StandardOutputTask $uiOutputTask -StandardErrorTask $uiErrorTask
+    if ($uiAutomationProcess.ExitCode -ne 0) {
+        throw "Windows UI Automation smoke failed with exit code $($uiAutomationProcess.ExitCode)."
+    }
+
+    $macroDirectory = Join-Path (Join-Path $localAppData 'AUTO-COC') 'macros'
+    $oldMacroFile = Join-Path $macroDirectory "$macroName.json"
+    $renamedMacroFile = Join-Path $macroDirectory "$renamedMacroName.json"
+    if ((Test-Path -LiteralPath $oldMacroFile) -or -not (Test-Path -LiteralPath $renamedMacroFile)) {
+        throw 'The Rust backend did not persist the expected macro rename in the isolated profile.'
+    }
+    $persistedMacro = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    if ([string]$persistedMacro.name -cne $renamedMacroName) {
+        throw 'The isolated macro file does not contain the renamed macro name.'
+    }
+    Write-Host 'Rust backend persistence confirmed: only the renamed macro file exists in the isolated profile.'
+
     Write-Host 'Starting a second instance.'
     $secondProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
         -Environment $appEnvironment
@@ -268,6 +343,7 @@ try {
 }
 finally {
     foreach ($entry in @(
+        @{ Label = 'Windows UI Automation helper'; Process = $uiAutomationProcess },
         @{ Label = 'AUTO-COC second instance'; Process = $secondProcess },
         @{ Label = 'AUTO-COC main instance'; Process = $mainProcess },
         @{ Label = 'NSIS installer'; Process = $installerProcess }

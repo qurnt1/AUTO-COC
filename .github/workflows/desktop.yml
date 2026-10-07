@@ -75,7 +75,7 @@ jobs:
           args: --bundles nsis --target x86_64-pc-windows-msvc
 
       - name: Smoke test installed desktop app
-        # This verifies runtime startup and window presence, not focus behavior or rendered pixels.
+        # This verifies runtime startup and accessible UI actions, not focus behavior or rendered pixels.
         shell: pwsh
         run: >-
           ./.github/scripts/windows-runtime-smoke.ps1

@@ -73,11 +73,24 @@ La page Aide décrit les commandes, les raccourcis et la migration. Pour migrer,
 
 ## CI et publication
 
-Le workflow `.github/workflows/desktop.yml` vérifie le frontend et le backend sur Windows x64, construit l’installateur NSIS et joint cet installateur comme artefact aux pull requests. Il ne crée pas de GitHub Release et ne publie pas l’application.
+Le workflow `.github/workflows/desktop.yml` vérifie le frontend et le backend sur Windows x64, construit l’installateur NSIS et exécute un smoke test d’installation, de lancement, d’actions accessibles dans l’interface et de fermeture. L’installateur est téléchargeable depuis la page Actions de chaque exécution de pull request, sous `auto-coc-windows-x64-nsis`, pendant 14 jours. Un push sur `main` construit et vérifie le paquet, mais ne conserve pas d’artefact. Aucun GitHub Release n’est créé et l’application n’est pas publiée.
+
+### Générer et valider un installateur candidat
+
+La version applicative est actuellement `4.0.0` dans `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/Cargo.toml` et `backend/Cargo.toml`. Depuis `frontend`, lancez la commande de build de la section précédente. Le fichier `*-setup.exe` se trouve dans `frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
+
+Pour valider ce paquet localement, utilisez un compte Windows de test où `%LOCALAPPDATA%\com.autococ.desktop` n’existe pas. Depuis la racine du dépôt, lancez le smoke test sur un dossier temporaire existant :
+
+```powershell
+$env:RUNNER_TEMP = $env:TEMP
+.\.github\scripts\windows-runtime-smoke.ps1 -BundleDirectory .\frontend\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis
+```
+
+Le script installe le paquet dans un espace temporaire et tente de le désinstaller à la fin. Il vérifie le démarrage de la fenêtre, la création et le renommage d’une macro via l’interface accessible, la persistance du fichier, le lancement d’une seconde instance, l’absence de nouveau processus Chrome/Edge et la fermeture propre. Il refuse d’exécuter le test si le profil Tauri existe déjà. Ce smoke test ne valide pas le rendu visuel, les raccourcis globaux, ni l’enregistrement et la lecture réels; effectuez aussi les contrôles manuels ci-dessous avant toute distribution.
 
 Avant de distribuer une version, installez l’artefact sur une machine Windows propre, avec un compte utilisateur standard, et vérifiez le démarrage, l’absence de terminal et de navigateur externe, les raccourcis globaux, l’enregistrement/la lecture, la fermeture, ainsi que la conservation des macros et réglages après mise à niveau. Testez aussi l’installation lorsque WebView2 est absent, avec et sans accès réseau selon le mode de distribution choisi.
 
-Les paquets Windows peuvent être signés Authenticode. Sans signature, Windows SmartScreen peut avertir l’utilisateur; une signature ne garantit pas qu’un nouveau certificat aura immédiatement une réputation SmartScreen. Ne stockez jamais de certificat ni de clé privée dans le dépôt. La configuration de signature et de publication devra être ajoutée avant une release publique. L’[updater Tauri](https://v2.tauri.app/plugin/updater/) n’est pas configuré par ce workflow.
+Avant une release publique, mettez à jour de façon cohérente les versions ci-dessus, configurez la signature Authenticode en gardant certificat et clé privée hors du dépôt, puis ajoutez et validez une procédure de publication qui crée une GitHub Release et y attache l’installateur. Le workflow actuel n’a que la permission `contents: read` et ne réalise aucune de ces étapes. Sans signature, Windows SmartScreen peut avertir l’utilisateur; une signature ne garantit pas qu’un nouveau certificat aura immédiatement une réputation SmartScreen. L’[updater Tauri](https://v2.tauri.app/plugin/updater/) n’est pas configuré et n’est pas fourni par le workflow actuel.
 
 ## Structure
 
