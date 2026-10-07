@@ -216,7 +216,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "url",
  "windows-sys 0.59.0",
 ]
 
