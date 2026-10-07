@@ -32,7 +32,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
 
   useEffect(() => {
     if (!online) {
-      setHelpError("Reconnectez le service local pour charger les guides complémentaires.");
+      setHelpError("Réessayez depuis la bannière de connexion pour charger les guides complémentaires.");
       return;
     }
     setHelpError("");
@@ -56,7 +56,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
     setShowDiagnostics(true);
     setDiagnosticsError("");
     if (!online) {
-      setDiagnosticsError("Reconnectez le service local pour charger les diagnostics.");
+      setDiagnosticsError("Réessayez depuis la bannière de connexion pour charger les diagnostics.");
       return;
     }
     const value = await run("diagnostics", () => api.getDiagnostics());
@@ -107,7 +107,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
               <div className="shortcut-reference-row"><span>Basculer lecture / arrêt</span><kbd>{keys.toggle}</kbd></div>
               <div className="shortcut-reference-row"><span>Lire la macro</span><kbd>{keys.play}</kbd></div>
               <div className="shortcut-reference-row"><span>Arrêter</span><kbd>{keys.stop}</kbd></div>
-            </> : <p className="muted-copy">Reconnectez le service local pour afficher vos raccourcis configurés.</p>}
+            </> : <p className="muted-copy">Réessayez depuis la bannière de connexion pour afficher vos raccourcis configurés.</p>}
           </section>
 
           <section className="help-section local-help-section" aria-labelledby="local-help-title">
@@ -128,9 +128,9 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
           <section className="help-callout quiet-callout">
             <Icon name="shield" size={18} />
             <h2>Vos données restent sur ce PC</h2>
-            <p>Les macros et les réglages sont gérés par le service Rust local. Le token Telegram n’est jamais affiché dans l’aide ni dans les diagnostics.</p>
+            <p>AUTO-COC est une application Tauri : son backend Rust fait partie de l’application et fonctionne sur ce PC. Aucun service distinct n’est à lancer. Le token Telegram n’est jamais affiché dans l’aide ni dans les diagnostics.</p>
             <p>Tant qu’AUTO-COC est ouvert, ses raccourcis globaux et ses hooks Windows clavier/souris restent actifs. Hors d’un enregistrement démarré explicitement avec le bouton Enregistrer, aucun événement n’est ajouté à une macro. Après le délai de préparation de 3 secondes, les événements capturés sont sauvegardés dans la macro à l’arrêt.</p>
-            <p>Pour arrêter les services locaux, utilisez Réglages &gt; Outils de cet ordinateur &gt; Quitter AUTO-COC ou fermez complètement la fenêtre de l’application. Arrêtez tout enregistrement ou replay en cours avant de quitter.</p>
+            <p>Pour fermer AUTO-COC et désactiver ses raccourcis globaux, utilisez Réglages &gt; Outils de cet ordinateur &gt; Quitter AUTO-COC ou fermez complètement la fenêtre. Arrêtez tout enregistrement ou replay en cours avant de quitter.</p>
           </section>
         </aside>
       </div>
@@ -139,7 +139,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
         <div className="diagnostics-head"><div><span className="section-kicker">Informations expurgées</span><h2 id="diagnostics-title">Diagnostics locaux</h2></div><button className="text-button" type="button" onClick={() => setShowDiagnostics(false)}>Masquer</button></div>
         {busy === "diagnostics" && <p className="muted-copy">Lecture des diagnostics…</p>}
         {diagnosticsError && <p className="form-error" role="alert">{diagnosticsError}</p>}
-        {diagnostics && <div className="diagnostic-values"><div><span>Version AUTO-COC</span><strong>{diagnostics.appVersion}</strong></div><div><span>Service Rust</span><strong>{diagnostics.rustVersion}</strong></div><div><span>État</span><strong>{diagnostics.status}</strong></div><div className="diagnostic-errors"><span>Erreurs signalées</span>{diagnostics.errors.length ? <ul>{diagnostics.errors.map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}</ul> : <strong>Aucune erreur récente</strong>}</div></div>}
+        {diagnostics && <div className="diagnostic-values"><div><span>Version AUTO-COC</span><strong>{diagnostics.appVersion}</strong></div><div><span>Moteur Rust intégré</span><strong>{diagnostics.rustVersion}</strong></div><div><span>État</span><strong>{diagnostics.status}</strong></div><div className="diagnostic-errors"><span>Erreurs signalées</span>{diagnostics.errors.length ? <ul>{diagnostics.errors.map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}</ul> : <strong>Aucune erreur récente</strong>}</div></div>}
       </section>}
     </main>
   );
@@ -163,6 +163,7 @@ function MigrationPanel({ migration, loading, error, busy, online, importResult,
         <div><span className="section-kicker">Ancienne installation</span><h2 id="migration-title">Importer vos données</h2><p>Récupérez vos macros et réglages depuis une ancienne version d’AUTO-COC.</p></div>
       </div>
       <p className="migration-safety">Pour un data.csv lisible et compatible, AUTO-COC crée avant l’import une copie locale où le token Telegram est remplacé par « [REDACTED] », puis stocke le token importé de façon protégée. Le data.csv source reste inchangé et peut toujours contenir le token en clair.</p>
+      <p className="migration-safety">L’identifiant de conversation Telegram historique n’est pas importé. Après l’import, appairez à nouveau votre conversation dans Réglages &gt; Telegram.</p>
       {loading && <p className="muted-copy">Vérification de l’état de l’import…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {migration?.status.alreadyImported ? (
@@ -180,7 +181,7 @@ function MigrationPanel({ migration, loading, error, busy, online, importResult,
           <button className="button quiet" type="button" onClick={onSelect} disabled={!online || busy !== null}>{busy === "migration-source" ? "Ouverture du sélecteur…" : "Choisir un dossier"}</button>
         </div>
       )}
-      {importResult && <div className="migration-result" role="status"><strong>Import terminé</strong><span>{importResult.imported.macros} macros et {importResult.imported.settings} réglages importés.</span>{importResult.collisions.length > 0 && <span>{importResult.collisions.length} collision(s) préservée(s), aucun fichier existant remplacé.</span>}{importResult.preserved.length > 0 && <span>{importResult.preserved.length} élément(s) préservé(s).</span>}{importResult.errors.length > 0 && <span>{importResult.errors.length} erreur(s) signalée(s).</span>}</div>}
+      {importResult && <div className="migration-result" role="status"><strong>Import terminé</strong><span>{importResult.imported.macros} macros et {importResult.imported.settings} réglages importés.</span><span>L’identifiant de conversation Telegram historique n’a pas été repris. Appairez à nouveau votre conversation dans Réglages &gt; Telegram.</span>{importResult.collisions.length > 0 && <span>{importResult.collisions.length} collision(s) préservée(s), aucun fichier existant remplacé.</span>}{importResult.preserved.length > 0 && <span>{importResult.preserved.length} élément(s) préservé(s).</span>}{importResult.errors.length > 0 && <span>{importResult.errors.length} erreur(s) signalée(s).</span>}</div>}
     </section>
   );
 }

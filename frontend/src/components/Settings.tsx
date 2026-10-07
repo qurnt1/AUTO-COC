@@ -194,7 +194,7 @@ export function Settings({ api, snapshot, busy, run, online }: Props) {
               <div className="telegram-token-block">
                 <label className="field-label" htmlFor="telegram-token">Token du bot</label>
                 <div className="token-entry"><input id="telegram-token" type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={telegram.tokenConfigured ? "Token enregistré · saisir pour remplacer" : "Coller le token fourni par BotFather"} /><button className="button quiet" type="button" disabled={!online || !token.trim() || busy !== null} onClick={() => void saveToken()}>{busy === "telegram-token" ? "Enregistrement…" : "Enregistrer"}</button></div>
-                <span className="field-note"><Icon name="shield" size={14} />Le token est stocké par le service Rust dans le coffre Windows. Il ne revient jamais dans cette page.</span>
+                <span className="field-note"><Icon name="shield" size={14} />Le token est stocké dans le coffre Windows par AUTO-COC. Il ne revient jamais dans cette page.</span>
                 {telegram.tokenConfigured && <button className="text-button danger-text remove-token" type="button" disabled={!online || busy !== null} onClick={() => setShowTokenRemoval(true)}><Icon name="trash" size={14} />Retirer le token enregistré</button>}
               </div>
               <div className="telegram-pairing-block">
@@ -211,7 +211,7 @@ export function Settings({ api, snapshot, busy, run, online }: Props) {
 
           {tab === "system" && (
             <>
-              <div className="settings-section-head"><span className="section-kicker">Outils de cet ordinateur</span><h2>Actions locales</h2><p>Ces actions sont exécutées par le service local sur ce PC.</p></div>
+              <div className="settings-section-head"><span className="section-kicker">Outils de cet ordinateur</span><h2>Actions locales</h2><p>Ces actions sont exécutées par AUTO-COC sur ce PC.</p></div>
               <div className="setting-row system-action-row">
                 <div className="setting-row-copy"><strong>Capture d’écran</strong><span>L’aperçu reste dans cette page. Aucune image n’est envoyée à Telegram.</span></div>
                 <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void takeScreenshot()}><Icon name="activity" size={15} />{busy === "screenshot" ? "Capture…" : "Capturer l’écran"}</button>
@@ -227,8 +227,8 @@ export function Settings({ api, snapshot, busy, run, online }: Props) {
               </div>
               {shutdownError && <p className="form-error" role="alert">{shutdownError}</p>}
               <div className="quit-application-row">
-                <div className="setting-row-copy"><strong>Quitter AUTO-COC</strong><span>{snapshot.status.kind === "idle" ? "Ferme le service local et ses raccourcis globaux." : "Arrêtez d’abord l’enregistrement ou la lecture depuis l’atelier."}</span></div>
-                <button className="button quiet" type="button" disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onClick={() => void run("application-quit", () => api.quitApplication(), "Demande de fermeture envoyée au service local.")}>Quitter l’application</button>
+                <div className="setting-row-copy"><strong>Quitter AUTO-COC</strong><span>{snapshot.status.kind === "idle" ? "Ferme l’application et désactive ses raccourcis globaux." : "Arrêtez d’abord l’enregistrement ou la lecture depuis l’atelier."}</span></div>
+                <button className="button quiet" type="button" disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onClick={() => void run("application-quit", () => api.quitApplication(), "Demande de fermeture envoyée à AUTO-COC.")}>Quitter l’application</button>
               </div>
             </>
           )}

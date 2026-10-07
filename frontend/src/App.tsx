@@ -98,7 +98,7 @@ function DesktopApp() {
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       setConnection("disconnected");
-      setConnectionError(error instanceof Error ? error.message : "Le service local est indisponible.");
+      setConnectionError(error instanceof Error ? error.message : "AUTO-COC ne répond pas.");
     });
     return () => controller.abort();
   }, [connect]);
@@ -207,7 +207,7 @@ function DesktopApp() {
 
   const run = useCallback(async <T,>(label: string, action: () => Promise<T>, message?: string): Promise<T | undefined> => {
     if (connection !== "connected") {
-      setActionError("Le service local est hors ligne. Les commandes reprendront à la reconnexion.");
+      setActionError("AUTO-COC ne répond pas. Les commandes sont temporairement indisponibles.");
       return undefined;
     }
     setBusy(label);
@@ -257,7 +257,7 @@ function DesktopApp() {
   }
   const online = connection === "connected";
 
-  const macroState = snapshot ? statusText(snapshot) : connection === "connected" ? "Chargement" : "Service local";
+  const macroState = snapshot ? statusText(snapshot) : connection === "connected" ? "Chargement" : "AUTO-COC indisponible";
   const pageLabel = view === "atelier" ? "Atelier" : view === "settings" ? "Réglages" : "Aide";
 
   return (
@@ -285,8 +285,8 @@ function DesktopApp() {
           </nav>
         ) : <p className="sidebar-empty">Vos macros apparaîtront ici.</p>}
         <div className="sidebar-spacer" />
-        <button className="local-status" type="button" onClick={() => navigate("help")} aria-label={`Service local : ${connection === "connected" ? macroState : connection === "connecting" ? "connexion en cours" : "indisponible"}`}>
-          <span className={`connection-mark ${connection}`}><i /></span><span className="local-status-copy"><strong>{connection === "connected" ? macroState : connection === "connecting" ? "Connexion locale" : "Service indisponible"}</strong><small>{connection === "connected" ? "Ce PC · local" : connection === "connecting" ? "Connexion en cours" : "Voir l’aide"}</small></span><Icon name="chevron" size={14} />
+        <button className="local-status" type="button" onClick={() => navigate("help")} aria-label={`État d’AUTO-COC : ${connection === "connected" ? macroState : connection === "connecting" ? "démarrage en cours" : "ne répond pas"}`}>
+          <span className={`connection-mark ${connection}`}><i /></span><span className="local-status-copy"><strong>{connection === "connected" ? macroState : connection === "connecting" ? "Démarrage en cours" : "AUTO-COC ne répond pas"}</strong><small>{connection === "connected" ? "Ce PC · local" : connection === "connecting" ? "Démarrage en cours" : "Voir l’aide"}</small></span><Icon name="chevron" size={14} />
         </button>
         <div className="sidebar-version">AUTO-COC <span>·</span> outil local</div>
       </aside>
@@ -294,13 +294,13 @@ function DesktopApp() {
       <div className="page-shell" id="main-content" aria-label={pageLabel} tabIndex={-1}>
         {(connection === "disconnected" || connection === "connecting") && !snapshot && (
           <div className={`connection-banner ${connection}`} role={connection === "disconnected" ? "alert" : "status"}>
-            <span className="connection-mark"><i /></span><div><strong>{connection === "disconnected" ? "Le service local est indisponible" : "Connexion au service local…"}</strong><span>{connection === "disconnected" ? connectionError || "Lancez AUTO-COC depuis son raccourci pour ouvrir cette interface." : "Les macros et les commandes apparaîtront dès que la connexion sera établie."}</span></div>
+            <span className="connection-mark"><i /></span><div><strong>{connection === "disconnected" ? "AUTO-COC ne répond pas" : "Démarrage en cours…"}</strong><span>{connection === "disconnected" ? connectionError || "Relancez AUTO-COC depuis son raccourci." : "L’atelier et ses commandes apparaîtront une fois le démarrage terminé."}</span></div>
             {connection === "disconnected" && <button className="text-button" type="button" onClick={() => { setConnection("connecting"); void connect().then((value) => { setSnapshot(value); setConnection("connected"); setConnectionError(""); }).catch((error: unknown) => { setConnection("disconnected"); setConnectionError(error instanceof Error ? error.message : "Connexion impossible."); }); }}>Réessayer<Icon name="refresh" size={14} /></button>}
           </div>
         )}
         {actionError && <ActionErrorFeedback message={actionError} onDismiss={() => setActionError("")} />}
         {notice && <div className="action-feedback success" role="status"><Icon name="check" size={16} /><span>{notice}</span></div>}
-        {connection === "disconnected" && snapshot && <div className="reconnecting-strip" role="status"><span className="connection-mark disconnected"><i /></span>Connexion au service interrompue. Les commandes sont temporairement indisponibles.</div>}
+        {connection === "disconnected" && snapshot && <div className="reconnecting-strip" role="status"><span className="connection-mark disconnected"><i /></span>AUTO-COC ne répond pas. Les commandes sont temporairement indisponibles.</div>}
 
         {snapshot && view === "atelier" && <Atelier api={api} snapshot={snapshot} busy={busy} run={run} online={online} showOnboarding={!snapshot.onboardingComplete && !onboardingDismissed} onDismissOnboarding={dismissOnboarding} onCompleteOnboarding={() => { void completeOnboarding(); }} />}
         {snapshot && view === "settings" && <Settings api={api} snapshot={snapshot} busy={busy} run={run} online={online} />}

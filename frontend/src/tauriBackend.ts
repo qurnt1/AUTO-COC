@@ -102,14 +102,14 @@ export class TauriBackendClient implements BackendClient {
     if (signal?.aborted) throw abortError();
     await withSignal(this.ensureListener(), signal);
     const initial = await this.invoke<Snapshot>("get_snapshot", undefined, signal);
-    if (!isSnapshot(initial)) throw new BackendClientError("Le service a renvoyé un état illisible.", undefined, "invalid_response");
+    if (!isSnapshot(initial)) throw new BackendClientError("Le moteur Rust intégré a renvoyé un état illisible.", undefined, "invalid_response");
     this.publish(initial, false);
     return this.latest ?? initial;
   }
 
   async getSnapshot(signal?: AbortSignal): Promise<Snapshot> {
     const snapshot = await this.invoke<Snapshot>("get_snapshot", undefined, signal);
-    if (!isSnapshot(snapshot)) throw new BackendClientError("Le service a renvoyé un état illisible.", undefined, "invalid_response");
+    if (!isSnapshot(snapshot)) throw new BackendClientError("Le moteur Rust intégré a renvoyé un état illisible.", undefined, "invalid_response");
     this.publish(snapshot, false);
     return this.latest ?? snapshot;
   }
@@ -247,7 +247,7 @@ export class TauriBackendClient implements BackendClient {
   async getScreenshot(signal?: AbortSignal): Promise<Blob> {
     const payload = await this.invoke<number[] | Uint8Array | ArrayBuffer>("screenshot", undefined, signal);
     if (!Array.isArray(payload) && !(payload instanceof Uint8Array) && !(payload instanceof ArrayBuffer)) {
-      throw new BackendClientError("Le service n’a pas renvoyé une image PNG.", undefined, "invalid_response");
+      throw new BackendClientError("Le moteur Rust intégré n’a pas renvoyé une image PNG.", undefined, "invalid_response");
     }
     const bytes = payload instanceof ArrayBuffer ? new Uint8Array(payload) : Uint8Array.from(payload);
     return new Blob([bytes], { type: "image/png" });
@@ -354,7 +354,7 @@ export class TauriBackendClient implements BackendClient {
 
   private async snapshotCommand(command: string, args?: Record<string, unknown>): Promise<Snapshot> {
     const snapshot = await this.invoke<Snapshot>(command, args);
-    if (!isSnapshot(snapshot)) throw new BackendClientError("Le service a renvoyé un état illisible.", undefined, "invalid_response");
+    if (!isSnapshot(snapshot)) throw new BackendClientError("Le moteur Rust intégré a renvoyé un état illisible.", undefined, "invalid_response");
     this.publish(snapshot, false);
     return this.latest ?? snapshot;
   }

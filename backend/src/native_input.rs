@@ -459,19 +459,28 @@ fn append_recording_event(
     max_events: usize,
     kind: &str,
     payload: Value,
-) {
+) -> bool {
     if now < captures_at || *overflowed {
-        return;
+        return false;
     }
     if steps.len() >= max_events {
         *overflowed = true;
-        return;
+        return false;
     }
     let delta = last_event_at
         .map(|last| now.duration_since(last).as_secs_f64())
         .unwrap_or(0.0);
     *last_event_at = Some(now);
     steps.push(event_value(delta, kind, payload));
+    true
+}
+
+fn should_play_recording_beep(beeped: &mut bool, event_accepted: bool) -> bool {
+    if !event_accepted || *beeped {
+        return false;
+    }
+    *beeped = true;
+    true
 }
 
 fn finish_recording(steps: Vec<Value>, overflowed: bool) -> RecordingCapture {
@@ -609,7 +618,10 @@ mod win {
     };
     use windows_sys::Win32::{
         Foundation::{LPARAM, WPARAM},
-        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        System::{
+            Diagnostics::Debug::Beep, LibraryLoader::GetModuleHandleW,
+            Threading::GetCurrentThreadId,
+        },
         UI::{
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -647,6 +659,7 @@ mod win {
         last_event_at: Option<Instant>,
         steps: Vec<Value>,
         overflowed: bool,
+        beeped: bool,
     }
 
     struct Shared {
@@ -741,6 +754,7 @@ mod win {
                 last_event_at: None,
                 steps: Vec::new(),
                 overflowed: false,
+                beeped: false,
             });
             Ok(())
         }
@@ -1129,20 +1143,42 @@ mod win {
     }
 
     fn record(shared: &Shared, kind: &str, payload: Value) {
-        let mut current = lock(&shared.recording);
-        let Some(recording) = current.as_mut() else {
-            return;
+        let beep = {
+            let mut current = lock(&shared.recording);
+            let Some(recording) = current.as_mut() else {
+                return;
+            };
+            let accepted = append_recording_event(
+                &mut recording.steps,
+                &mut recording.last_event_at,
+                &mut recording.overflowed,
+                recording.captures_at,
+                Instant::now(),
+                MAX_CAPTURE_EVENTS,
+                kind,
+                payload,
+            );
+            should_play_recording_beep(&mut recording.beeped, accepted)
         };
-        append_recording_event(
-            &mut recording.steps,
-            &mut recording.last_event_at,
-            &mut recording.overflowed,
-            recording.captures_at,
-            Instant::now(),
-            MAX_CAPTURE_EVENTS,
-            kind,
-            payload,
-        );
+        if beep {
+            play_recording_beep();
+        }
+    }
+
+    fn play_recording_beep() {
+        if let Err(error) = thread::Builder::new()
+            .name("auto-coc-recording-beep".into())
+            .spawn(|| {
+                if unsafe { Beep(1_000, 200) } == 0 {
+                    tracing::warn!(
+                        error = %io::Error::last_os_error(),
+                        "Could not play the AUTO-COC recording beep"
+                    );
+                }
+            })
+        {
+            tracing::warn!(%error, "Could not start the AUTO-COC recording beep");
+        }
     }
 
     fn note_injected_key(shared: &Shared, virtual_key: u16, down: bool) {
@@ -1692,6 +1728,56 @@ mod tests {
             json!({"t":0.125,"type":"mouse_click","data":{"x":-1920,"y":40,"button":"right","action":"down"}})
         );
         assert!(parse_steps(std::slice::from_ref(&value)).is_ok());
+    }
+
+    #[test]
+    fn recording_beep_follows_the_first_accepted_event_only() {
+        let start = Instant::now();
+        let captures_at = start + PREPARATION;
+        let mut steps = Vec::new();
+        let mut last_event_at = None;
+        let mut overflowed = false;
+        let mut beeped = false;
+
+        let before_preparation = append_recording_event(
+            &mut steps,
+            &mut last_event_at,
+            &mut overflowed,
+            captures_at,
+            captures_at - Duration::from_millis(1),
+            MAX_CAPTURE_EVENTS,
+            "key_down",
+            json!({"key":"a"}),
+        );
+        assert!(!before_preparation);
+        assert!(!should_play_recording_beep(&mut beeped, before_preparation));
+
+        let first_accepted = append_recording_event(
+            &mut steps,
+            &mut last_event_at,
+            &mut overflowed,
+            captures_at,
+            captures_at,
+            MAX_CAPTURE_EVENTS,
+            "mouse_click",
+            json!({"button":"left"}),
+        );
+        assert!(first_accepted);
+        assert!(should_play_recording_beep(&mut beeped, first_accepted));
+
+        let next_accepted = append_recording_event(
+            &mut steps,
+            &mut last_event_at,
+            &mut overflowed,
+            captures_at,
+            captures_at + Duration::from_millis(1),
+            MAX_CAPTURE_EVENTS,
+            "key_up",
+            json!({"key":"a"}),
+        );
+        assert!(next_accepted);
+        assert!(!should_play_recording_beep(&mut beeped, next_accepted));
+        assert_eq!(steps.len(), 2);
     }
 
     #[test]

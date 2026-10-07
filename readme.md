@@ -1,6 +1,6 @@
 # AUTO-COC
 
-AUTO-COC enregistre et rejoue des macros clavier/souris sous Windows. L’interface React est hébergée dans une fenêtre desktop Tauri/WebView2 et communique avec le backend Rust par commandes Tauri. En production, l’application ne dépend pas d’un navigateur externe ni d’un terminal ouvert.
+AUTO-COC enregistre et rejoue des macros clavier/souris sous Windows. L’interface React est hébergée dans une fenêtre desktop Tauri/WebView2; son backend Rust est intégré à l’application et appelé par commandes Tauri. Aucun service séparé, navigateur externe ou terminal n’est à lancer en production.
 
 ## Prérequis Windows
 
@@ -69,7 +69,9 @@ Les raccourcis initiaux sont `F1` pour démarrer la macro sélectionnée ou arr�
 
 Telegram est facultatif. Configurez votre bot dans Réglages, créez un code d’appairage, puis envoyez `/start CODE` au bot depuis une conversation privée. Les commandes texte incluent `stop`, `go`, `menu`, `capture`, `shutdown`, `relancer` et `launch`. La commande `gif` indique que la capture GIF n’est pas prise en charge.
 
-La page Aide décrit les commandes, les raccourcis et la migration. Pour migrer, choisissez le dossier de l’ancienne installation ou son sous-dossier `config`. Une sauvegarde CSV expurgée du token est créée avant l’import; les fichiers source restent à leur emplacement. Les macros illisibles ou incompatibles sont signalées et ne sont pas rejouées.
+La page Aide décrit les commandes, les raccourcis et la migration. Pour migrer, choisissez le dossier de l’ancienne installation ou son sous-dossier `config`. Une sauvegarde CSV expurgée du token est créée avant l’import; les fichiers source restent à leur emplacement. Les macros illisibles ou incompatibles sont signalées et ne sont pas rejouées. L’identifiant de conversation Telegram historique n’est pas importé : après la migration, appairez à nouveau votre conversation depuis Réglages > Telegram.
+
+La [matrice de régression desktop](docs/desktop-regression-matrix.md) distingue les vérifications automatisées des parcours Windows qui restent à valider manuellement.
 
 ## CI et publication
 
