@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -188,6 +189,9 @@ function Get-NameDiagnostics {
 
 $window = $null
 try {
+    $accentedE = [char]0x00E9
+    $createLabel = "Cr$($accentedE)er une macro"
+    $createSubmitLabel = "Cr$($accentedE)er la macro"
     $window = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
     if ($window.Current.ProcessId -ne $AppProcessId) {
         throw "The UI Automation window belongs to process $($window.Current.ProcessId), expected AUTO-COC process $AppProcessId."
@@ -197,14 +201,14 @@ try {
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
     Write-Output "UI Automation found the accessible view label 'Vos macros'."
 
-    $create = Wait-ForElement -Root $window -Name 'Créer une macro' `
+    $create = Wait-ForElement -Root $window -Name $createLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
     Invoke-Element -Element $create
 
     $nameInput = Wait-ForElement -Root $window -Name 'Nom de la macro' `
         -ControlType ([System.Windows.Automation.ControlType]::Edit) -Seconds $TimeoutSeconds -RequireEnabled
     Set-ElementValue -Element $nameInput -Value $MacroName
-    $createSubmit = Wait-ForElement -Root $window -Name 'Créer la macro' `
+    $createSubmit = Wait-ForElement -Root $window -Name $createSubmitLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
     Invoke-Element -Element $createSubmit
 
@@ -233,9 +237,9 @@ try {
     Write-Output "UI Automation confirmed the renamed macro '$RenamedMacroName' and its removal under the old name."
 }
 catch {
-    [System.Console]::Error.WriteLine("Windows UI Automation smoke failed: $($_.Exception.Message)")
+    [System.Console]::WriteLine("Windows UI Automation smoke failed: $($_.Exception.Message)")
     if ($null -ne $window) {
-        [System.Console]::Error.WriteLine((Get-NameDiagnostics -Root $window))
+        [System.Console]::WriteLine((Get-NameDiagnostics -Root $window))
     }
     exit 1
 }
