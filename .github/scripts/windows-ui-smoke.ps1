@@ -40,13 +40,15 @@ function Find-VisibleElement {
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Root,
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][System.Windows.Automation.ControlType]$ControlType,
-        [switch]$RequireEnabled
+        [switch]$RequireEnabled,
+        [switch]$IncludeOffscreen
     )
 
     foreach ($element in @(Get-Descendants -Root $Root)) {
         try {
             $current = $element.Current
-            if ($current.Name -ceq $Name -and $current.ControlType -eq $ControlType -and -not $current.IsOffscreen) {
+            if ($current.Name -ceq $Name -and $current.ControlType -eq $ControlType -and
+                ($IncludeOffscreen -or -not $current.IsOffscreen)) {
                 if ($RequireEnabled -and -not $current.IsEnabled) {
                     continue
                 }
@@ -90,12 +92,14 @@ function Wait-ForElement {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][System.Windows.Automation.ControlType]$ControlType,
         [Parameter(Mandatory = $true)][int]$Seconds,
-        [switch]$RequireEnabled
+        [switch]$RequireEnabled,
+        [switch]$IncludeOffscreen
     )
 
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
-        $element = Find-VisibleElement -Root $Root -Name $Name -ControlType $ControlType -RequireEnabled:$RequireEnabled
+        $element = Find-VisibleElement -Root $Root -Name $Name -ControlType $ControlType `
+            -RequireEnabled:$RequireEnabled -IncludeOffscreen:$IncludeOffscreen
         if ($null -ne $element) {
             return $element
         }
@@ -196,9 +200,10 @@ function Get-NameDiagnostics {
         try {
             $current = $element.Current
             $typeName = $current.ControlType.ProgrammaticName
-            if (-not $current.IsOffscreen -and $namesByType.ContainsKey($typeName) -and
+            if ($namesByType.ContainsKey($typeName) -and
                 -not [string]::IsNullOrWhiteSpace($current.Name)) {
-                $namesByType[$typeName] += $current.Name
+                $visibility = if ($current.IsOffscreen) { ' [offscreen]' } else { '' }
+                $namesByType[$typeName] += "$($current.Name)$visibility"
             }
         }
         catch {
@@ -216,8 +221,14 @@ function Get-NameDiagnostics {
 $window = $null
 try {
     $accentedE = [char]0x00E9
+    $accentedA = [char]0x00E0
+    $accentedCircumflexE = [char]0x00EA
+    $curlyApostrophe = [char]0x2019
     $createLabel = "Cr$($accentedE)er une macro"
     $createSubmitLabel = "Cr$($accentedE)er la macro"
+    $readyLabel = 'Pr' + $accentedCircumflexE + 't ' + $accentedA + ' lancer'
+    $eventCountLabel = '0 ' + $accentedE + 'v' + $accentedE + 'nements'
+    $stopRecordingLabel = 'Arr' + $accentedCircumflexE + 'ter l' + $curlyApostrophe + 'enregistrement'
     $window = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
     if ($window.Current.ProcessId -ne $AppProcessId) {
         throw "The UI Automation window belongs to process $($window.Current.ProcessId), expected AUTO-COC process $AppProcessId."
@@ -234,9 +245,9 @@ try {
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
         Wait-ForElementContainingNameToDisappear -Root $window -Name $MacroName `
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
-        $null = Wait-ForElement -Root $window -Name 'Prêt à lancer' `
+        $null = Wait-ForElement -Root $window -Name $readyLabel `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
-        $null = Wait-ForElement -Root $window -Name '0 événements' `
+        $null = Wait-ForElement -Root $window -Name $eventCountLabel `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
         Write-Output "UI Automation confirmed '$RenamedMacroName' reloaded after a full restart with an empty sequence."
         return
@@ -255,8 +266,9 @@ try {
         $null = Wait-ForElementContainingName -Root $window -Name 'Capture des actions en cours' `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds ($TimeoutSeconds + 10)
         Start-Sleep -Seconds 4
-        $null = Wait-ForElement -Root $window -Name "Arrêter l’enregistrement" `
-            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+        $null = Wait-ForElement -Root $window -Name $stopRecordingLabel `
+            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
+            -RequireEnabled -IncludeOffscreen
         Write-Output 'UI Automation left the empty recording active for the graceful-close scenario.'
         return
     }
@@ -306,12 +318,13 @@ try {
     $null = Wait-ForElementContainingName -Root $window -Name 'Capture des actions en cours' `
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds ($TimeoutSeconds + 10)
     Start-Sleep -Seconds 4
-    $stopRecording = Wait-ForElement -Root $window -Name "Arrêter l’enregistrement" `
-        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+    $stopRecording = Wait-ForElement -Root $window -Name $stopRecordingLabel `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
+        -RequireEnabled -IncludeOffscreen
     Invoke-Element -Element $stopRecording
-    $null = Wait-ForElement -Root $window -Name 'Prêt à lancer' `
+    $null = Wait-ForElement -Root $window -Name $readyLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
-    $null = Wait-ForElement -Root $window -Name '0 événements' `
+    $null = Wait-ForElement -Root $window -Name $eventCountLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
     $macroAfterRecording = Read-MacroFile -Path $MacroFilePath
     if ($macroAfterRecording.UpdatedAt -le $macroBeforeRecording.UpdatedAt) {
