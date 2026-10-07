@@ -74,9 +74,8 @@ jobs:
           tauriScript: cargo tauri
           args: --bundles nsis --target x86_64-pc-windows-msvc
 
-      - name: Smoke test installed desktop app (diagnostic)
-        # Keep this non-blocking until HWND behavior is confirmed; hosted CI does not prove focus or rendered pixels.
-        continue-on-error: true
+      - name: Smoke test installed desktop app
+        # This verifies runtime startup and window presence, not focus behavior or rendered pixels.
         shell: pwsh
         run: >-
           ./.github/scripts/windows-runtime-smoke.ps1
