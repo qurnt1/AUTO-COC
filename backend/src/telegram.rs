@@ -179,7 +179,6 @@ pub struct TelegramChat {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct TelegramMessage {
-    pub message_id: i64,
     pub chat: TelegramChat,
     pub from: Option<TelegramUser>,
     pub text: Option<String>,
@@ -791,7 +790,6 @@ mod tests {
 
     fn message(chat_id: i64, user_id: i64, chat_type: &str) -> TelegramMessage {
         TelegramMessage {
-            message_id: 17,
             chat: TelegramChat {
                 id: chat_id,
                 chat_type: chat_type.into(),

@@ -257,6 +257,7 @@ impl Store {
         ))
     }
 
+    #[cfg(test)]
     pub fn import_legacy(&mut self, selected: &Path) -> Result<MigrationResult, StoreError> {
         self.import_legacy_with_token_installation(selected, || {})
     }
@@ -427,15 +428,6 @@ impl Store {
     pub fn set_loop(&mut self, value: bool) -> Result<(), StoreError> {
         self.state.settings.loop_playback = value;
         self.state.present.insert("loop".into());
-        self.persist_settings()
-    }
-
-    pub fn set_coc_path(&mut self, value: String) -> Result<(), StoreError> {
-        if value.len() > 2048 || value.contains('\0') {
-            return Err(StoreError::InvalidData);
-        }
-        self.state.settings.coc_path = value;
-        self.state.present.insert("cocPath".into());
         self.persist_settings()
     }
 

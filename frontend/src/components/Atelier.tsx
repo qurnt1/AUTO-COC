@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ActionRunner, ApiClient, MacroDetail, MacroStep, MacroSummary, Snapshot } from "../api";
+import type { ActionRunner, BackendClient, MacroDetail, MacroStep, MacroSummary, Snapshot } from "../api";
 import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
@@ -12,7 +12,7 @@ import {
 } from "./sequence";
 
 type DialogState = { kind: "create" } | { kind: "rename"; macro: MacroSummary } | { kind: "delete"; macro: MacroSummary } | null;
-type PageProps = { api: ApiClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void };
+type PageProps = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void };
 
 const eventNames: Record<string, { label: string; icon: "mouse" | "key" | "scroll" | "dots" }> = {
   mouse_move: { label: "Déplacement", icon: "mouse" },

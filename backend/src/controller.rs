@@ -6,7 +6,10 @@ use std::{
 
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::{
+    sync::{Mutex, mpsc, watch},
+    task::JoinHandle,
+};
 
 use crate::{
     native_input::{NativeEvent, NativeInput},
@@ -107,13 +110,24 @@ pub struct Controller {
     native_events_tx: mpsc::UnboundedSender<NativeEvent>,
     native_events_rx: Mutex<Option<mpsc::UnboundedReceiver<NativeEvent>>>,
     native_event_loop_started: Mutex<bool>,
+    native_event_loop_shutdown: watch::Sender<bool>,
+    native_event_loop_task: Mutex<Option<JoinHandle<()>>>,
     revision_tx: watch::Sender<u64>,
+    #[cfg(test)]
+    shutdown_race_gate: Mutex<Option<Arc<ShutdownRaceGate>>>,
+}
+
+#[cfg(test)]
+struct ShutdownRaceGate {
+    paused: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 impl Controller {
     pub fn new(store: Store) -> Self {
         let migration_already_imported = store.migration_was_imported().unwrap_or(false);
         let (revision_tx, _) = watch::channel(1);
+        let (native_event_loop_shutdown, _) = watch::channel(false);
         let (native_events_tx, native_events_rx) = mpsc::unbounded_channel();
         Self {
             machine: Mutex::new(Machine {
@@ -137,7 +151,11 @@ impl Controller {
             native_events_tx,
             native_events_rx: Mutex::new(Some(native_events_rx)),
             native_event_loop_started: Mutex::new(false),
+            native_event_loop_shutdown,
+            native_event_loop_task: Mutex::new(None),
             revision_tx,
+            #[cfg(test)]
+            shutdown_race_gate: Mutex::new(None),
         }
     }
 
@@ -168,13 +186,30 @@ impl Controller {
         if *started {
             return;
         }
+        if *self.native_event_loop_shutdown.borrow() {
+            return;
+        }
         let Some(mut events_rx) = self.native_events_rx.lock().await.take() else {
             return;
         };
         *started = true;
         let controller = Arc::downgrade(self);
-        tokio::spawn(async move {
-            while let Some(event) = events_rx.recv().await {
+        let mut shutdown = self.native_event_loop_shutdown.subscribe();
+        let task = tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    event = events_rx.recv() => match event {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 let Some(controller) = controller.upgrade() else {
                     break;
                 };
@@ -188,6 +223,15 @@ impl Controller {
                 }
             }
         });
+        *self.native_event_loop_task.lock().await = Some(task);
+    }
+
+    async fn stop_native_event_loop(&self) -> Result<(), ControllerError> {
+        self.native_event_loop_shutdown.send_replace(true);
+        if let Some(task) = self.native_event_loop_task.lock().await.take() {
+            task.await.map_err(|_| ControllerError::NativeInputFailed)?;
+        }
+        Ok(())
     }
 
     async fn handle_native_event(&self, event: NativeEvent) -> Result<(), ControllerError> {
@@ -256,22 +300,52 @@ impl Controller {
             machine.operation.clone()
         };
 
+        #[cfg(test)]
+        if let Some(gate) = self.shutdown_race_gate.lock().await.take() {
+            gate.paused.notify_one();
+            gate.resume.notified().await;
+        }
+
         let stopped = match operation {
             Operation::Recording { .. } => self.stop_recording().await.map(|_| ()),
             Operation::Playing { .. } => self.stop_playback().await.map(|_| ()),
             Operation::Idle => Ok(()),
         };
         if let Err(error) = stopped {
+            let mut machine = self.machine.lock().await;
+            let already_stopped = matches!(&error, ControllerError::InvalidState)
+                && matches!(machine.operation, Operation::Idle)
+                && machine.pending_recording.is_none();
+            if !already_stopped {
+                machine.closing = false;
+                return Err(error);
+            }
+        }
+
+        if let Err(error) = self.stop_native_event_loop().await {
             self.machine.lock().await.closing = false;
             return Err(error);
         }
+
+        let mut native_slot = self.native.lock().await;
+        let shutdown_failed = if let Some(native) = native_slot.as_mut() {
+            native.shutdown().await.is_err()
+        } else {
+            false
+        };
+        if shutdown_failed {
+            drop(native_slot);
+            self.machine.lock().await.closing = false;
+            return Err(ControllerError::NativeInputFailed);
+        }
+        *native_slot = None;
+        drop(native_slot);
 
         let mut machine = self.machine.lock().await;
         if !matches!(machine.operation, Operation::Idle) {
             machine.closing = false;
             return Err(ControllerError::InvalidState);
         }
-        self.native.lock().await.take();
         machine.pairing = None;
         machine.shutdown = None;
         machine.shutdown_complete = true;
@@ -572,10 +646,6 @@ impl Controller {
             .await
     }
 
-    pub async fn play_named_macro(&self, name: &str) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(Some(name), false, None).await
-    }
-
     pub async fn play_named_macro_for_telegram(
         &self,
         name: &str,
@@ -644,10 +714,6 @@ impl Controller {
             }
             Operation::Idle => Ok(self.snapshot().await?),
         }
-    }
-
-    pub async fn toggle_loop_playback(&self) -> Result<(bool, Snapshot), ControllerError> {
-        self.toggle_loop_playback_with_authority(None).await
     }
 
     pub async fn toggle_loop_playback_for_telegram(
@@ -1035,9 +1101,9 @@ impl Controller {
             .map_err(|_| ControllerError::ScreenshotUnavailable)
     }
 
-    pub async fn diagnostics(&self) -> Result<crate::api::Diagnostics, ControllerError> {
+    pub async fn diagnostics(&self) -> Result<crate::types::Diagnostics, ControllerError> {
         let machine = self.machine.lock().await;
-        Ok(crate::api::Diagnostics {
+        Ok(crate::types::Diagnostics {
             app_version: env!("CARGO_PKG_VERSION").into(),
             rust_version: option_env!("RUSTC_VERSION")
                 .unwrap_or("Rust toolchain")
@@ -1394,6 +1460,70 @@ mod tests {
         assert_eq!(machine.store.get_macro("Retry").unwrap().steps, steps);
         drop(machine);
         controller.shutdown_services().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_tolerates_playback_finishing_after_operation_snapshot() {
+        let dir = tempdir().unwrap();
+        let controller = Arc::new(Controller::new(Store::open_at(dir.path()).unwrap()));
+        controller.machine.lock().await.operation = Operation::Playing {
+            macro_name: "Test".into(),
+            started: Instant::now(),
+        };
+        let gate = Arc::new(ShutdownRaceGate {
+            paused: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        *controller.shutdown_race_gate.lock().await = Some(gate.clone());
+
+        let closing = controller.clone();
+        let shutdown = tokio::spawn(async move { closing.shutdown_services().await });
+        gate.paused.notified().await;
+        controller
+            .handle_native_event(NativeEvent::PlaybackEnded)
+            .await
+            .unwrap();
+        gate.resume.notify_one();
+
+        shutdown.await.unwrap().unwrap();
+        let machine = controller.machine.lock().await;
+        assert!(machine.shutdown_complete);
+        assert!(matches!(machine.operation, Operation::Idle));
+    }
+
+    #[tokio::test]
+    async fn shutdown_tolerates_recording_stopped_after_operation_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Race").unwrap();
+        let controller = Arc::new(Controller::new(store));
+        let steps = vec![serde_json::json!({"t":0.1,"type":"nop","data":{}})];
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::Recording {
+                macro_name: "Race".into(),
+                started: Instant::now(),
+            };
+            machine.pending_recording = Some(("Race".into(), steps.clone(), false));
+        }
+        let gate = Arc::new(ShutdownRaceGate {
+            paused: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        *controller.shutdown_race_gate.lock().await = Some(gate.clone());
+
+        let closing = controller.clone();
+        let shutdown = tokio::spawn(async move { closing.shutdown_services().await });
+        gate.paused.notified().await;
+        controller.stop_recording().await.unwrap();
+        gate.resume.notify_one();
+
+        shutdown.await.unwrap().unwrap();
+        let machine = controller.machine.lock().await;
+        assert!(machine.shutdown_complete);
+        assert!(matches!(machine.operation, Operation::Idle));
+        assert!(machine.pending_recording.is_none());
+        assert_eq!(machine.store.get_macro("Race").unwrap().steps, steps);
     }
 
     #[tokio::test]

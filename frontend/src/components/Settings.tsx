@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import type { ActionRunner, ApiClient, PairingPreparation, ShutdownPreparation, Snapshot } from "../api";
+import type { ActionRunner, BackendClient, PairingPreparation, ShutdownPreparation, Snapshot } from "../api";
 import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
 import { normalizeShortcut } from "./normalizeShortcut";
 
-type Props = { api: ApiClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean };
+type Props = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean };
 type SettingsTab = "general" | "shortcuts" | "telegram" | "system";
 type ShortcutName = keyof Snapshot["settings"]["shortcuts"];
 type PairingCode = Pick<PairingPreparation, "code" | "expiresAt">;
@@ -99,7 +99,7 @@ export function Settings({ api, snapshot, busy, run, online }: Props) {
       await navigator.clipboard.writeText(`/start ${pairing.code}`);
       setTelegramMessage("Commande copiée. Envoyez-la dans une conversation privée avec le bot.");
     } catch {
-      setTelegramMessage("Copie impossible dans ce navigateur. Sélectionnez la commande et copiez-la.");
+      setTelegramMessage("Copie impossible dans l’application. Sélectionnez la commande et copiez-la.");
     }
   }
 

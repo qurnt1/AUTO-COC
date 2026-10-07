@@ -138,6 +138,17 @@ impl NativeInput {
             Err(unsupported())
         }
     }
+
+    pub async fn shutdown(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.shutdown().await
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -753,6 +764,26 @@ mod win {
             .await
             .map_err(|_| io::Error::other("shortcut update task failed"))?
         }
+
+        pub async fn shutdown(&mut self) -> io::Result<()> {
+            self.stop_playback().await?;
+            let Some(worker) = self.worker.take() else {
+                return Ok(());
+            };
+            if self.worker_tx.send(WorkerCommand::Shutdown).is_err() {
+                tracing::warn!("AUTO-COC native input worker was already stopped");
+            }
+            if unsafe { PostThreadMessageW(self.worker_thread_id, WM_QUIT, 0, 0) } == 0 {
+                tracing::warn!(
+                    error = %io::Error::last_os_error(),
+                    "Could not wake the AUTO-COC native input worker"
+                );
+            }
+            tokio::task::spawn_blocking(move || worker.join())
+                .await
+                .map_err(|_| io::Error::other("native input worker join task failed"))?
+                .map_err(|_| io::Error::other("native input worker panicked"))
+        }
     }
 
     impl Drop for NativeInputInner {
@@ -762,14 +793,16 @@ mod win {
             {
                 control.cancel.send_replace(true);
             }
-            if self.worker_tx.send(WorkerCommand::Shutdown).is_err() {
-                tracing::warn!("AUTO-COC native input worker was already stopped");
-            }
-            if unsafe { PostThreadMessageW(self.worker_thread_id, WM_QUIT, 0, 0) } == 0 {
-                tracing::warn!(
-                    error = %io::Error::last_os_error(),
-                    "Could not wake the AUTO-COC native input worker"
-                );
+            if self.worker.is_some() {
+                if self.worker_tx.send(WorkerCommand::Shutdown).is_err() {
+                    tracing::warn!("AUTO-COC native input worker was already stopped");
+                }
+                if unsafe { PostThreadMessageW(self.worker_thread_id, WM_QUIT, 0, 0) } == 0 {
+                    tracing::warn!(
+                        error = %io::Error::last_os_error(),
+                        "Could not wake the AUTO-COC native input worker"
+                    );
+                }
             }
             drop(self.worker.take());
         }

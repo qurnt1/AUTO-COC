@@ -3,6 +3,55 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    pub app_version: String,
+    pub rust_version: String,
+    pub status: String,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Help {
+    pub sections: Vec<HelpSection>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HelpSection {
+    pub title: String,
+    pub body: String,
+}
+
+impl Default for Help {
+    fn default() -> Self {
+        Self {
+            sections: vec![
+                HelpSection {
+                    title: "Créer une macro".into(),
+                    body: "Créez une macro, sélectionnez-la puis démarrez l’enregistrement. La capture clavier/souris commence après un délai de préparation de 3 secondes. Arrêtez-la depuis l’application.".into(),
+                },
+                HelpSection {
+                    title: "Lire et arrêter".into(),
+                    body: "La lecture rejoue les entrées clavier et souris enregistrées. Gardez l’application ouverte pendant une opération et utilisez Arrêter dès qu’un replay ne se déroule pas comme prévu.".into(),
+                },
+                HelpSection {
+                    title: "Raccourcis par défaut".into(),
+                    body: "F1 bascule la lecture et l’arrêt, Ctrl+Shift+1 démarre une lecture, Ctrl+Shift+0 arrête une lecture ou un enregistrement. Les raccourcis personnalisés sont enregistrés seulement si Windows accepte les trois touches.".into(),
+                },
+                HelpSection {
+                    title: "Quitter AUTO-COC".into(),
+                    body: "Utilisez Réglages > Outils de cet ordinateur > Quitter AUTO-COC ou fermez complètement la fenêtre de l’application pour arrêter ses services locaux. Arrêtez d’abord tout enregistrement ou replay en cours.".into(),
+                },
+                HelpSection {
+                    title: "Données".into(),
+                    body: "Les macros sont stockées dans le dossier local AUTO-COC de votre profil Windows. Les macros héritées sont copiées sans supprimer les fichiers d’origine.".into(),
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShortcutSettings {
     pub toggle: String,
     pub play: String,
@@ -173,6 +222,45 @@ pub struct MigrationResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationStatusResponse {
+    pub status: MigrationStatus,
+    pub preview: Option<MigrationPreview>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationSelection {
+    pub snapshot: Snapshot,
+    pub preview: MigrationPreview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationImport {
+    pub snapshot: Snapshot,
+    pub imported: MigrationCounts,
+    pub collisions: Vec<String>,
+    pub preserved: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingStart {
+    pub code: String,
+    pub expires_at: String,
+    pub snapshot: Snapshot,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownPreparation {
+    pub confirmation_id: String,
+    pub expires_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,44 +294,8 @@ pub struct MacroFile {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateMacroRequest {
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenameMacroRequest {
-    pub new_name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SelectionRequest {
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsPatch {
     #[serde(rename = "loop")]
     pub loop_playback: Option<bool>,
     pub coc_path: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ShortcutRequest {
-    pub toggle: String,
-    pub play: String,
-    pub stop: String,
-}
-
-impl From<ShortcutRequest> for ShortcutSettings {
-    fn from(request: ShortcutRequest) -> Self {
-        Self {
-            toggle: request.toggle,
-            play: request.play,
-            stop: request.stop,
-        }
-    }
 }

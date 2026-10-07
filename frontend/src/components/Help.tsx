@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ActionRunner, ApiClient, Diagnostics, HelpDocument, MigrationImportResult, MigrationPreview, MigrationState, Snapshot } from "../api";
+import type { ActionRunner, BackendClient, Diagnostics, HelpDocument, MigrationImportResult, MigrationPreview, MigrationState, Snapshot } from "../api";
 import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
 
@@ -10,7 +10,7 @@ const quickGuides = [
 ];
 
 export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboarding, onCompleteOnboarding }: {
-  api: ApiClient;
+  api: BackendClient;
   snapshot: Snapshot | null;
   busy: string | null;
   run: ActionRunner;
@@ -129,7 +129,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
             <Icon name="shield" size={18} />
             <h2>Vos données restent sur ce PC</h2>
             <p>Les macros et les réglages sont gérés par le service Rust local. Le token Telegram n’est jamais affiché dans l’aide ni dans les diagnostics.</p>
-            <p>Fermer l’onglet ne quitte pas le service local. Utilisez Réglages &gt; Actions locales &gt; Quitter AUTO-COC quand l’application est au repos, ou Ctrl+C dans le terminal.</p>
+            <p>Pour arrêter les services locaux, utilisez Réglages &gt; Outils de cet ordinateur &gt; Quitter AUTO-COC ou fermez complètement la fenêtre de l’application. Arrêtez tout enregistrement ou replay en cours avant de quitter.</p>
           </section>
         </aside>
       </div>

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClient, ApiRequestError, type Snapshot } from "./api";
+import { isTauri } from "@tauri-apps/api/core";
+import { BackendClientError, type Snapshot } from "./api";
+import { createBackendClient } from "./backend";
 import { Atelier } from "./components/Atelier";
 import { Help } from "./components/Help";
 import { Icon } from "./components/Icon";
@@ -35,7 +37,21 @@ function statusText(snapshot: Snapshot): string {
 }
 
 export default function App() {
-  const [api] = useState(() => new ApiClient());
+  if (!isTauri()) {
+    return (
+      <main className="app-frame">
+        <section className="page-loading" role="alert">
+          <h1>AUTO-COC est une application de bureau</h1>
+          <p>Ouvrez AUTO-COC depuis son application de bureau. Pour le développement, exécutez <code>cargo tauri dev</code>.</p>
+        </section>
+      </main>
+    );
+  }
+  return <DesktopApp />;
+}
+
+function DesktopApp() {
+  const [api] = useState(() => createBackendClient());
   const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname));
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
@@ -50,10 +66,15 @@ export default function App() {
   const mobileDrawerWasOpen = useRef(false);
 
   const connect = useCallback(async (signal?: AbortSignal) => {
-    await api.openSession(signal);
-    return api.getSnapshot(signal);
+    return api.connect(signal);
   }, [api]);
   const revision = snapshot?.revision;
+
+  useEffect(() => () => api.dispose(), [api]);
+  useEffect(() => api.listenShutdownErrors((error) => {
+    setNotice("");
+    setActionError(error.message);
+  }), [api]);
 
   useEffect(() => {
     if (window.location.pathname === "/") window.history.replaceState({}, "", "/macros");
@@ -98,7 +119,7 @@ export default function App() {
     async function listen() {
       while (!signal.aborted) {
         try {
-          const updated = await api.getEvents(currentRevision, signal);
+          const updated = await api.waitForSnapshot(currentRevision, signal);
           currentRevision = updated.revision;
           setSnapshot((current) => current && updated.revision < current.revision ? current : updated);
           setConnection("connected");
@@ -107,15 +128,6 @@ export default function App() {
           if (signal.aborted) return;
           setConnection("disconnected");
           setConnectionError(error instanceof Error ? error.message : "La connexion locale a été interrompue.");
-          if (error instanceof ApiRequestError && error.status === 401) {
-            try {
-              const renewed = await connect(signal);
-              currentRevision = renewed.revision;
-              setSnapshot(renewed);
-              setConnection("connected");
-              setConnectionError("");
-            } catch { /* The next long-poll retry reports the current state. */ }
-          }
           await waitBeforeRetry();
         }
       }
@@ -208,7 +220,12 @@ export default function App() {
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "L’action n’a pas abouti.";
       setActionError(messageText);
-      if (error instanceof ApiRequestError && error.status === 409) {
+      if (error instanceof BackendClientError && (
+        error.status === 409
+        || error.code === "conflict"
+        || error.code === "invalid_state"
+        || error.code === "shortcut_unavailable"
+      )) {
         try {
           const latest = await api.getSnapshot();
           setSnapshot((current) => current && latest.revision < current.revision ? current : latest);
