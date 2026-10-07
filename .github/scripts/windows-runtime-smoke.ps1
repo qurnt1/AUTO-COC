@@ -159,7 +159,7 @@ function Start-UiAutomationSmoke {
         [Parameter(Mandatory = $true)][string]$MacroName,
         [Parameter(Mandatory = $true)][string]$RenamedMacroName,
         [Parameter(Mandatory = $true)][string]$MacroFilePath,
-        [Parameter(Mandatory = $true)][ValidateSet('setup', 'verify-restart')][string]$Mode,
+        [Parameter(Mandatory = $true)][ValidateSet('setup', 'start-close-recording', 'verify-restart')][string]$Mode,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][hashtable]$Environment
     )
@@ -257,6 +257,7 @@ $secondProcess = $null
 $installerProcess = $null
 $uninstallerProcess = $null
 $uiAutomationProcess = $null
+$closeRecordingUiAutomationProcess = $null
 $restartUiAutomationProcess = $null
 $restartProcess = $null
 $junctionCreated = $false
@@ -361,16 +362,61 @@ try {
         throw "The first instance changed its main HWND after the second launch."
     }
 
+    $macroBeforeCloseRecording = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    try {
+        $updatedAtBeforeCloseRecording = [DateTimeOffset]::Parse(
+            [string]$macroBeforeCloseRecording.updated_at,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal
+        )
+    }
+    catch {
+        throw 'The isolated macro has an invalid updated_at value before close-during-recording.'
+    }
+    if (@($macroBeforeCloseRecording.steps).Count -ne 0) {
+        throw 'The isolated macro must be empty before close-during-recording.'
+    }
+
+    Write-Host 'Starting an empty recording, waiting for capture, then closing AUTO-COC while it remains active.'
+    $closeRecordingUiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+        -WindowHandle $mainWindow.ToInt64() -AppProcessId $mainProcess.Id -MacroName $macroName `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode start-close-recording `
+        -WorkingDirectory $smokeRoot -Environment $appEnvironment
+    $closeRecordingUiAutomationProcess = $closeRecordingUiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $closeRecordingUiAutomationRun -Mode start-close-recording
+    $mainProcess.Refresh()
+    if ($mainProcess.HasExited) {
+        throw 'AUTO-COC exited before the active recording could be closed gracefully.'
+    }
+
     if (-not $mainProcess.CloseMainWindow()) {
-        throw 'CloseMainWindow did not send a close request to AUTO-COC.'
+        throw 'CloseMainWindow did not send a close request during the active recording.'
     }
     if (-not $mainProcess.WaitForExit(30000)) {
-        throw 'AUTO-COC did not exit within 30 seconds after CloseMainWindow.'
+        throw 'AUTO-COC did not exit within 30 seconds after closing during recording.'
     }
     if ($mainProcess.ExitCode -ne 0) {
-        throw "AUTO-COC exited with code $($mainProcess.ExitCode) after graceful close."
+        throw "AUTO-COC exited with code $($mainProcess.ExitCode) after closing during recording."
     }
-    Write-Host 'AUTO-COC closed cleanly.'
+
+    $macroAfterCloseRecording = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    try {
+        $updatedAtAfterCloseRecording = [DateTimeOffset]::Parse(
+            [string]$macroAfterCloseRecording.updated_at,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal
+        )
+    }
+    catch {
+        throw 'The isolated macro has an invalid updated_at value after close-during-recording.'
+    }
+    if ($updatedAtAfterCloseRecording -le $updatedAtBeforeCloseRecording) {
+        throw 'The macro updated_at timestamp did not advance after closing during the empty recording.'
+    }
+    if (@($macroAfterCloseRecording.steps).Count -ne 0) {
+        throw 'The isolated macro should remain empty after closing during the recording without injected input.'
+    }
+    Write-Host 'AUTO-COC closed during the empty recording with exit code 0; updated_at advanced and the saved sequence stayed empty.'
 
     Write-Host 'Relaunching AUTO-COC against the same isolated profile.'
     $restartProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
@@ -421,6 +467,7 @@ try {
 finally {
     foreach ($entry in @(
         @{ Label = 'Windows UI Automation restart helper'; Process = $restartUiAutomationProcess },
+        @{ Label = 'Windows UI Automation close-recording helper'; Process = $closeRecordingUiAutomationProcess },
         @{ Label = 'Windows UI Automation helper'; Process = $uiAutomationProcess },
         @{ Label = 'AUTO-COC relaunched process'; Process = $restartProcess },
         @{ Label = 'AUTO-COC second instance'; Process = $secondProcess },

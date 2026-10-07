@@ -9,7 +9,7 @@ param(
     [string]$RenamedMacroName,
     [Parameter(Mandatory = $true)]
     [string]$MacroFilePath,
-    [ValidateSet('setup', 'verify-restart')]
+    [ValidateSet('setup', 'start-close-recording', 'verify-restart')]
     [string]$Mode = 'setup',
     [int]$TimeoutSeconds = 45
 )
@@ -239,6 +239,25 @@ try {
         $null = Wait-ForElement -Root $window -Name '0 événements' `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
         Write-Output "UI Automation confirmed '$RenamedMacroName' reloaded after a full restart with an empty sequence."
+        return
+    }
+
+    if ($Mode -eq 'start-close-recording') {
+        $macroBeforeRecording = Read-MacroFile -Path $MacroFilePath
+        if ([string]$macroBeforeRecording.Data.name -cne $RenamedMacroName -or
+            @($macroBeforeRecording.Data.steps).Count -ne 0) {
+            throw 'The renamed macro must be empty before starting the close-during-recording scenario.'
+        }
+
+        $record = Wait-ForElement -Root $window -Name 'Enregistrer' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+        Invoke-Element -Element $record
+        $null = Wait-ForElementContainingName -Root $window -Name 'Capture des actions en cours' `
+            -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds ($TimeoutSeconds + 10)
+        Start-Sleep -Seconds 4
+        $null = Wait-ForElement -Root $window -Name "Arrêter l’enregistrement" `
+            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+        Write-Output 'UI Automation left the empty recording active for the graceful-close scenario.'
         return
     }
 
