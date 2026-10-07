@@ -7,6 +7,10 @@ param(
     [string]$MacroName,
     [Parameter(Mandatory = $true)]
     [string]$RenamedMacroName,
+    [Parameter(Mandatory = $true)]
+    [string]$MacroFilePath,
+    [ValidateSet('setup', 'verify-restart')]
+    [string]$Mode = 'setup',
     [int]$TimeoutSeconds = 45
 )
 
@@ -157,6 +161,28 @@ function Set-ElementValue {
     $pattern.SetValue($Value)
 }
 
+function Read-MacroFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $macro = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $updatedAtText = [string]$macro.updated_at
+    if ([string]::IsNullOrWhiteSpace($updatedAtText)) {
+        throw "Macro file '$Path' has no updated_at value."
+    }
+    try {
+        $updatedAt = [DateTimeOffset]::Parse(
+            $updatedAtText,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal
+        )
+    }
+    catch {
+        throw "Macro file '$Path' has an invalid updated_at value '$updatedAtText'."
+    }
+
+    return [pscustomobject]@{ Data = $macro; UpdatedAt = $updatedAt }
+}
+
 function Get-NameDiagnostics {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Root)
 
@@ -201,6 +227,21 @@ try {
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
     Write-Output "UI Automation found the accessible view label 'Vos macros'."
 
+    if ($Mode -eq 'verify-restart') {
+        $null = Wait-ForElement -Root $window -Name $RenamedMacroName `
+            -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+        $null = Wait-ForElementContainingName -Root $window -Name $RenamedMacroName `
+            -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
+        Wait-ForElementContainingNameToDisappear -Root $window -Name $MacroName `
+            -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
+        $null = Wait-ForElement -Root $window -Name 'Prêt à lancer' `
+            -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+        $null = Wait-ForElement -Root $window -Name '0 événements' `
+            -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+        Write-Output "UI Automation confirmed '$RenamedMacroName' reloaded after a full restart with an empty sequence."
+        return
+    }
+
     $create = Wait-ForElement -Root $window -Name $createLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
     Invoke-Element -Element $create
@@ -235,6 +276,37 @@ try {
     Wait-ForElementContainingNameToDisappear -Root $window -Name $MacroName `
         -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
     Write-Output "UI Automation confirmed the renamed macro '$RenamedMacroName' and its removal under the old name."
+
+    $record = Wait-ForElement -Root $window -Name 'Enregistrer' `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+    $macroBeforeRecording = Read-MacroFile -Path $MacroFilePath
+    if ([string]$macroBeforeRecording.Data.name -cne $RenamedMacroName) {
+        throw 'The macro file name does not match the renamed macro before recording.'
+    }
+    Invoke-Element -Element $record
+    $null = Wait-ForElementContainingName -Root $window -Name 'Capture des actions en cours' `
+        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds ($TimeoutSeconds + 10)
+    Start-Sleep -Seconds 4
+    $stopRecording = Wait-ForElement -Root $window -Name "Arrêter l’enregistrement" `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+    Invoke-Element -Element $stopRecording
+    $null = Wait-ForElement -Root $window -Name 'Prêt à lancer' `
+        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+    $null = Wait-ForElement -Root $window -Name '0 événements' `
+        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+    $macroAfterRecording = Read-MacroFile -Path $MacroFilePath
+    if ($macroAfterRecording.UpdatedAt -le $macroBeforeRecording.UpdatedAt) {
+        throw 'The macro updated_at timestamp did not advance after stopping the empty recording.'
+    }
+    if (@($macroAfterRecording.Data.steps).Count -ne 0) {
+        throw 'The isolated macro file should contain no events after the recording without injected input.'
+    }
+    $play = Wait-ForElement -Root $window -Name 'Lire la macro' `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds
+    if ($play.Current.IsEnabled) {
+        throw 'The empty recording unexpectedly enabled macro playback.'
+    }
+    Write-Output 'UI Automation confirmed recording start and stop; updated_at advanced and the persisted sequence is empty.'
 }
 catch {
     [System.Console]::WriteLine("Windows UI Automation smoke failed: $($_.Exception.Message)")

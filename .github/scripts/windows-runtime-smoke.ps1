@@ -150,6 +150,66 @@ function Wait-ForMainWindow {
     throw "Timed out waiting for AUTO-COC HWND/title; handle=$lastHandle title='$lastTitle'."
 }
 
+function Start-UiAutomationSmoke {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$PowerShellPath,
+        [Parameter(Mandatory = $true)][long]$WindowHandle,
+        [Parameter(Mandatory = $true)][int]$AppProcessId,
+        [Parameter(Mandatory = $true)][string]$MacroName,
+        [Parameter(Mandatory = $true)][string]$RenamedMacroName,
+        [Parameter(Mandatory = $true)][string]$MacroFilePath,
+        [Parameter(Mandatory = $true)][ValidateSet('setup', 'verify-restart')][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][hashtable]$Environment
+    )
+
+    $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -WindowHandle $WindowHandle -AppProcessId $AppProcessId -MacroName $MacroName -RenamedMacroName $RenamedMacroName -MacroFilePath `"$MacroFilePath`" -Mode $Mode"
+    $process = Start-SmokeProcess -Path $PowerShellPath -Arguments $arguments `
+        -WorkingDirectory $WorkingDirectory -Hidden -CaptureOutput -Environment $Environment
+    return [pscustomobject]@{
+        Process = $process
+        StandardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        StandardErrorTask = $process.StandardError.ReadToEndAsync()
+    }
+}
+
+function Wait-ForUiAutomationSmoke {
+    param(
+        [Parameter(Mandatory = $true)]$Run,
+        [Parameter(Mandatory = $true)][string]$Mode
+    )
+
+    $process = $Run.Process
+    if (-not $process.WaitForExit(120000)) {
+        Write-Warning "Windows UI Automation smoke ($Mode) timed out after 120 seconds; terminating its process tree."
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill($true)
+            }
+            catch [System.InvalidOperationException] {
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    Write-Warning 'The UI Automation helper could not be terminated after its timeout.'
+                }
+            }
+        }
+        if ($process.WaitForExit(5000)) {
+            Write-CapturedProcessOutput -StandardOutputTask $Run.StandardOutputTask -StandardErrorTask $Run.StandardErrorTask
+        }
+        else {
+            Write-Warning 'Windows UI Automation helper remained active 5 seconds after forced termination.'
+        }
+        throw "Windows UI Automation smoke ($Mode) timed out after 120 seconds."
+    }
+
+    Write-CapturedProcessOutput -StandardOutputTask $Run.StandardOutputTask -StandardErrorTask $Run.StandardErrorTask
+    if ($process.ExitCode -ne 0) {
+        throw "Windows UI Automation smoke ($Mode) failed with exit code $($process.ExitCode)."
+    }
+}
+
 $runnerTemp = $env:RUNNER_TEMP
 if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
     throw 'RUNNER_TEMP is required for the isolated desktop smoke test.'
@@ -197,6 +257,8 @@ $secondProcess = $null
 $installerProcess = $null
 $uninstallerProcess = $null
 $uiAutomationProcess = $null
+$restartUiAutomationProcess = $null
+$restartProcess = $null
 $junctionCreated = $false
 $allSmokeProcessesStopped = $true
 $junctionSafeForTargetCleanup = $true
@@ -253,42 +315,17 @@ try {
     $macroSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 12)
     $macroName = "CI-SMOKE-$macroSuffix"
     $renamedMacroName = "CI-RENAMED-$macroSuffix"
-    $uiAutomationArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$uiAutomationScript`" -WindowHandle $($mainWindow.ToInt64()) -AppProcessId $($mainProcess.Id) -MacroName $macroName -RenamedMacroName $renamedMacroName"
-    Write-Host 'Exercising macro creation and rename through Windows UI Automation.'
-    $uiAutomationProcess = Start-SmokeProcess -Path $windowsPowerShell -Arguments $uiAutomationArguments `
-        -WorkingDirectory $smokeRoot -Hidden -CaptureOutput
-    $uiOutputTask = $uiAutomationProcess.StandardOutput.ReadToEndAsync()
-    $uiErrorTask = $uiAutomationProcess.StandardError.ReadToEndAsync()
-    if (-not $uiAutomationProcess.WaitForExit(120000)) {
-        Write-Warning 'Windows UI Automation smoke timed out after 120 seconds; terminating its process tree.'
-        $uiAutomationProcess.Refresh()
-        if (-not $uiAutomationProcess.HasExited) {
-            try {
-                $uiAutomationProcess.Kill($true)
-            }
-            catch [System.InvalidOperationException] {
-                $uiAutomationProcess.Refresh()
-                if (-not $uiAutomationProcess.HasExited) {
-                    Write-Warning 'The UI Automation helper could not be terminated after its timeout.'
-                }
-            }
-        }
-        if ($uiAutomationProcess.WaitForExit(5000)) {
-            Write-CapturedProcessOutput -StandardOutputTask $uiOutputTask -StandardErrorTask $uiErrorTask
-        }
-        else {
-            Write-Warning 'Windows UI Automation helper remained active 5 seconds after forced termination.'
-        }
-        throw 'Windows UI Automation smoke timed out after 120 seconds.'
-    }
-    Write-CapturedProcessOutput -StandardOutputTask $uiOutputTask -StandardErrorTask $uiErrorTask
-    if ($uiAutomationProcess.ExitCode -ne 0) {
-        throw "Windows UI Automation smoke failed with exit code $($uiAutomationProcess.ExitCode)."
-    }
-
     $macroDirectory = Join-Path (Join-Path $localAppData 'AUTO-COC') 'macros'
     $oldMacroFile = Join-Path $macroDirectory "$macroName.json"
     $renamedMacroFile = Join-Path $macroDirectory "$renamedMacroName.json"
+    Write-Host 'Exercising macro creation, rename, and empty recording lifecycle through Windows UI Automation.'
+    $uiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+        -WindowHandle $mainWindow.ToInt64() -AppProcessId $mainProcess.Id -MacroName $macroName `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode setup `
+        -WorkingDirectory $smokeRoot -Environment $appEnvironment
+    $uiAutomationProcess = $uiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $uiAutomationRun -Mode setup
+
     if ((Test-Path -LiteralPath $oldMacroFile) -or -not (Test-Path -LiteralPath $renamedMacroFile)) {
         throw 'The Rust backend did not persist the expected macro rename in the isolated profile.'
     }
@@ -296,7 +333,10 @@ try {
     if ([string]$persistedMacro.name -cne $renamedMacroName) {
         throw 'The isolated macro file does not contain the renamed macro name.'
     }
-    Write-Host 'Rust backend persistence confirmed: only the renamed macro file exists in the isolated profile.'
+    if (@($persistedMacro.steps).Count -ne 0) {
+        throw 'The isolated macro file should contain the empty sequence from the UIA recording lifecycle.'
+    }
+    Write-Host 'Rust backend persistence confirmed: only the renamed macro file exists, with an empty sequence.'
 
     Write-Host 'Starting a second instance.'
     $secondProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
@@ -321,15 +361,6 @@ try {
         throw "The first instance changed its main HWND after the second launch."
     }
 
-    $newBrowsers = @(
-        Get-ExternalBrowserProcesses |
-            Where-Object { $_.Id -notin $browserPidsBefore }
-    )
-    if ($newBrowsers.Count -gt 0) {
-        throw "External browser process(es) started: $(($newBrowsers | ForEach-Object { "$($_.Name) PID $($_.Id)" }) -join ', ')."
-    }
-    Write-Host 'No new Chrome or Edge browser process detected (WebView2 is excluded).'
-
     if (-not $mainProcess.CloseMainWindow()) {
         throw 'CloseMainWindow did not send a close request to AUTO-COC.'
     }
@@ -340,10 +371,58 @@ try {
         throw "AUTO-COC exited with code $($mainProcess.ExitCode) after graceful close."
     }
     Write-Host 'AUTO-COC closed cleanly.'
+
+    Write-Host 'Relaunching AUTO-COC against the same isolated profile.'
+    $restartProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
+        -Environment $appEnvironment
+    $restartWindow = Wait-ForMainWindow -Process $restartProcess -TimeoutSeconds 60
+    Write-Host "Relaunched main window found: PID $($restartProcess.Id), HWND $restartWindow."
+    $restartUiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+        -WindowHandle $restartWindow.ToInt64() -AppProcessId $restartProcess.Id -MacroName $macroName `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode verify-restart `
+        -WorkingDirectory $smokeRoot -Environment $appEnvironment
+    $restartUiAutomationProcess = $restartUiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $restartUiAutomationRun -Mode verify-restart
+
+    $renamedMacroFile = Join-Path $macroDirectory "$renamedMacroName.json"
+    if ((Test-Path -LiteralPath $oldMacroFile) -or -not (Test-Path -LiteralPath $renamedMacroFile)) {
+        throw 'The renamed macro did not survive the full application restart in the isolated profile.'
+    }
+    $persistedMacro = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    if ([string]$persistedMacro.name -cne $renamedMacroName -or @($persistedMacro.steps).Count -ne 0) {
+        throw 'The reloaded macro file does not preserve its renamed name and empty sequence.'
+    }
+    $restartAppPids = @(Get-AppProcessIds -ExecutablePath $appPath)
+    if ($restartAppPids.Count -ne 1 -or $restartAppPids[0] -ne $restartProcess.Id) {
+        throw "Expected one AUTO-COC process after relaunch ($($restartProcess.Id)); found: $($restartAppPids -join ', ')."
+    }
+    Write-Host 'UI Automation and isolated storage confirmed the renamed macro reloaded after a complete restart.'
+
+    $newBrowsers = @(
+        Get-ExternalBrowserProcesses |
+            Where-Object { $_.Id -notin $browserPidsBefore }
+    )
+    if ($newBrowsers.Count -gt 0) {
+        throw "External browser process(es) started: $(($newBrowsers | ForEach-Object { "$($_.Name) PID $($_.Id)" }) -join ', ')."
+    }
+    Write-Host 'No new Chrome or Edge browser process detected (WebView2 is excluded).'
+
+    if (-not $restartProcess.CloseMainWindow()) {
+        throw 'CloseMainWindow did not send a close request to the relaunched AUTO-COC.'
+    }
+    if (-not $restartProcess.WaitForExit(30000)) {
+        throw 'The relaunched AUTO-COC did not exit within 30 seconds after CloseMainWindow.'
+    }
+    if ($restartProcess.ExitCode -ne 0) {
+        throw "The relaunched AUTO-COC exited with code $($restartProcess.ExitCode) after graceful close."
+    }
+    Write-Host 'Relaunched AUTO-COC closed cleanly.'
 }
 finally {
     foreach ($entry in @(
+        @{ Label = 'Windows UI Automation restart helper'; Process = $restartUiAutomationProcess },
         @{ Label = 'Windows UI Automation helper'; Process = $uiAutomationProcess },
+        @{ Label = 'AUTO-COC relaunched process'; Process = $restartProcess },
         @{ Label = 'AUTO-COC second instance'; Process = $secondProcess },
         @{ Label = 'AUTO-COC main instance'; Process = $mainProcess },
         @{ Label = 'NSIS installer'; Process = $installerProcess }
