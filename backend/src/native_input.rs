@@ -37,8 +37,53 @@ pub enum NativeEvent {
     Toggle,
     Play,
     Stop,
-    Cycle,
-    PlaybackEnded,
+    Cycle {
+        playback_id: u64,
+    },
+    PlaybackEnded {
+        playback_id: u64,
+    },
+    PlaybackFailed {
+        playback_id: u64,
+        reason: PlaybackFailure,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackFailure {
+    Input,
+    Release,
+    InputAndRelease,
+}
+
+fn playback_completion_event(
+    playback_id: u64,
+    input_failed: bool,
+    release_failed: bool,
+) -> NativeEvent {
+    match (input_failed, release_failed) {
+        (false, false) => NativeEvent::PlaybackEnded { playback_id },
+        (true, false) => NativeEvent::PlaybackFailed {
+            playback_id,
+            reason: PlaybackFailure::Input,
+        },
+        (false, true) => NativeEvent::PlaybackFailed {
+            playback_id,
+            reason: PlaybackFailure::Release,
+        },
+        (true, true) => NativeEvent::PlaybackFailed {
+            playback_id,
+            reason: PlaybackFailure::InputAndRelease,
+        },
+    }
+}
+
+fn playback_cycle_event(
+    playback_id: u64,
+    input_failed: bool,
+    cancelled: bool,
+) -> Option<NativeEvent> {
+    (!input_failed && !cancelled).then_some(NativeEvent::Cycle { playback_id })
 }
 
 pub struct RecordingCapture {
@@ -103,7 +148,7 @@ impl NativeInput {
         }
     }
 
-    pub async fn start_playback(&self, steps: Vec<Value>, looped: bool) -> io::Result<()> {
+    pub async fn start_playback(&self, steps: Vec<Value>, looped: bool) -> io::Result<u64> {
         #[cfg(windows)]
         {
             self.inner.start_playback(steps, looped).await
@@ -711,7 +756,7 @@ mod win {
             Ok(finish_recording(recording.steps, recording.overflowed))
         }
 
-        pub async fn start_playback(&self, steps: Vec<Value>, looped: bool) -> io::Result<()> {
+        pub async fn start_playback(&self, steps: Vec<Value>, looped: bool) -> io::Result<u64> {
             let parsed = parse_steps(&steps)?;
             let mut playback = self.shared.playback.lock().await;
             if playback.is_some() {
@@ -727,7 +772,7 @@ mod win {
                 run_playback(shared, id, parsed, looped, cancel_rx).await;
             });
             *playback = Some(PlaybackControl { id, cancel, task });
-            Ok(())
+            Ok(id)
         }
 
         pub async fn stop_playback(&self) -> io::Result<()> {
@@ -1150,31 +1195,43 @@ mod win {
         mut cancel: watch::Receiver<bool>,
     ) {
         let mut guard = PlaybackGuard::default();
+        let mut input_failed = false;
         'playback: loop {
             let start = tokio::time::Instant::now();
             let mut elapsed = Duration::ZERO;
+            let mut cancelled = false;
             for step in &steps {
                 elapsed = elapsed.saturating_add(step.delay);
                 tokio::select! {
                     changed = cancel.changed() => {
-                        if changed.is_err() || *cancel.borrow() { break 'playback; }
+                        if changed.is_err() || *cancel.borrow() {
+                            cancelled = true;
+                            break;
+                        }
                     }
                     _ = sleep_until(start + elapsed) => {}
                 }
                 if *cancel.borrow() {
-                    break 'playback;
+                    cancelled = true;
+                    break;
                 }
                 if apply_event(&step.event, &mut guard.held).is_err() {
-                    break 'playback;
+                    input_failed = true;
+                    break;
                 }
             }
-            let _ = shared.events.send(NativeEvent::Cycle);
+            let Some(cycle_event) = playback_cycle_event(id, input_failed, cancelled) else {
+                break 'playback;
+            };
+            let _ = shared.events.send(cycle_event);
             if !looped {
                 break;
             }
         }
-        guard.release();
-        let _ = shared.events.send(NativeEvent::PlaybackEnded);
+        let release_failed = guard.release().is_err();
+        let _ = shared
+            .events
+            .send(playback_completion_event(id, input_failed, release_failed));
         let mut playback = shared.playback.lock().await;
         if playback.as_ref().is_some_and(|control| control.id == id) {
             playback.take();
@@ -1193,14 +1250,14 @@ mod win {
     }
 
     impl PlaybackGuard {
-        fn release(&mut self) {
-            let _ = release_inputs(&mut self.held);
+        fn release(&mut self) -> io::Result<()> {
+            release_inputs(&mut self.held)
         }
     }
 
     impl Drop for PlaybackGuard {
         fn drop(&mut self) {
-            self.release();
+            let _ = self.release();
         }
     }
 
@@ -1425,6 +1482,45 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_completion_distinguishes_cancellation_from_injection_failures() {
+        assert_eq!(
+            playback_completion_event(4, false, false),
+            NativeEvent::PlaybackEnded { playback_id: 4 }
+        );
+        assert_eq!(
+            playback_completion_event(4, true, false),
+            NativeEvent::PlaybackFailed {
+                playback_id: 4,
+                reason: PlaybackFailure::Input,
+            }
+        );
+        assert_eq!(
+            playback_completion_event(4, false, true),
+            NativeEvent::PlaybackFailed {
+                playback_id: 4,
+                reason: PlaybackFailure::Release,
+            }
+        );
+        assert_eq!(
+            playback_completion_event(4, true, true),
+            NativeEvent::PlaybackFailed {
+                playback_id: 4,
+                reason: PlaybackFailure::InputAndRelease,
+            }
+        );
+    }
+
+    #[test]
+    fn input_failure_does_not_emit_a_completed_cycle_event() {
+        assert_eq!(playback_cycle_event(4, true, false), None);
+        assert_eq!(playback_cycle_event(4, false, true), None);
+        assert_eq!(
+            playback_cycle_event(4, false, false),
+            Some(NativeEvent::Cycle { playback_id: 4 })
+        );
+    }
 
     #[test]
     fn parses_default_and_custom_shortcuts_and_rejects_collisions() {

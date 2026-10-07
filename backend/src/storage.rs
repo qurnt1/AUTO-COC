@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -19,7 +19,10 @@ use crate::types::{
 };
 
 const MAX_MACRO_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_LEGACY_CSV_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_STEPS: usize = 250_000;
+const OVERSIZED_FINGERPRINT_SAMPLE_BYTES: usize = 64 * 1024;
+const OVERSIZED_FINGERPRINT_MARKER: &[u8] = b"\0AUTO-COC oversized file fingerprint v1\0";
 const LEGACY_TYPES: [&str; 6] = [
     "mouse_move",
     "mouse_click",
@@ -280,13 +283,13 @@ impl Store {
 
         let csv_path = config.join("data.csv");
         if csv_path.is_file() {
+            let legacy_csv = read_bounded_file(&csv_path, MAX_LEGACY_CSV_BYTES)?;
             let backup_dir = self.root.join("migration-backups").join(format!(
                 "{}-{}",
                 chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
                 &fingerprint[..8]
             ));
             fs::create_dir_all(&backup_dir)?;
-            let legacy_csv = fs::read(&csv_path)?;
             let backup_csv = redact_legacy_token(&legacy_csv)?;
             atomic_write(&backup_dir.join("data.csv"), &backup_csv)?;
         }
@@ -367,14 +370,16 @@ impl Store {
                 preserved.push(stem.chars().take(80).collect());
                 continue;
             }
-            if read_macro(&source).is_err() {
-                if !preserved.iter().any(|name| name == &stem) {
-                    preserved.push(stem);
+            let source_bytes = match read_macro_bytes(&source) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    if !preserved.iter().any(|name| name == &stem) {
+                        preserved.push(stem);
+                    }
+                    continue;
                 }
-                continue;
-            }
+            };
             let destination = macro_path(&self.macros_path, &stem)?;
-            let source_bytes = fs::read(&source)?;
             if destination.exists() || self.has_case_collision(&stem)? {
                 if !is_protected(&stem)
                     || !can_replace_placeholder(&stem, &destination, &placeholders)?
@@ -697,19 +702,24 @@ fn empty_macro(name: &str) -> MacroFile {
 }
 
 fn read_macro(path: &Path) -> Result<MacroFile, StoreError> {
-    let metadata = fs::metadata(path).map_err(|err| {
-        if err.kind() == io::ErrorKind::NotFound {
+    let bytes = read_bounded_file(path, MAX_MACRO_BYTES).map_err(|error| match error {
+        StoreError::Io(ref io_error) if io_error.kind() == io::ErrorKind::NotFound => {
             StoreError::NotFound
-        } else {
-            StoreError::Io(err)
         }
+        other => other,
     })?;
-    if metadata.len() > MAX_MACRO_BYTES {
-        return Err(StoreError::InvalidData);
-    }
-    let bytes = fs::read(path)?;
+    parse_macro_bytes(&bytes)
+}
+
+fn read_macro_bytes(path: &Path) -> Result<Vec<u8>, StoreError> {
+    let bytes = read_bounded_file(path, MAX_MACRO_BYTES)?;
+    parse_macro_bytes(&bytes)?;
+    Ok(bytes)
+}
+
+fn parse_macro_bytes(bytes: &[u8]) -> Result<MacroFile, StoreError> {
     let macro_file: MacroFile =
-        serde_json::from_slice(&bytes).map_err(|_| StoreError::Unreadable)?;
+        serde_json::from_slice(bytes).map_err(|_| StoreError::Unreadable)?;
     if macro_file.steps.len() > MAX_STEPS {
         return Err(StoreError::InvalidData);
     }
@@ -717,6 +727,23 @@ fn read_macro(path: &Path) -> Result<MacroFile, StoreError> {
         return Err(StoreError::Unreadable);
     }
     Ok(macro_file)
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > max_bytes {
+        return Err(StoreError::InvalidData);
+    }
+
+    let capacity = usize::try_from(metadata.len()).map_err(|_| StoreError::InvalidData)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let file = fs::File::open(path)?;
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(StoreError::InvalidData);
+    }
+    Ok(bytes)
 }
 
 fn macro_issue(data: &MacroFile) -> Option<String> {
@@ -1038,15 +1065,18 @@ fn has_legacy_content(config: &Path) -> bool {
 }
 
 fn preview_macro(path: &Path, name: String) -> Result<MigrationMacroPreview, StoreError> {
-    let bytes = fs::read(path)?;
-    if bytes.len() as u64 > MAX_MACRO_BYTES {
-        return Ok(MigrationMacroPreview {
-            name,
-            event_count: 0,
-            readable: false,
-            issue: Some("Le fichier dépasse la taille autorisée.".into()),
-        });
-    }
+    let bytes = match read_bounded_file(path, MAX_MACRO_BYTES) {
+        Ok(bytes) => bytes,
+        Err(StoreError::InvalidData) => {
+            return Ok(MigrationMacroPreview {
+                name,
+                event_count: 0,
+                readable: false,
+                issue: Some("Le fichier dépasse la taille autorisée.".into()),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     match serde_json::from_slice::<MacroFile>(&bytes) {
         Ok(data) => Ok(MigrationMacroPreview {
             name,
@@ -1067,10 +1097,7 @@ fn read_legacy_settings(path: &Path) -> Result<LegacySettings, StoreError> {
     if !path.is_file() {
         return Ok(LegacySettings::default());
     }
-    let bytes = fs::read(path)?;
-    if bytes.len() > 2 * 1024 * 1024 {
-        return Err(StoreError::InvalidData);
-    }
+    let bytes = read_bounded_file(path, MAX_LEGACY_CSV_BYTES)?;
     let text = String::from_utf8(bytes).map_err(|_| StoreError::InvalidData)?;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b';')
@@ -1224,7 +1251,7 @@ fn legacy_fingerprint(config: &Path) -> Result<String, StoreError> {
     let mut files = Vec::new();
     let csv = config.join("data.csv");
     if csv.is_file() {
-        files.push(("data.csv".to_owned(), csv));
+        files.push(("data.csv".to_owned(), csv, MAX_LEGACY_CSV_BYTES));
     }
     let macros = config.join("macros");
     if macros.is_dir() {
@@ -1238,23 +1265,65 @@ fn legacy_fingerprint(config: &Path) -> Result<String, StoreError> {
                     .file_name()
                     .and_then(|value| value.to_str())
                     .unwrap_or("macro.json");
-                files.push((format!("macros/{name}"), path));
+                files.push((format!("macros/{name}"), path, MAX_MACRO_BYTES));
             }
         }
     }
     let old_macro = config.join("macro.json");
     if old_macro.is_file() {
-        files.push(("macro.json".into(), old_macro));
+        files.push(("macro.json".into(), old_macro, MAX_MACRO_BYTES));
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hasher = Sha256::new();
-    for (name, path) in files {
+    for (name, path, max_bytes) in files {
         hasher.update(name.as_bytes());
-        let content = fs::read(path)?;
-        hasher.update((content.len() as u64).to_le_bytes());
-        hasher.update(content);
+        let mut file = fs::File::open(path)?;
+        let length = file.metadata()?.len();
+        hasher.update(length.to_le_bytes());
+        update_fingerprint_contents(&mut file, length, max_bytes, &mut hasher)?;
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn update_fingerprint_contents(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    max_bytes: u64,
+    hasher: &mut Sha256,
+) -> Result<(), StoreError> {
+    let mut buffer = [0; OVERSIZED_FINGERPRINT_SAMPLE_BYTES];
+    if length > max_bytes {
+        hasher.update(OVERSIZED_FINGERPRINT_MARKER);
+        let sample_len = (length / 2).min(buffer.len() as u64) as usize;
+        hasher.update((sample_len as u64).to_le_bytes());
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut buffer[..sample_len])?;
+        hasher.update(&buffer[..sample_len]);
+        hasher.update(b"\0omitted middle\0");
+        file.seek(SeekFrom::End(-(sample_len as i64)))?;
+        file.read_exact(&mut buffer[..sample_len])?;
+        hasher.update(&buffer[..sample_len]);
+    } else {
+        let mut remaining = length;
+        while remaining > 0 {
+            let chunk_len = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| StoreError::InvalidData)?;
+            let read = file.read(&mut buffer[..chunk_len])?;
+            if read == 0 {
+                return Err(StoreError::InvalidData);
+            }
+            hasher.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+        let mut extra = [0; 1];
+        if file.read(&mut extra)? != 0 {
+            return Err(StoreError::InvalidData);
+        }
+    }
+    if file.seek(SeekFrom::End(0))? != length {
+        return Err(StoreError::InvalidData);
+    }
+    Ok(())
 }
 
 fn file_fingerprint(content: &[u8]) -> String {
@@ -1594,6 +1663,189 @@ mod tests {
             .unwrap();
         assert!(!summary.readable);
         assert_eq!(fs::read(local_path).unwrap(), over_limit);
+    }
+
+    #[test]
+    fn sparse_oversized_macro_is_rejected_before_reading_its_contents() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Oversized.json");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_MACRO_BYTES + 1).unwrap();
+
+        let preview = preview_macro(&path, "Oversized".into()).unwrap();
+        assert!(!preview.readable);
+        assert_eq!(
+            preview.issue.as_deref(),
+            Some("Le fichier dépasse la taille autorisée.")
+        );
+        assert!(matches!(
+            read_macro_bytes(&path),
+            Err(StoreError::InvalidData)
+        ));
+        assert!(matches!(
+            read_bounded_file(&path, MAX_MACRO_BYTES),
+            Err(StoreError::InvalidData)
+        ));
+    }
+
+    #[test]
+    fn sparse_oversized_legacy_csv_is_rejected_before_backup_creation() {
+        let app = tempdir().unwrap();
+        let old = tempdir().unwrap();
+        let config = old.path().join("config");
+        fs::create_dir_all(&config).unwrap();
+        let csv_path = config.join("data.csv");
+        let file = fs::File::create(&csv_path).unwrap();
+        file.set_len(MAX_LEGACY_CSV_BYTES + 1).unwrap();
+        let mut store = Store::open_at(app.path()).unwrap();
+
+        assert!(matches!(
+            store.import_legacy(old.path()),
+            Err(StoreError::InvalidData)
+        ));
+        assert!(!app.path().join("migration-backups").exists());
+        assert!(matches!(
+            read_legacy_settings(&csv_path),
+            Err(StoreError::InvalidData)
+        ));
+    }
+
+    #[test]
+    fn streaming_legacy_fingerprint_matches_the_previous_content_hash() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("config");
+        let macros = config.join("macros");
+        fs::create_dir_all(&macros).unwrap();
+        fs::write(config.join("data.csv"), b"settings\0content").unwrap();
+        fs::write(macros.join("Macro 2.json"), b"macro two").unwrap();
+        fs::write(config.join("macro.json"), b"legacy macro").unwrap();
+
+        let mut files = vec![
+            ("data.csv".to_owned(), config.join("data.csv")),
+            (
+                "macros/Macro 2.json".to_owned(),
+                macros.join("Macro 2.json"),
+            ),
+            ("macro.json".to_owned(), config.join("macro.json")),
+        ];
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut expected = Sha256::new();
+        for (name, path) in files {
+            let content = fs::read(path).unwrap();
+            expected.update(name.as_bytes());
+            expected.update((content.len() as u64).to_le_bytes());
+            expected.update(content);
+        }
+
+        assert_eq!(
+            legacy_fingerprint(&config).unwrap(),
+            format!("{:x}", expected.finalize())
+        );
+    }
+
+    #[test]
+    fn oversized_fingerprint_reads_only_bounded_samples() {
+        struct CountingReader {
+            position: u64,
+            length: u64,
+            bytes_read: u64,
+            grow_after_samples: bool,
+        }
+
+        impl Read for CountingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let remaining = self.length.saturating_sub(self.position);
+                let read = buffer
+                    .len()
+                    .min(remaining.min(buffer.len() as u64) as usize);
+                buffer[..read].fill(0x5a);
+                self.position += read as u64;
+                self.bytes_read += read as u64;
+                if self.grow_after_samples
+                    && self.bytes_read >= (OVERSIZED_FINGERPRINT_SAMPLE_BYTES * 2) as u64
+                {
+                    self.length += 1;
+                    self.grow_after_samples = false;
+                }
+                Ok(read)
+            }
+        }
+
+        impl Seek for CountingReader {
+            fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+                let next = match position {
+                    SeekFrom::Start(position) => position as i128,
+                    SeekFrom::Current(offset) => self.position as i128 + offset as i128,
+                    SeekFrom::End(offset) => self.length as i128 + offset as i128,
+                };
+                if next < 0 || next > u64::MAX as i128 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid seek"));
+                }
+                self.position = next as u64;
+                Ok(self.position)
+            }
+        }
+
+        let length = 1_u64 << 40;
+        let mut reader = CountingReader {
+            position: 0,
+            length,
+            bytes_read: 0,
+            grow_after_samples: false,
+        };
+        let mut first_hash = Sha256::new();
+        update_fingerprint_contents(&mut reader, length, MAX_MACRO_BYTES, &mut first_hash).unwrap();
+        let first_hash = first_hash.finalize();
+        assert_eq!(
+            reader.bytes_read,
+            (OVERSIZED_FINGERPRINT_SAMPLE_BYTES * 2) as u64
+        );
+
+        reader.position = 0;
+        reader.bytes_read = 0;
+        let mut second_hash = Sha256::new();
+        update_fingerprint_contents(&mut reader, length, MAX_MACRO_BYTES, &mut second_hash)
+            .unwrap();
+        assert_eq!(first_hash, second_hash.finalize());
+        assert_eq!(
+            reader.bytes_read,
+            (OVERSIZED_FINGERPRINT_SAMPLE_BYTES * 2) as u64
+        );
+
+        reader.position = 0;
+        reader.bytes_read = 0;
+        reader.grow_after_samples = true;
+        let mut changed_hash = Sha256::new();
+        assert!(matches!(
+            update_fingerprint_contents(&mut reader, length, MAX_MACRO_BYTES, &mut changed_hash),
+            Err(StoreError::InvalidData)
+        ));
+    }
+
+    #[test]
+    fn preview_legacy_marks_sparse_oversized_macro_unreadable() {
+        let app = tempdir().unwrap();
+        let old = tempdir().unwrap();
+        let source_macros = old.path().join("config/macros");
+        fs::create_dir_all(&source_macros).unwrap();
+        let path = source_macros.join("Oversized.json");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_MACRO_BYTES + 1)
+            .unwrap();
+        let store = Store::open_at(app.path()).unwrap();
+
+        let (_, preview, _) = store.preview_legacy(old.path()).unwrap();
+        let macro_preview = preview
+            .macros
+            .iter()
+            .find(|item| item.name == "Oversized")
+            .unwrap();
+        assert!(!macro_preview.readable);
+        assert_eq!(
+            macro_preview.issue.as_deref(),
+            Some("Le fichier dépasse la taille autorisée.")
+        );
     }
 
     #[test]

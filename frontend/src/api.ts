@@ -62,6 +62,7 @@ export type Snapshot = {
   session: { elapsedSeconds: number; cycles: number };
   migration: MigrationState["status"];
   onboardingComplete: boolean;
+  lastError: string | null;
 };
 
 export type Diagnostics = {

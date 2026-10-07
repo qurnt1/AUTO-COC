@@ -4,6 +4,7 @@ import { BackendClientError, type Snapshot } from "./api";
 import { createBackendClient } from "./backend";
 import { Atelier } from "./components/Atelier";
 import { Help } from "./components/Help";
+import { ActionErrorFeedback } from "./components/ActionErrorFeedback";
 import { Icon } from "./components/Icon";
 import { Settings } from "./components/Settings";
 
@@ -75,6 +76,9 @@ function DesktopApp() {
     setNotice("");
     setActionError(error.message);
   }), [api]);
+  useEffect(() => {
+    if (snapshot?.lastError) setActionError(snapshot.lastError);
+  }, [snapshot?.lastError]);
 
   useEffect(() => {
     if (window.location.pathname === "/") window.history.replaceState({}, "", "/macros");
@@ -294,7 +298,7 @@ function DesktopApp() {
             {connection === "disconnected" && <button className="text-button" type="button" onClick={() => { setConnection("connecting"); void connect().then((value) => { setSnapshot(value); setConnection("connected"); setConnectionError(""); }).catch((error: unknown) => { setConnection("disconnected"); setConnectionError(error instanceof Error ? error.message : "Connexion impossible."); }); }}>Réessayer<Icon name="refresh" size={14} /></button>}
           </div>
         )}
-        {actionError && <div className="action-feedback error" role="alert"><Icon name="activity" size={16} /><span>{actionError}</span><button type="button" className="icon-button subtle" aria-label="Fermer le message" onClick={() => setActionError("")}><Icon name="close" size={15} /></button></div>}
+        {actionError && <ActionErrorFeedback message={actionError} onDismiss={() => setActionError("")} />}
         {notice && <div className="action-feedback success" role="status"><Icon name="check" size={16} /><span>{notice}</span></div>}
         {connection === "disconnected" && snapshot && <div className="reconnecting-strip" role="status"><span className="connection-mark disconnected"><i /></span>Connexion au service interrompue. Les commandes sont temporairement indisponibles.</div>}
 

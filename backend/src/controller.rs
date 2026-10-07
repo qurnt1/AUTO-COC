@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    native_input::{NativeEvent, NativeInput},
+    native_input::{NativeEvent, NativeInput, PlaybackFailure},
     storage::{Store, StoreError},
     types::{
         AppStatus, MigrationPreview, MigrationResult, MigrationStatus, RecordingPhase,
@@ -71,6 +71,7 @@ enum Operation {
     Playing {
         macro_name: String,
         started: Instant,
+        playback_id: u64,
     },
 }
 
@@ -265,17 +266,35 @@ impl Controller {
                     Operation::Idle => {}
                 }
             }
-            NativeEvent::Cycle => {
+            NativeEvent::Cycle { playback_id } => {
                 let mut machine = self.machine.lock().await;
-                if matches!(machine.operation, Operation::Playing { .. }) {
+                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
+                {
                     machine.cycles = machine.cycles.saturating_add(1);
                     self.changed(&mut machine).await?;
                 }
             }
-            NativeEvent::PlaybackEnded => {
+            NativeEvent::PlaybackEnded { playback_id } => {
                 let mut machine = self.machine.lock().await;
-                if matches!(machine.operation, Operation::Playing { .. }) {
+                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
+                {
                     machine.operation = Operation::Idle;
+                    self.changed(&mut machine).await?;
+                }
+            }
+            NativeEvent::PlaybackFailed {
+                playback_id,
+                reason,
+            } => {
+                let mut machine = self.machine.lock().await;
+                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
+                {
+                    machine.operation = Operation::Idle;
+                    machine.last_error = Some(match reason {
+                        PlaybackFailure::Input => "La lecture a été interrompue par une erreur de saisie Windows.".into(),
+                        PlaybackFailure::Release => "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris.".into(),
+                        PlaybackFailure::InputAndRelease => "La lecture a échoué et AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris.".into(),
+                    });
                     self.changed(&mut machine).await?;
                 }
             }
@@ -678,7 +697,7 @@ impl Controller {
         let macro_name = name.to_owned();
         let looped = use_saved_loop && machine.store.settings().loop_playback;
         let native = self.native.lock().await;
-        native
+        let playback_id = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?
             .start_playback(macro_file.steps, looped)
@@ -687,6 +706,7 @@ impl Controller {
         machine.operation = Operation::Playing {
             macro_name,
             started: Instant::now(),
+            playback_id,
         };
         machine.cycles = 0;
         machine.last_error = None;
@@ -1183,6 +1203,7 @@ impl Controller {
             Operation::Playing {
                 macro_name,
                 started,
+                ..
             } => {
                 let elapsed = started.elapsed().as_secs_f64();
                 (
@@ -1223,6 +1244,7 @@ impl Controller {
                 already_imported: machine.migration_already_imported,
             },
             onboarding_complete: machine.store.onboarding_complete(),
+            last_error: machine.last_error.clone(),
         })
     }
 }
@@ -1406,6 +1428,7 @@ mod tests {
             machine.operation = Operation::Playing {
                 macro_name: "Test".into(),
                 started: Instant::now(),
+                playback_id: 1,
             };
             machine.shutdown = Some(ShutdownConfirmation {
                 id: id.clone(),
@@ -1469,6 +1492,7 @@ mod tests {
         controller.machine.lock().await.operation = Operation::Playing {
             macro_name: "Test".into(),
             started: Instant::now(),
+            playback_id: 1,
         };
         let gate = Arc::new(ShutdownRaceGate {
             paused: tokio::sync::Notify::new(),
@@ -1480,7 +1504,7 @@ mod tests {
         let shutdown = tokio::spawn(async move { closing.shutdown_services().await });
         gate.paused.notified().await;
         controller
-            .handle_native_event(NativeEvent::PlaybackEnded)
+            .handle_native_event(NativeEvent::PlaybackEnded { playback_id: 1 })
             .await
             .unwrap();
         gate.resume.notify_one();
@@ -1489,6 +1513,57 @@ mod tests {
         let machine = controller.machine.lock().await;
         assert!(machine.shutdown_complete);
         assert!(matches!(machine.operation, Operation::Idle));
+    }
+
+    #[tokio::test]
+    async fn playback_failure_returns_to_idle_and_is_visible_in_snapshot() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::Playing {
+            macro_name: "Test".into(),
+            started: Instant::now(),
+            playback_id: 7,
+        };
+
+        controller
+            .handle_native_event(NativeEvent::PlaybackFailed {
+                playback_id: 7,
+                reason: PlaybackFailure::Release,
+            })
+            .await
+            .unwrap();
+        let snapshot = controller.snapshot().await.unwrap();
+
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some(
+                "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_playback_failure_does_not_stop_a_new_playback() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::Playing {
+            macro_name: "Test".into(),
+            started: Instant::now(),
+            playback_id: 8,
+        };
+
+        controller
+            .handle_native_event(NativeEvent::PlaybackFailed {
+                playback_id: 7,
+                reason: PlaybackFailure::Input,
+            })
+            .await
+            .unwrap();
+        let snapshot = controller.snapshot().await.unwrap();
+
+        assert!(matches!(snapshot.status, AppStatus::Playing { .. }));
+        assert_eq!(snapshot.last_error, None);
     }
 
     #[tokio::test]

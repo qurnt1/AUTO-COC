@@ -129,6 +129,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
             <Icon name="shield" size={18} />
             <h2>Vos données restent sur ce PC</h2>
             <p>Les macros et les réglages sont gérés par le service Rust local. Le token Telegram n’est jamais affiché dans l’aide ni dans les diagnostics.</p>
+            <p>Tant qu’AUTO-COC est ouvert, ses raccourcis globaux et ses hooks Windows clavier/souris restent actifs. Hors d’un enregistrement démarré explicitement avec le bouton Enregistrer, aucun événement n’est ajouté à une macro. Après le délai de préparation de 3 secondes, les événements capturés sont sauvegardés dans la macro à l’arrêt.</p>
             <p>Pour arrêter les services locaux, utilisez Réglages &gt; Outils de cet ordinateur &gt; Quitter AUTO-COC ou fermez complètement la fenêtre de l’application. Arrêtez tout enregistrement ou replay en cours avant de quitter.</p>
           </section>
         </aside>
@@ -161,7 +162,7 @@ function MigrationPanel({ migration, loading, error, busy, online, importResult,
         <span className="migration-icon"><Icon name="refresh" size={18} /></span>
         <div><span className="section-kicker">Ancienne installation</span><h2 id="migration-title">Importer vos données</h2><p>Récupérez vos macros et réglages depuis une ancienne version d’AUTO-COC.</p></div>
       </div>
-      <p className="migration-safety">Une sauvegarde locale expurgée du token est créée avant l’import. Les fichiers d’origine restent à leur emplacement et ne sont pas modifiés. Le CSV source peut contenir le token historique en clair; il n’est pas copié dans la sauvegarde, et le token importé est stocké séparément de façon protégée.</p>
+      <p className="migration-safety">Pour un data.csv lisible et compatible, AUTO-COC crée avant l’import une copie locale où le token Telegram est remplacé par « [REDACTED] », puis stocke le token importé de façon protégée. Le data.csv source reste inchangé et peut toujours contenir le token en clair.</p>
       {loading && <p className="muted-copy">Vérification de l’état de l’import…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {migration?.status.alreadyImported ? (

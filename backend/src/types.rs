@@ -179,6 +179,7 @@ pub struct Snapshot {
     pub session: SessionStatus,
     pub migration: MigrationStatus,
     pub onboarding_complete: bool,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

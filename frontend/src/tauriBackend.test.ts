@@ -18,6 +18,7 @@ function snapshot(revision: number, elapsedSeconds = 0): Snapshot {
     session: { elapsedSeconds, cycles: 0 },
     migration: { sourceSelected: false, available: false, alreadyImported: false },
     onboardingComplete: false,
+    lastError: null,
   };
 }
 
@@ -167,6 +168,21 @@ describe("TauriBackendClient", () => {
 
     fake.emit(snapshot(5, 2));
     await expect(secondTick).resolves.toMatchObject({ revision: 5, session: { elapsedSeconds: 2 } });
+    client.dispose();
+  });
+
+  it("delivers playback failure text with the updated snapshot", async () => {
+    const fake = makeBridge();
+    const client = new TauriBackendClient(fake.bridge);
+    await client.connect();
+
+    const update = client.waitForSnapshot(1);
+    fake.emit({ ...snapshot(2), lastError: "La lecture a été interrompue par une erreur de saisie Windows." });
+
+    await expect(update).resolves.toMatchObject({
+      revision: 2,
+      lastError: "La lecture a été interrompue par une erreur de saisie Windows.",
+    });
     client.dispose();
   });
 
