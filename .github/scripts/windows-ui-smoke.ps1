@@ -228,6 +228,7 @@ try {
     $createSubmitLabel = "Cr$($accentedE)er la macro"
     $readyLabel = 'Pr' + $accentedCircumflexE + 't ' + $accentedA + ' lancer'
     $eventCountLabel = '0 ' + $accentedE + 'v' + $accentedE + 'nements'
+    $renamedMacroEventCountLabel = $RenamedMacroName + ' ' + $eventCountLabel
     $stopRecordingLabel = 'Arr' + $accentedCircumflexE + 'ter l' + $curlyApostrophe + 'enregistrement'
     $window = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
     if ($window.Current.ProcessId -ne $AppProcessId) {
@@ -247,8 +248,8 @@ try {
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
         $null = Wait-ForElement -Root $window -Name $readyLabel `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
-        $null = Wait-ForElement -Root $window -Name $eventCountLabel `
-            -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+        $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
+            -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
         Write-Output "UI Automation confirmed '$RenamedMacroName' reloaded after a full restart with an empty sequence."
         return
     }
@@ -324,8 +325,8 @@ try {
     Invoke-Element -Element $stopRecording
     $null = Wait-ForElement -Root $window -Name $readyLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
-    $null = Wait-ForElement -Root $window -Name $eventCountLabel `
-        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+    $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
+        -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
     $macroAfterRecording = Read-MacroFile -Path $MacroFilePath
     if ($macroAfterRecording.UpdatedAt -le $macroBeforeRecording.UpdatedAt) {
         throw 'The macro updated_at timestamp did not advance after stopping the empty recording.'
