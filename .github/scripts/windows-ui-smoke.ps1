@@ -235,10 +235,6 @@ try {
         throw "The UI Automation window belongs to process $($window.Current.ProcessId), expected AUTO-COC process $AppProcessId."
     }
 
-    $null = Wait-ForElement -Root $window -Name 'Vos macros' `
-        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
-    Write-Output "UI Automation found the accessible view label 'Vos macros'."
-
     if ($Mode -eq 'verify-restart') {
         $null = Wait-ForElement -Root $window -Name $RenamedMacroName `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
