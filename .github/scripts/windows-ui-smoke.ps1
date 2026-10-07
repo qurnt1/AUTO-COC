@@ -242,8 +242,8 @@ try {
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
         Wait-ForElementContainingNameToDisappear -Root $window -Name $MacroName `
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
-        $null = Wait-ForElement -Root $window -Name $readyLabel `
-            -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+        $null = Wait-ForElement -Root $window -Name 'Enregistrer' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
         $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
         Write-Output "UI Automation confirmed '$RenamedMacroName' reloaded after a full restart with an empty sequence."
