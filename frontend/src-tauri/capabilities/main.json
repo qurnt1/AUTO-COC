@@ -15,6 +15,7 @@
     "allow-stop-recording",
     "allow-start-playback",
     "allow-stop-playback",
+    "allow-cancel-resume-wait",
     "allow-patch-settings",
     "allow-put-shortcuts",
     "allow-launch-coc",

@@ -179,9 +179,82 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use tauri::Url;
 
     use super::allows_navigation;
+
+    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing end of {start}"))
+            .0
+    }
+
+    fn command_list(
+        source: &str,
+        start: &str,
+        end: &str,
+        prefix: &str,
+        suffix: &str,
+    ) -> BTreeSet<String> {
+        section(source, start, end)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                line.strip_prefix(prefix)
+                    .and_then(|command| command.strip_suffix(suffix))
+                    .unwrap_or_else(|| panic!("invalid command list entry: {line}"))
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn capability_commands(source: &str) -> BTreeSet<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(source).expect("invalid capability JSON");
+        capability["permissions"]
+            .as_array()
+            .expect("capability must declare a permissions array")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|permission| permission.strip_prefix("allow-"))
+            .map(|command| command.replace('-', "_"))
+            .collect()
+    }
+
+    #[test]
+    fn registered_commands_match_build_permissions_and_main_capability() {
+        let registered = command_list(
+            include_str!("main.rs"),
+            "tauri::generate_handler![",
+            "])",
+            "commands::",
+            ",",
+        );
+        let declared = command_list(
+            include_str!("../build.rs"),
+            "const DESKTOP_COMMANDS: &[&str] = &[",
+            "];",
+            "\"",
+            "\",",
+        );
+        let granted = capability_commands(include_str!("../capabilities/main.json"));
+
+        assert_eq!(
+            registered, declared,
+            "commands registered by generate_handler! must match build.rs"
+        );
+        assert_eq!(
+            declared, granted,
+            "commands declared in build.rs must be granted by capabilities/main.json"
+        );
+    }
 
     #[test]
     fn navigation_only_allows_app_and_vite_origins() {

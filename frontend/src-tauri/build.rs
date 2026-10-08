@@ -9,6 +9,7 @@ const DESKTOP_COMMANDS: &[&str] = &[
     "stop_recording",
     "start_playback",
     "stop_playback",
+    "cancel_resume_wait",
     "patch_settings",
     "put_shortcuts",
     "launch_coc",
