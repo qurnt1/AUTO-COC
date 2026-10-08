@@ -263,6 +263,9 @@ $restartProcess = $null
 $junctionCreated = $false
 $allSmokeProcessesStopped = $true
 $junctionSafeForTargetCleanup = $true
+$uninstallVerified = $false
+$uninstallFailure = $null
+$cleanupFailure = $null
 
 try {
     New-Item -ItemType Directory -Path $smokeRoot | Out-Null
@@ -482,59 +485,52 @@ finally {
         }
     }
 
-    if ($allSmokeProcessesStopped -and (Test-Path -LiteralPath $installDir)) {
-        $uninstallers = @(
-            Get-ChildItem -LiteralPath $installDir -Filter '*uninstall*.exe' -File -Recurse
-        )
-        if ($uninstallers.Count -eq 1) {
-            try {
+    try {
+        if ($allSmokeProcessesStopped -and (Test-Path -LiteralPath $installDir)) {
+            $uninstallers = @(
+                Get-ChildItem -LiteralPath $installDir -Filter '*uninstall*.exe' -File -Recurse
+            )
+            if ($uninstallers.Count -eq 1) {
                 $uninstallerProcess = Start-SmokeProcess -Path $uninstallers[0].FullName `
                     -Arguments "/S _?=$installDir" -WorkingDirectory $installDir -Hidden
                 if (-not $uninstallerProcess.WaitForExit(60000)) {
-                    Write-Warning 'NSIS uninstaller timed out after 60 seconds.'
-                    if (-not (Stop-SmokeProcess -Process $uninstallerProcess -Label 'NSIS uninstaller')) {
-                        $allSmokeProcessesStopped = $false
-                    }
+                    $uninstallFailure = 'NSIS uninstaller timed out after 60 seconds.'
                 }
                 elseif ($uninstallerProcess.ExitCode -ne 0) {
-                    Write-Warning "NSIS uninstaller exited with code $($uninstallerProcess.ExitCode)."
+                    $uninstallFailure = "NSIS uninstaller exited with code $($uninstallerProcess.ExitCode)."
+                }
+                elseif (Test-Path -LiteralPath $installDir) {
+                    $uninstallFailure = "NSIS uninstaller exited successfully but left the installation directory: '$installDir'."
                 }
                 else {
-                    Write-Host 'NSIS uninstaller completed.'
+                    $uninstallVerified = $true
+                    Write-Host 'NSIS uninstaller exited successfully and removed the installation directory.'
                 }
             }
-            catch {
-                Write-Warning "NSIS uninstall cleanup failed: $($_.Exception.Message)"
-                if ($null -ne $uninstallerProcess) {
-                    $uninstallerProcess.Refresh()
-                    if (-not $uninstallerProcess.HasExited -and
-                        -not (Stop-SmokeProcess -Process $uninstallerProcess -Label 'NSIS uninstaller')) {
-                        $allSmokeProcessesStopped = $false
-                    }
-                }
-            }
-            finally {
-                if ($null -ne $uninstallerProcess) {
-                    if (-not $uninstallerProcess.HasExited -and
-                        -not (Stop-SmokeProcess -Process $uninstallerProcess -Label 'NSIS uninstaller')) {
-                        $allSmokeProcessesStopped = $false
-                    }
-                    $uninstallerProcess.Dispose()
-                }
+            else {
+                $uninstallFailure = "Expected exactly one NSIS uninstaller in '$installDir'; found $($uninstallers.Count)."
             }
         }
-        elseif ($uninstallers.Count -eq 0) {
-            Write-Warning 'No NSIS uninstaller was found; the installed app could not be uninstalled.'
+        elseif (-not $allSmokeProcessesStopped) {
+            $uninstallFailure = 'NSIS uninstall was skipped because a smoke process may still be running.'
         }
         else {
-            Write-Warning "Found $($uninstallers.Count) NSIS uninstallers; uninstall was skipped because the target is ambiguous."
+            $uninstallFailure = "NSIS installation directory was missing before uninstall verification: '$installDir'."
         }
     }
-    elseif (-not $allSmokeProcessesStopped) {
-        Write-Warning 'Skipping NSIS uninstall and scratch cleanup because a smoke process may still be running.'
+    catch {
+        if ($null -eq $uninstallFailure) {
+            $uninstallFailure = "NSIS uninstall verification failed: $($_.Exception.Message)"
+        }
     }
-    else {
-        Write-Warning 'No install directory exists; no NSIS uninstall could be run.'
+    finally {
+        if ($null -ne $uninstallerProcess) {
+            if (-not $uninstallerProcess.HasExited -and
+                -not (Stop-SmokeProcess -Process $uninstallerProcess -Label 'NSIS uninstaller')) {
+                $allSmokeProcessesStopped = $false
+            }
+            $uninstallerProcess.Dispose()
+        }
     }
 
     if ($allSmokeProcessesStopped -and $junctionCreated) {
@@ -568,35 +564,37 @@ finally {
         $tauriTargetFull = Get-NormalizedFullPath -Path $tauriAppLocalDataTarget
         if (-not $smokeRootFull.StartsWith($tempRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
             -not $tauriTargetFull.StartsWith($smokeRootFull.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing cleanup outside the smoke scratch root: '$smokeRootFull'."
+            $cleanupFailure = "Refusing cleanup outside the smoke scratch root: '$smokeRootFull'."
+            Write-Warning $cleanupFailure
         }
-
-        $targetSafeForRootCleanup = -not (Test-Path -LiteralPath $tauriTargetFull)
-        if (Test-Path -LiteralPath $tauriTargetFull) {
-            try {
-                $targetAttributes = [System.IO.File]::GetAttributes($tauriTargetFull)
-                if (($targetAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw "Refusing recursive cleanup of a reparse-point target: '$tauriTargetFull'."
+        else {
+            $targetSafeForRootCleanup = -not (Test-Path -LiteralPath $tauriTargetFull)
+            if (Test-Path -LiteralPath $tauriTargetFull) {
+                try {
+                    $targetAttributes = [System.IO.File]::GetAttributes($tauriTargetFull)
+                    if (($targetAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Refusing recursive cleanup of a reparse-point target: '$tauriTargetFull'."
+                    }
+                    Remove-Item -LiteralPath $tauriTargetFull -Recurse -Force
+                    $targetSafeForRootCleanup = $true
+                    Write-Host 'Removed the isolated Tauri app-local-data target.'
                 }
-                Remove-Item -LiteralPath $tauriTargetFull -Recurse -Force
-                $targetSafeForRootCleanup = $true
-                Write-Host 'Removed the isolated Tauri app-local-data target.'
+                catch {
+                    Write-Warning "Could not remove isolated Tauri app-local-data: $($_.Exception.Message)"
+                }
             }
-            catch {
-                Write-Warning "Could not remove isolated Tauri app-local-data: $($_.Exception.Message)"
-            }
-        }
 
-        if ($targetSafeForRootCleanup -and (Test-Path -LiteralPath $smokeRootFull)) {
-            try {
-                Remove-Item -LiteralPath $smokeRootFull -Recurse -Force
+            if ($targetSafeForRootCleanup -and (Test-Path -LiteralPath $smokeRootFull)) {
+                try {
+                    Remove-Item -LiteralPath $smokeRootFull -Recurse -Force
+                }
+                catch {
+                    Write-Warning "Could not remove smoke files under RUNNER_TEMP: $($_.Exception.Message)"
+                }
             }
-            catch {
-                Write-Warning "Could not remove smoke files under RUNNER_TEMP: $($_.Exception.Message)"
+            elseif (-not $targetSafeForRootCleanup) {
+                Write-Warning 'Leaving the scratch root in RUNNER_TEMP because the isolated app-data target could not be safely removed.'
             }
-        }
-        elseif (-not $targetSafeForRootCleanup) {
-            Write-Warning 'Leaving the scratch root in RUNNER_TEMP because the isolated app-data target could not be safely removed.'
         }
     }
     elseif (-not $allSmokeProcessesStopped) {
@@ -605,4 +603,15 @@ finally {
     else {
         Write-Warning "Leaving smoke scratch in RUNNER_TEMP because the Tauri junction could not be safely removed."
     }
+}
+
+if ($null -ne $cleanupFailure) {
+    throw $cleanupFailure
+}
+
+if (-not $uninstallVerified) {
+    if ($null -eq $uninstallFailure) {
+        $uninstallFailure = 'NSIS uninstallation was not verified.'
+    }
+    throw $uninstallFailure
 }
