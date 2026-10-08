@@ -35,6 +35,7 @@ function statusText(snapshot: Snapshot): string {
   if (snapshot.status.kind === "waiting_for_foreground") return "En attente de Clash of Clans";
   if (snapshot.status.kind === "recording") return "Enregistrement en cours";
   if (snapshot.status.kind === "playing") return "Lecture en cours";
+  if (snapshot.status.kind === "paused") return "Lecture en pause";
   return "Prêt";
 }
 

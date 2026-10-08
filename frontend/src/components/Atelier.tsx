@@ -128,7 +128,6 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
   const selected = snapshot.macros.find((macro) => macro.name === snapshot.selectedMacro) ?? null;
   const active = snapshot.status.kind !== "idle";
   const filtered = snapshot.macros.filter((macro) => macro.name.toLocaleLowerCase("fr").includes(query.trim().toLocaleLowerCase("fr")));
-  const waitingAction = snapshot.status.kind === "waiting_for_foreground" ? snapshot.status.action : null;
   const waitingForSelectedRecording = snapshot.status.kind === "waiting_for_foreground"
     && snapshot.status.action === "recording"
     && snapshot.status.macroName === selected?.name;
@@ -175,6 +174,17 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
       result = await run("create", () => api.createMacro(value), "Macro créée.");
     }
     if (result) setDialog(null);
+  }
+
+  function cancelForegroundWait() {
+    if (snapshot.status.kind !== "waiting_for_foreground") return;
+    if (snapshot.status.action === "resuming") {
+      return run("cancel-resume-wait", () => api.cancelResumeWait(), "Reprise annulée.");
+    }
+    if (snapshot.status.action === "recording") {
+      return run("cancel-recording-wait", () => api.stopRecording(), "Attente annulée.");
+    }
+    return run("cancel-playback-wait", () => api.stopPlayback(), "Attente annulée.");
   }
 
   return (
@@ -297,8 +307,8 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
             <section className="run-section" aria-label="Commandes de lecture">
               <div
                 className="run-copy"
-                role={snapshot.status.kind === "waiting_for_foreground" ? "status" : undefined}
-                aria-atomic={snapshot.status.kind === "waiting_for_foreground" ? "true" : undefined}
+                role={snapshot.status.kind === "waiting_for_foreground" || snapshot.status.kind === "paused" ? "status" : undefined}
+                aria-atomic={snapshot.status.kind === "waiting_for_foreground" || snapshot.status.kind === "paused" ? "true" : undefined}
               >
                 <span className="section-kicker">Exécution</span>
                 <strong>{executionCopy.title}</strong>
@@ -306,11 +316,20 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               </div>
               <div className="run-controls">
                 {snapshot.status.kind === "waiting_for_foreground" ? (
-                  <button className="button stop-button" type="button" onClick={() => run(waitingAction === "recording" ? "cancel-recording-wait" : "cancel-playback-wait", () => waitingAction === "recording" ? api.stopRecording() : api.stopPlayback(), "Attente annulée.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Annuler l’attente</button>
+                  snapshot.status.action === "resuming" ? (
+                    <button className="button stop-button" type="button" onClick={() => { void cancelForegroundWait(); }} disabled={!online || busy !== null}><Icon name="stop" size={15} />Annuler la reprise</button>
+                  ) : (
+                    <button className="button stop-button" type="button" onClick={() => { void cancelForegroundWait(); }} disabled={!online || busy !== null}><Icon name="stop" size={15} />Annuler l’attente</button>
+                  )
                 ) : snapshot.status.kind === "recording" ? (
                   <button className="button copper" type="button" onClick={() => run("stop-recording", () => api.stopRecording(), "Enregistrement terminé. La séquence a été mise à jour.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Arrêter l’enregistrement</button>
                 ) : snapshot.status.kind === "playing" ? (
                   <button className="button stop-button" type="button" onClick={() => run("stop-playback", () => api.stopPlayback(), "Lecture arrêtée.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Arrêter la lecture</button>
+                ) : snapshot.status.kind === "paused" ? (
+                  <>
+                    <button className="button primary play-button" type="button" onClick={() => run("resume-playback", () => api.startPlayback(), "Reprise de la lecture demandée.")} disabled={!online || busy !== null}><Icon name="play" size={15} />Reprendre</button>
+                    <button className="button stop-button" type="button" onClick={() => run("stop-playback", () => api.stopPlayback(), "Lecture arrêtée.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Arrêter la lecture</button>
+                  </>
                 ) : (
                   <button className="button primary play-button" type="button" onClick={() => run("play", () => api.startPlayback(), "Demande de lecture envoyée.")} disabled={!online || !selected.readable || !selected.eventCount || busy !== null}><Icon name="play" size={15} />Lire la macro</button>
                 )}
@@ -326,7 +345,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               </label>
             </div>
             <div className="session-facts" aria-label="Statistiques de la session locale">
-              <span>{snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "playing" ? "Lecture en attente" : snapshot.status.kind === "playing" ? "Lecture en cours" : "Dernière session de lecture"}</span>
+              <span>{snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "resuming" ? "Reprise en attente" : snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "playing" ? "Lecture en attente" : snapshot.status.kind === "playing" ? "Lecture en cours" : snapshot.status.kind === "paused" ? "Lecture en pause" : "Dernière session de lecture"}</span>
               <div><strong>{snapshot.session.cycles.toLocaleString("fr-FR")}</strong><small>cycles</small></div>
               <div><strong>{formatDuration(snapshot.session.elapsedSeconds)}</strong><small>temps de session</small></div>
             </div>
@@ -341,13 +360,20 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
 }
 
 function statusLabel(status: Snapshot["status"]): string {
-  if (status.kind === "waiting_for_foreground") return "En attente du jeu";
+  if (status.kind === "waiting_for_foreground") return status.action === "resuming" ? "Reprise en attente" : "En attente du jeu";
   if (status.kind === "recording") return status.phase === "preparing" ? "Préparation" : "Enregistrement";
+  if (status.kind === "paused") return "En pause";
   return status.kind === "playing" ? "Lecture en cours" : "En attente";
 }
 
 function getExecutionCopy(status: Snapshot["status"], selected: MacroSummary | null): { title: string; detail: string } {
   if (status.kind === "waiting_for_foreground") {
+    if (status.action === "resuming") {
+      return {
+        title: `Reprise en attente pour « ${status.macroName} »`,
+        detail: "Revenez dans Clash of Clans. La lecture reprendra dès que le jeu sera de nouveau au premier plan. Utilisez « Annuler la reprise » pour annuler cette demande.",
+      };
+    }
     const action = status.action === "recording" ? "Enregistrement" : "Lecture";
     return {
       title: `${action} en attente pour « ${status.macroName} »`,
@@ -366,6 +392,12 @@ function getExecutionCopy(status: Snapshot["status"], selected: MacroSummary | n
     return {
       title: `Lecture de « ${status.macroName} »`,
       detail: `Temps écoulé : ${formatDuration(status.elapsedSeconds)}`,
+    };
+  }
+  if (status.kind === "paused") {
+    return {
+      title: "En pause, CoC n'est plus la fenêtre active",
+      detail: `Lecture de « ${status.macroName} » suspendue à ${formatDuration(status.elapsedSeconds)}. Cliquez sur « Reprendre », puis revenez dans Clash of Clans. La lecture reprendra dès que le jeu sera de nouveau au premier plan.`,
     };
   }
   return {

@@ -35,7 +35,7 @@ impl Default for Help {
                 },
                 HelpSection {
                     title: "Garde du premier plan".into(),
-                    body: "Si l’option est activée, les boutons de l’atelier attendent jusqu’à 30 secondes que la fenêtre Clash of Clans reconnue soit au premier plan. Les raccourcis globaux et Telegram ne sont jamais mis en attente. Pendant une opération, AUTO-COC surveille la fenêtre Windows et son processus hôte crosvm; l’opération s’arrête si l’un des deux disparaît ou si la fenêtre perd le premier plan. Un crash du jeu Android peut passer inaperçu si la fenêtre crosvm reste ouverte avec le même titre.".into(),
+                    body: "Quand cette option est activée, les actions démarrées dans l’atelier attendent jusqu’à 30 secondes que la fenêtre Clash of Clans reconnue passe au premier plan. Les raccourcis globaux et Telegram ne sont pas mis en attente. Si le focus est perdu pendant un enregistrement, AUTO-COC l’arrête et sauvegarde les événements capturés; en cas d’échec, la sauvegarde reste disponible pour réessayer. Pendant une lecture, AUTO-COC relâche d’abord les touches et boutons maintenus, puis met la macro en pause; si la libération échoue, la lecture s’arrête avec une erreur. Pour reprendre, choisissez « Reprendre » dans l’application, puis retournez dans le jeu; la lecture reprend au même point quand la fenêtre reconnue revient au premier plan. « Annuler la reprise » conserve la pause. Le bouton Arrêter, les raccourcis configurés de bascule/arrêt, Telegram STOP et la fermeture complète de l’application arrêtent la lecture. La garde s’appuie sur la fenêtre Windows reconnue et le processus hôte crosvm; un crash du jeu Android peut rester invisible si la fenêtre crosvm conserve son titre et son processus.".into(),
                 },
                 HelpSection {
                     title: "Raccourcis par défaut".into(),
@@ -152,6 +152,12 @@ pub enum AppStatus {
         #[serde(rename = "elapsedSeconds")]
         elapsed_seconds: f64,
     },
+    Paused {
+        #[serde(rename = "macroName")]
+        macro_name: String,
+        #[serde(rename = "elapsedSeconds")]
+        elapsed_seconds: f64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -159,6 +165,7 @@ pub enum AppStatus {
 pub enum PendingAction {
     Recording,
     Playing,
+    Resuming,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -314,6 +321,33 @@ mod tests {
         .unwrap();
 
         assert!(!settings.require_coc_foreground);
+    }
+
+    #[test]
+    fn help_explains_foreground_guard_pause_and_resume_behavior() {
+        let section = Help::default()
+            .sections
+            .into_iter()
+            .find(|section| section.title == "Garde du premier plan")
+            .unwrap();
+
+        for phrase in [
+            "30 secondes",
+            "sauvegarde les événements capturés",
+            "relâche d’abord",
+            "puis met la macro en pause",
+            "si la libération échoue",
+            "Reprendre",
+            "au même point",
+            "Annuler la reprise",
+            "conserve la pause",
+            "Telegram STOP",
+            "fermeture complète",
+            "peut rester invisible",
+            "crosvm conserve son titre et son processus",
+        ] {
+            assert!(section.body.contains(phrase), "help is missing: {phrase}");
+        }
     }
 }
 

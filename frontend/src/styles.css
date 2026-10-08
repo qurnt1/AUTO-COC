@@ -157,6 +157,8 @@ button:disabled { cursor: not-allowed; }
 .state-recording i { border-color: var(--recording); background: var(--recording); animation: state-pulse 1.7s ease-in-out infinite; }
 .state-playing { color: var(--success); }
 .state-playing i { border-color: var(--success); background: var(--success); }
+.state-paused { color: var(--recording); }
+.state-paused i { border-color: var(--recording); background: var(--recording); }
 .state-waiting_for_foreground { color: var(--accent-ink); }
 .state-waiting_for_foreground i { border-color: var(--accent); background: var(--accent); animation: state-pulse 1.7s ease-in-out infinite; }
 .topbar-protected { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }

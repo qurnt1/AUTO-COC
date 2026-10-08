@@ -138,6 +138,7 @@ fn run() {
             commands::stop_recording,
             commands::start_playback,
             commands::stop_playback,
+            commands::cancel_resume_wait,
             commands::patch_settings,
             commands::put_shortcuts,
             commands::launch_coc,

@@ -22,9 +22,10 @@ export type ActionRunner = <T>(label: string, action: () => Promise<T>, message?
 
 export type AppStatus =
   | { kind: "idle" }
-  | { kind: "waiting_for_foreground"; action: "recording" | "playing"; macroName: string }
+  | { kind: "waiting_for_foreground"; action: "recording" | "playing" | "resuming"; macroName: string }
   | { kind: "recording"; macroName: string; elapsedSeconds: number; phase: "preparing" | "capturing"; countdownSeconds: number }
-  | { kind: "playing"; macroName: string; elapsedSeconds: number };
+  | { kind: "playing"; macroName: string; elapsedSeconds: number }
+  | { kind: "paused"; macroName: string; elapsedSeconds: number };
 
 export type TelegramStatus = "not_configured" | "disconnected" | "waiting_pairing" | "connected" | "error";
 
@@ -92,6 +93,7 @@ export interface BackendClient {
   startRecording(): Promise<Snapshot>;
   stopRecording(): Promise<Snapshot>;
   startPlayback(): Promise<Snapshot>;
+  cancelResumeWait(): Promise<Snapshot>;
   stopPlayback(): Promise<Snapshot>;
   updateSettings(settings: { loop?: boolean; cocPath?: string; requireCocForeground?: boolean }): Promise<Snapshot>;
   updateShortcuts(shortcuts: Snapshot["settings"]["shortcuts"]): Promise<Snapshot>;

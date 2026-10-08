@@ -47,9 +47,8 @@ pub enum NativeEvent {
         playback_id: u64,
         reason: PlaybackFailure,
     },
-    PlaybackGuardLost {
+    PlaybackPaused {
         playback_id: u64,
-        release_failed: bool,
     },
 }
 
@@ -201,6 +200,18 @@ impl NativeInput {
         }
         #[cfg(not(windows))]
         {
+            Err(unsupported())
+        }
+    }
+
+    pub async fn resume_playback(&self, playback_id: u64) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.resume_playback(playback_id).await
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = playback_id;
             Err(unsupported())
         }
     }
@@ -898,6 +909,7 @@ mod win {
     struct PlaybackControl {
         id: u64,
         cancel: watch::Sender<bool>,
+        resume: watch::Sender<()>,
         task: AsyncJoinHandle<()>,
     }
 
@@ -1048,6 +1060,7 @@ mod win {
             }
             let id = self.shared.next_playback_id.fetch_add(1, Ordering::Relaxed);
             let (cancel, cancel_rx) = watch::channel(false);
+            let (resume, resume_rx) = watch::channel(());
             let shared = Arc::clone(&self.shared);
             let task = tokio::spawn(async move {
                 run_playback(
@@ -1057,10 +1070,16 @@ mod win {
                     looped,
                     require_coc_foreground,
                     cancel_rx,
+                    resume_rx,
                 )
                 .await;
             });
-            *playback = Some(PlaybackControl { id, cancel, task });
+            *playback = Some(PlaybackControl {
+                id,
+                cancel,
+                resume,
+                task,
+            });
             Ok(id)
         }
 
@@ -1074,6 +1093,16 @@ mod win {
                 .task
                 .await
                 .map_err(|_| io::Error::other("playback task failed"))
+        }
+
+        pub async fn resume_playback(&self, playback_id: u64) -> io::Result<()> {
+            let foreground = self.shared.cached_coc_identity_is_foreground();
+            let playback = self.shared.playback.lock().await;
+            let control = playback
+                .as_ref()
+                .filter(|control| control.id == playback_id)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "playback is not active"))?;
+            signal_playback_resume(&control.resume, foreground)
         }
 
         pub async fn set_shortcuts(
@@ -1508,66 +1537,110 @@ mod win {
         looped: bool,
         require_coc_foreground: bool,
         mut cancel: watch::Receiver<bool>,
+        mut resume: watch::Receiver<()>,
     ) {
         let mut guard = PlaybackGuard {
             held: HeldInputs::default(),
             shared: Arc::clone(&shared),
         };
         let mut input_failed = false;
-        let mut foreground_lost = false;
+        let mut release_failed = false;
         let mut last_identity_check = None;
         'playback: loop {
-            let start = tokio::time::Instant::now();
+            let mut start = tokio::time::Instant::now();
             let mut elapsed = Duration::ZERO;
-            let mut cancelled = false;
-            for step in &steps {
+            let mut step_index = 0;
+            while let Some(step) = steps.get(step_index) {
                 elapsed = elapsed.saturating_add(step.delay);
-                match wait_for_replay_step(
-                    start + elapsed,
-                    &mut cancel,
-                    require_coc_foreground,
-                    || {
-                        let now = Instant::now();
-                        if last_identity_check.is_none_or(|last| {
-                            now.duration_since(last) >= Duration::from_millis(100)
-                        }) {
-                            last_identity_check = Some(now);
-                            shared.cached_coc_identity_is_foreground()
-                        } else {
-                            shared.cached_coc_is_foreground()
+                let mut deadline = start + elapsed;
+                'step: loop {
+                    match wait_for_replay_step(
+                        deadline,
+                        &mut cancel,
+                        require_coc_foreground,
+                        || {
+                            let now = Instant::now();
+                            if last_identity_check.is_none_or(|last| {
+                                now.duration_since(last) >= Duration::from_millis(100)
+                            }) {
+                                last_identity_check = Some(now);
+                                shared.cached_coc_identity_is_foreground()
+                            } else {
+                                shared.cached_coc_is_foreground()
+                            }
+                        },
+                    )
+                    .await
+                    {
+                        ReplayWait::Ready => {}
+                        ReplayWait::Cancelled => {
+                            break 'playback;
                         }
-                    },
-                )
-                .await
-                {
-                    ReplayWait::Ready => {}
-                    ReplayWait::Cancelled => {
-                        cancelled = true;
-                        break;
+                        ReplayWait::ForegroundLost => {
+                            match pause_for_foreground(
+                                id,
+                                &shared,
+                                &mut guard,
+                                &mut cancel,
+                                &mut resume,
+                            )
+                            .await
+                            {
+                                PlaybackPauseResult::Resumed(paused_for) => {
+                                    shift_replay_timing(&mut start, &mut deadline, paused_for);
+                                    last_identity_check = None;
+                                    continue 'step;
+                                }
+                                PlaybackPauseResult::Cancelled => {
+                                    break 'playback;
+                                }
+                                PlaybackPauseResult::ReleaseFailed => {
+                                    release_failed = true;
+                                    break 'playback;
+                                }
+                            }
+                        }
                     }
-                    ReplayWait::ForegroundLost => {
-                        foreground_lost = true;
-                        break;
+                    if let Err(error) = apply_event(
+                        &shared,
+                        &step.event,
+                        &mut guard.held,
+                        require_coc_foreground,
+                    ) {
+                        if require_coc_foreground && error.kind() == io::ErrorKind::PermissionDenied
+                        {
+                            match pause_for_foreground(
+                                id,
+                                &shared,
+                                &mut guard,
+                                &mut cancel,
+                                &mut resume,
+                            )
+                            .await
+                            {
+                                PlaybackPauseResult::Resumed(paused_for) => {
+                                    shift_replay_timing(&mut start, &mut deadline, paused_for);
+                                    last_identity_check = None;
+                                    continue 'step;
+                                }
+                                PlaybackPauseResult::Cancelled => {
+                                    break 'playback;
+                                }
+                                PlaybackPauseResult::ReleaseFailed => {
+                                    release_failed = true;
+                                    break 'playback;
+                                }
+                            }
+                        } else {
+                            input_failed = true;
+                            break 'playback;
+                        }
                     }
-                }
-                if let Err(error) = apply_event(
-                    &shared,
-                    &step.event,
-                    &mut guard.held,
-                    require_coc_foreground,
-                ) {
-                    if error.kind() == io::ErrorKind::PermissionDenied {
-                        foreground_lost = true;
-                    } else {
-                        input_failed = true;
-                    }
-                    break;
+                    step_index += 1;
+                    break 'step;
                 }
             }
-            if foreground_lost {
-                break 'playback;
-            }
-            let Some(cycle_event) = playback_cycle_event(id, input_failed, cancelled) else {
+            let Some(cycle_event) = playback_cycle_event(id, input_failed, false) else {
                 break 'playback;
             };
             let _ = shared.events.send(cycle_event);
@@ -1575,19 +1648,95 @@ mod win {
                 break;
             }
         }
-        let release_failed = guard.release().is_err();
-        let completion = if foreground_lost {
-            NativeEvent::PlaybackGuardLost {
-                playback_id: id,
-                release_failed,
-            }
-        } else {
-            playback_completion_event(id, input_failed, release_failed)
-        };
+        let final_release_failed = guard.release().is_err();
+        let completion =
+            playback_completion_event(id, input_failed, release_failed || final_release_failed);
         let _ = shared.events.send(completion);
         let mut playback = shared.playback.lock().await;
         if playback.as_ref().is_some_and(|control| control.id == id) {
             playback.take();
+        }
+    }
+
+    enum PlaybackPauseResult {
+        Resumed(Duration),
+        Cancelled,
+        ReleaseFailed,
+    }
+
+    async fn pause_for_foreground(
+        id: u64,
+        shared: &Shared,
+        guard: &mut PlaybackGuard,
+        cancel: &mut watch::Receiver<bool>,
+        resume: &mut watch::Receiver<()>,
+    ) -> PlaybackPauseResult {
+        pause_after_release(
+            cancel,
+            resume,
+            || guard.release(),
+            || {
+                let _ = shared
+                    .events
+                    .send(NativeEvent::PlaybackPaused { playback_id: id });
+            },
+        )
+        .await
+    }
+
+    async fn pause_after_release(
+        cancel: &mut watch::Receiver<bool>,
+        resume: &mut watch::Receiver<()>,
+        release: impl FnOnce() -> io::Result<()>,
+        publish_paused: impl FnOnce(),
+    ) -> PlaybackPauseResult {
+        let paused_at = tokio::time::Instant::now();
+        if release().is_err() {
+            return PlaybackPauseResult::ReleaseFailed;
+        }
+        publish_paused();
+        match wait_for_playback_resume(cancel, resume).await {
+            PlaybackPauseResult::Resumed(_) => PlaybackPauseResult::Resumed(paused_at.elapsed()),
+            result => result,
+        }
+    }
+
+    fn signal_playback_resume(resume: &watch::Sender<()>, foreground: bool) -> io::Result<()> {
+        ensure_coc_foreground(true, foreground)?;
+        resume.send_replace(());
+        Ok(())
+    }
+
+    fn shift_replay_timing(
+        start: &mut tokio::time::Instant,
+        deadline: &mut tokio::time::Instant,
+        paused_for: Duration,
+    ) {
+        *start += paused_for;
+        *deadline += paused_for;
+    }
+
+    async fn wait_for_playback_resume(
+        cancel: &mut watch::Receiver<bool>,
+        resume: &mut watch::Receiver<()>,
+    ) -> PlaybackPauseResult {
+        loop {
+            if cancel.has_changed().is_err() || *cancel.borrow() {
+                return PlaybackPauseResult::Cancelled;
+            }
+            tokio::select! {
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        return PlaybackPauseResult::Cancelled;
+                    }
+                }
+                changed = resume.changed() => {
+                    if changed.is_err() {
+                        return PlaybackPauseResult::Cancelled;
+                    }
+                    return PlaybackPauseResult::Resumed(Duration::ZERO);
+                }
+            }
         }
     }
 
@@ -1908,12 +2057,17 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::{
-            HeldInputs, MouseButton, ReplayWait, is_extended_key, release_inputs_with,
-            wait_for_replay_step,
+            HeldInputs, MouseButton, NativeEvent, PlaybackFailure, PlaybackPauseResult, ReplayWait,
+            is_extended_key, pause_after_release, playback_completion_event, release_inputs_with,
+            shift_replay_timing, signal_playback_resume, wait_for_replay_step,
         };
         use std::collections::HashSet;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         use std::time::Duration;
-        use tokio::sync::watch;
+        use tokio::sync::{oneshot, watch};
 
         #[test]
         fn pynput_media_keys_use_extended_key_flags() {
@@ -1953,6 +2107,141 @@ mod win {
             .await;
 
             assert!(matches!(result, ReplayWait::ForegroundLost));
+        }
+
+        #[tokio::test]
+        async fn playback_stays_paused_until_foreground_is_verified() {
+            let (cancel_tx, mut cancel) = watch::channel(false);
+            let (resume_tx, mut resume) = watch::channel(());
+            let (published_tx, published_rx) = oneshot::channel();
+            let released = Arc::new(AtomicUsize::new(0));
+            let worker_released = Arc::clone(&released);
+            let publish_released = Arc::clone(&released);
+            let injected = Arc::new(AtomicUsize::new(0));
+            let worker_injected = Arc::clone(&injected);
+
+            let worker = tokio::spawn(async move {
+                let result = pause_after_release(
+                    &mut cancel,
+                    &mut resume,
+                    move || {
+                        worker_released.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    move || {
+                        assert_eq!(publish_released.load(Ordering::SeqCst), 1);
+                        published_tx.send(()).unwrap();
+                    },
+                )
+                .await;
+                if matches!(result, PlaybackPauseResult::Resumed(_)) {
+                    worker_injected.fetch_add(1, Ordering::SeqCst);
+                }
+                result
+            });
+
+            published_rx.await.unwrap();
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+            assert_eq!(injected.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                signal_playback_resume(&resume_tx, false)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(injected.load(Ordering::SeqCst), 0);
+            assert!(!worker.is_finished());
+
+            signal_playback_resume(&resume_tx, true).unwrap();
+            assert!(matches!(
+                worker.await.unwrap(),
+                PlaybackPauseResult::Resumed(_)
+            ));
+            assert_eq!(injected.load(Ordering::SeqCst), 1);
+            drop(cancel_tx);
+        }
+
+        #[tokio::test]
+        async fn stop_cancels_a_paused_playback_without_resuming_it() {
+            let (cancel_tx, mut cancel) = watch::channel(false);
+            let (_resume_tx, mut resume) = watch::channel(());
+            let (published_tx, published_rx) = oneshot::channel();
+            let injected = Arc::new(AtomicUsize::new(0));
+            let worker_injected = Arc::clone(&injected);
+            let worker = tokio::spawn(async move {
+                let result = pause_after_release(
+                    &mut cancel,
+                    &mut resume,
+                    || Ok(()),
+                    move || published_tx.send(()).unwrap(),
+                )
+                .await;
+                if matches!(result, PlaybackPauseResult::Resumed(_)) {
+                    worker_injected.fetch_add(1, Ordering::SeqCst);
+                }
+                result
+            });
+
+            published_rx.await.unwrap();
+            cancel_tx.send_replace(true);
+
+            assert!(matches!(
+                worker.await.unwrap(),
+                PlaybackPauseResult::Cancelled
+            ));
+            assert_eq!(injected.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn release_failure_never_publishes_the_paused_state() {
+            let (_cancel_tx, mut cancel) = watch::channel(false);
+            let (_resume_tx, mut resume) = watch::channel(());
+            let mut held = HeldInputs {
+                keys: HashSet::from([0x41]),
+                buttons: HashSet::new(),
+            };
+            let mut release_attempts = 0;
+            let mut published = false;
+            let result = pause_after_release(
+                &mut cancel,
+                &mut resume,
+                || {
+                    release_inputs_with(&mut held, |_| {
+                        release_attempts += 1;
+                        Err(std::io::Error::other("release failed"))
+                    })
+                },
+                || published = true,
+            )
+            .await;
+
+            assert!(matches!(&result, PlaybackPauseResult::ReleaseFailed));
+            assert!(!published);
+            assert_eq!(release_attempts, 1);
+            assert_eq!(held.keys, HashSet::from([0x41]));
+            let release_failed = matches!(&result, PlaybackPauseResult::ReleaseFailed);
+            assert_eq!(
+                playback_completion_event(5, false, release_failed),
+                NativeEvent::PlaybackFailed {
+                    playback_id: 5,
+                    reason: PlaybackFailure::Release,
+                }
+            );
+        }
+
+        #[test]
+        fn replay_deadline_keeps_its_remaining_delay_after_pause() {
+            let started = tokio::time::Instant::now();
+            let pause_at = started + Duration::from_secs(2);
+            let paused_for = Duration::from_secs(20);
+            let mut deadline = started + Duration::from_secs(7);
+            let mut shifted_start = started;
+
+            shift_replay_timing(&mut shifted_start, &mut deadline, paused_for);
+
+            assert_eq!(deadline - (pause_at + paused_for), Duration::from_secs(5));
+            assert_eq!(shifted_start, started + paused_for);
+            assert_eq!(deadline, started + Duration::from_secs(7) + paused_for);
         }
     }
 }

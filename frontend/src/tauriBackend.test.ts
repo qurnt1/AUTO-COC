@@ -270,6 +270,26 @@ describe("TauriBackendClient", () => {
     expect([...new Uint8Array(await screenshot.arrayBuffer())]).toEqual([1, 2, 3]);
   });
 
+  it("uses a dedicated command to cancel a pending resume", async () => {
+    const fake = makeBridge();
+    const client = new TauriBackendClient(fake.bridge);
+
+    await client.cancelResumeWait();
+
+    expect(fake.calls).toEqual([{ command: "cancel_resume_wait", args: undefined }]);
+  });
+
+  it("does not fall back to stopping playback when resume cancellation is rejected", async () => {
+    const fake = makeBridge((command) => {
+      if (command === "cancel_resume_wait") throw { code: "invalid_state", message: "La reprise n’attend plus." };
+      return snapshot(2);
+    });
+    const client = new TauriBackendClient(fake.bridge);
+
+    await expect(client.cancelResumeWait()).rejects.toMatchObject({ code: "invalid_state" });
+    expect(fake.calls.map((call) => call.command)).toEqual(["cancel_resume_wait"]);
+  });
+
   it("forwards shutdown failures as retryable runtime errors and cleans up", async () => {
     const fake = makeBridge();
     const client = new TauriBackendClient(fake.bridge);

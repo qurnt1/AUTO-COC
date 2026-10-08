@@ -65,18 +65,20 @@ describe("Settings", () => {
     ]);
   });
 
-  it("explains the host-window guard and its Android crash limit", () => {
+  it("explains the safety pause and its Android crash limit", () => {
     const html = renderSettings(true);
 
-    expect(html).toContain("Exiger Clash of Clans au premier plan");
-    expect(html).toContain("La garde surveille la fenêtre Windows reconnue et son processus hôte crosvm.");
-    expect(html).toContain("Un crash du jeu Android peut passer inaperçu si la fenêtre crosvm reste ouverte avec le même titre.");
+    expect(html).toContain("Pause de sécurité si Clash of Clans perd le premier plan");
+    expect(html).toContain("Au démarrage depuis l’atelier, l’attente de détection de Clash of Clans au premier plan dure au maximum 30 secondes.");
+    expect(html).toContain("Cliquez sur « Reprendre » dans l’atelier, puis revenez dans Clash of Clans");
+    expect(html).toContain("« Annuler la reprise » laisse la macro en pause.");
+    expect(html).toContain("Un crash Android peut rester invisible si la fenêtre hôte crosvm reste ouverte avec le même titre.");
     expect(html).toContain('type="checkbox" checked=""');
   });
 
   it("renders the foreground requirement unchecked when it is disabled", () => {
     const html = renderSettings(false);
-    const control = html.match(/<label class="switch-control"><span class="sr-only">Exiger Clash of Clans au premier plan<\/span>(.*?)<\/label>/)?.[1];
+    const control = html.match(/<label class="switch-control"><span class="sr-only">Activer la pause de sécurité Clash of Clans<\/span>(.*?)<\/label>/)?.[1];
 
     expect(control).toContain('type="checkbox"');
     expect(control).not.toContain("checked");

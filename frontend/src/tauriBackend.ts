@@ -168,6 +168,10 @@ export class TauriBackendClient implements BackendClient {
     return this.snapshotCommand("start_playback");
   }
 
+  cancelResumeWait(): Promise<Snapshot> {
+    return this.snapshotCommand("cancel_resume_wait");
+  }
+
   stopPlayback(): Promise<Snapshot> {
     return this.snapshotCommand("stop_playback");
   }

@@ -48,6 +48,12 @@ enum PendingOperation {
         steps: Arc<Vec<Value>>,
         looped: bool,
     },
+    ResumePlayback {
+        macro_name: String,
+        started: Instant,
+        paused_at: Instant,
+        playback_id: u64,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -102,6 +108,12 @@ enum Operation {
     Playing {
         macro_name: String,
         started: Instant,
+        playback_id: u64,
+    },
+    Paused {
+        macro_name: String,
+        started: Instant,
+        paused_at: Instant,
         playback_id: u64,
     },
 }
@@ -287,13 +299,22 @@ impl Controller {
                         self.start_playback().await?;
                     }
                     Operation::Playing { .. } => {
-                        self.stop_playback().await?;
+                        self.stop_playback_fully().await?;
                     }
                     Operation::WaitingForForeground {
                         pending: PendingOperation::Playing { .. },
                         ..
                     } => {
-                        self.stop_playback().await?;
+                        self.stop_playback_fully().await?;
+                    }
+                    Operation::Paused { .. } => {
+                        self.stop_playback_fully().await?;
+                    }
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::ResumePlayback { .. },
+                        ..
+                    } => {
+                        self.stop_playback_fully().await?;
                     }
                     Operation::Recording { .. } => {}
                     Operation::WaitingForForeground {
@@ -303,8 +324,19 @@ impl Controller {
                 }
             }
             NativeEvent::Play => {
-                if matches!(&self.machine.lock().await.operation, Operation::Idle) {
-                    self.start_playback().await?;
+                let operation = self.machine.lock().await.operation.clone();
+                match operation {
+                    Operation::Idle => {
+                        self.start_playback().await?;
+                    }
+                    Operation::Paused { .. } => {
+                        self.request_playback_resume().await?;
+                    }
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::ResumePlayback { .. },
+                        ..
+                    } => self.monitor_waiting_operation(operation).await,
+                    _ => {}
                 }
             }
             NativeEvent::Stop => {
@@ -320,13 +352,22 @@ impl Controller {
                         self.stop_recording().await?;
                     }
                     Operation::Playing { .. } => {
-                        self.stop_playback().await?;
+                        self.stop_playback_fully().await?;
                     }
                     Operation::WaitingForForeground {
                         pending: PendingOperation::Playing { .. },
                         ..
                     } => {
-                        self.stop_playback().await?;
+                        self.stop_playback_fully().await?;
+                    }
+                    Operation::Paused { .. } => {
+                        self.stop_playback_fully().await?;
+                    }
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::ResumePlayback { .. },
+                        ..
+                    } => {
+                        self.stop_playback_fully().await?;
                     }
                     Operation::Idle => {}
                 }
@@ -341,8 +382,7 @@ impl Controller {
             }
             NativeEvent::PlaybackEnded { playback_id } => {
                 let mut machine = self.machine.lock().await;
-                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
-                {
+                if active_playback_id(&machine.operation) == Some(playback_id) {
                     machine.operation = Operation::Idle;
                     self.changed(&mut machine).await?;
                 }
@@ -352,8 +392,7 @@ impl Controller {
                 reason,
             } => {
                 let mut machine = self.machine.lock().await;
-                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
-                {
+                if active_playback_id(&machine.operation) == Some(playback_id) {
                     machine.operation = Operation::Idle;
                     machine.last_error = Some(match reason {
                         PlaybackFailure::Input => "La lecture a été interrompue par une erreur de saisie Windows.".into(),
@@ -363,20 +402,23 @@ impl Controller {
                     self.changed(&mut machine).await?;
                 }
             }
-            NativeEvent::PlaybackGuardLost {
-                playback_id,
-                release_failed,
-            } => {
+            NativeEvent::PlaybackPaused { playback_id } => {
                 let mut machine = self.machine.lock().await;
-                if matches!(machine.operation, Operation::Playing { playback_id: active_id, .. } if active_id == playback_id)
+                if let Operation::Playing {
+                    macro_name,
+                    started,
+                    playback_id: active_id,
+                } = machine.operation.clone()
+                    && active_id == playback_id
                 {
-                    machine.operation = Operation::Idle;
+                    machine.operation = Operation::Paused {
+                        macro_name,
+                        started,
+                        paused_at: Instant::now(),
+                        playback_id,
+                    };
                     machine.foreground_loss_handled = false;
-                    machine.last_error = Some(if release_failed {
-                        "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée, mais AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris.".into()
-                    } else {
-                        "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée et ne reprendra pas automatiquement.".into()
-                    });
+                    machine.last_error = None;
                     self.changed(&mut machine).await?;
                 }
             }
@@ -398,7 +440,7 @@ impl Controller {
             match &machine.operation {
                 Operation::Recording { .. } => machine.operation.clone(),
                 Operation::WaitingForForeground { .. } => machine.operation.clone(),
-                Operation::Idle | Operation::Playing { .. } => return,
+                Operation::Idle | Operation::Playing { .. } | Operation::Paused { .. } => return,
             }
         };
 
@@ -448,10 +490,24 @@ impl Controller {
         if started.elapsed() >= FOREGROUND_WAIT_TIMEOUT {
             let mut machine = self.machine.lock().await;
             if same_operation(&machine.operation, &operation) {
-                machine.operation = Operation::Idle;
-                machine.last_error = Some(
-                    "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. L’action a été annulée.".into(),
-                );
+                let Operation::WaitingForForeground { pending, .. } = machine.operation.clone()
+                else {
+                    return;
+                };
+                match pending_paused_operation(pending) {
+                    Some(paused) => {
+                        machine.operation = paused;
+                        machine.last_error = Some(
+                            "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. La lecture reste en pause.".into(),
+                        );
+                    }
+                    None => {
+                        machine.operation = Operation::Idle;
+                        machine.last_error = Some(
+                            "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. L’action a été annulée.".into(),
+                        );
+                    }
+                }
                 let _ = self.changed(&mut machine).await;
             }
             return;
@@ -479,10 +535,23 @@ impl Controller {
             Operation::WaitingForForeground { started, .. }
                 if started.elapsed() >= FOREGROUND_WAIT_TIMEOUT
         ) {
-            machine.operation = Operation::Idle;
-            machine.last_error = Some(
-                "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. L’action a été annulée.".into(),
-            );
+            let Operation::WaitingForForeground { pending, .. } = machine.operation.clone() else {
+                return;
+            };
+            match pending_paused_operation(pending) {
+                Some(paused) => {
+                    machine.operation = paused;
+                    machine.last_error = Some(
+                        "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. La lecture reste en pause.".into(),
+                    );
+                }
+                None => {
+                    machine.operation = Operation::Idle;
+                    machine.last_error = Some(
+                        "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. L’action a été annulée.".into(),
+                    );
+                }
+            }
             let _ = self.changed(&mut machine).await;
             return;
         }
@@ -491,26 +560,44 @@ impl Controller {
         };
         let native_slot = self.native.lock().await;
         let Some(native) = native_slot.as_ref() else {
-            machine.operation = Operation::Idle;
-            machine.last_error = Some("Le clavier et la souris ne sont pas disponibles.".into());
+            if let Some(paused) = pending_paused_operation(pending) {
+                machine.operation = paused;
+                machine.last_error = Some(
+                    "La reprise n’a pas pu être acceptée. La lecture reste en pause; réessayez après avoir vérifié le clavier et la souris.".into(),
+                );
+            } else {
+                machine.operation = Operation::Idle;
+                machine.last_error =
+                    Some("Le clavier et la souris ne sont pas disponibles.".into());
+            }
             let _ = self.changed(&mut machine).await;
             return;
         };
 
-        let playback_id = match &pending {
-            PendingOperation::Recording { .. } => match native.start_recording(true).await {
-                Ok(()) => None,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-                Err(_) => {
+        match pending {
+            PendingOperation::Recording { macro_name } => {
+                if let Err(error) = native.start_recording(true).await {
+                    if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
                     machine.operation = Operation::Idle;
                     machine.last_error = Some("L’enregistrement n’a pas pu démarrer.".into());
                     let _ = self.changed(&mut machine).await;
                     return;
                 }
-            },
-            PendingOperation::Playing { steps, looped, .. } => {
-                match native.start_playback(steps.as_slice(), *looped, true).await {
-                    Ok(playback_id) => Some(playback_id),
+                machine.operation = Operation::Recording {
+                    macro_name,
+                    started: Instant::now(),
+                };
+            }
+            PendingOperation::Playing {
+                macro_name,
+                steps,
+                looped,
+            } => {
+                let playback_id = match native.start_playback(steps.as_slice(), looped, true).await
+                {
+                    Ok(playback_id) => playback_id,
                     Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
                     Err(_) => {
                         machine.operation = Operation::Idle;
@@ -518,13 +605,46 @@ impl Controller {
                         let _ = self.changed(&mut machine).await;
                         return;
                     }
-                }
+                };
+                machine.operation = Operation::Playing {
+                    macro_name,
+                    started: Instant::now(),
+                    playback_id,
+                };
+                machine.cycles = 0;
             }
-        };
-
-        if activate_pending_operation(&mut machine, pending, playback_id) {
-            let _ = self.changed(&mut machine).await;
+            PendingOperation::ResumePlayback {
+                macro_name,
+                started,
+                paused_at,
+                playback_id,
+            } => {
+                if let Err(error) = native.resume_playback(playback_id).await {
+                    if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                    machine.operation = Operation::Paused {
+                        macro_name,
+                        started,
+                        paused_at,
+                        playback_id,
+                    };
+                    machine.last_error = Some(
+                        "La reprise n’a pas été acceptée. La lecture reste en pause; remettez Clash of Clans au premier plan puis réessayez.".into(),
+                    );
+                    let _ = self.changed(&mut machine).await;
+                    return;
+                }
+                machine.operation = Operation::Playing {
+                    macro_name,
+                    started: started + paused_at.elapsed(),
+                    playback_id,
+                };
+            }
         }
+        machine.foreground_loss_handled = false;
+        machine.last_error = None;
+        let _ = self.changed(&mut machine).await;
     }
 
     pub async fn shutdown_services(&self) -> Result<(), ControllerError> {
@@ -552,7 +672,7 @@ impl Controller {
 
         let stopped = match operation {
             Operation::Recording { .. } => self.stop_recording().await.map(|_| ()),
-            Operation::Playing { .. } => self.stop_playback().await.map(|_| ()),
+            Operation::Playing { .. } => self.stop_playback_fully().await.map(|_| ()),
             Operation::WaitingForForeground {
                 pending: PendingOperation::Recording { .. },
                 ..
@@ -560,7 +680,12 @@ impl Controller {
             Operation::WaitingForForeground {
                 pending: PendingOperation::Playing { .. },
                 ..
-            } => self.stop_playback().await.map(|_| ()),
+            } => self.stop_playback_fully().await.map(|_| ()),
+            Operation::Paused { .. } => self.stop_playback_fully().await.map(|_| ()),
+            Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback { .. },
+                ..
+            } => self.stop_playback_fully().await.map(|_| ()),
             Operation::Idle => Ok(()),
         };
         if let Err(error) = stopped {
@@ -941,7 +1066,65 @@ impl Controller {
     }
 
     pub async fn start_playback_from_ui(&self) -> Result<Snapshot, ControllerError> {
+        let operation = self.machine.lock().await.operation.clone();
+        match operation {
+            Operation::Paused { .. } => return self.request_playback_resume().await,
+            Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback { .. },
+                ..
+            } => {
+                self.monitor_waiting_operation(operation).await;
+                return self.snapshot().await;
+            }
+            _ => {}
+        }
         self.start_macro_playback(None, true, None, true).await
+    }
+
+    async fn request_playback_resume(&self) -> Result<Snapshot, ControllerError> {
+        let mut machine = self.machine.lock().await;
+        if machine.closing || !machine.store.settings().require_coc_foreground {
+            return Err(ControllerError::InvalidState);
+        }
+        let Operation::Paused {
+            macro_name,
+            started,
+            paused_at,
+            playback_id,
+        } = machine.operation.clone()
+        else {
+            return Err(ControllerError::InvalidState);
+        };
+        let pending = PendingOperation::ResumePlayback {
+            macro_name: macro_name.clone(),
+            started,
+            paused_at,
+            playback_id,
+        };
+        let native_slot = self.native.lock().await;
+        let native = native_slot
+            .as_ref()
+            .ok_or(ControllerError::NativeInputUnavailable)?;
+        if !native.coc_is_foreground() {
+            arm_for_foreground(&mut machine, pending);
+            return self.changed(&mut machine).await;
+        }
+        match native.resume_playback(playback_id).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                arm_for_foreground(&mut machine, pending);
+                return self.changed(&mut machine).await;
+            }
+            Err(error) => return Err(map_native_error(error)),
+        }
+        machine.operation = Operation::Playing {
+            macro_name,
+            started: started + paused_at.elapsed(),
+            playback_id,
+        };
+        machine.foreground_loss_handled = false;
+        machine.last_error = None;
+        self.changed(&mut machine).await
     }
 
     pub async fn start_playback_for_telegram(
@@ -1057,6 +1240,10 @@ impl Controller {
                 self.stop_playback_with_authority(Some((token, owner)))
                     .await
             }
+            Operation::Paused { .. } => {
+                self.stop_playback_with_authority(Some((token, owner)))
+                    .await
+            }
             Operation::WaitingForForeground {
                 pending: PendingOperation::Recording { .. },
                 ..
@@ -1066,6 +1253,13 @@ impl Controller {
             }
             Operation::WaitingForForeground {
                 pending: PendingOperation::Playing { .. },
+                ..
+            } => {
+                self.stop_playback_with_authority(Some((token, owner)))
+                    .await
+            }
+            Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback { .. },
                 ..
             } => {
                 self.stop_playback_with_authority(Some((token, owner)))
@@ -1200,6 +1394,39 @@ impl Controller {
     }
 
     pub async fn stop_playback(&self) -> Result<Snapshot, ControllerError> {
+        self.stop_playback_fully().await
+    }
+
+    pub async fn cancel_resume_wait(&self) -> Result<Snapshot, ControllerError> {
+        let mut machine = self.machine.lock().await;
+        if machine.closing {
+            return Err(ControllerError::InvalidState);
+        }
+        let Operation::WaitingForForeground {
+            pending:
+                PendingOperation::ResumePlayback {
+                    macro_name,
+                    started,
+                    paused_at,
+                    playback_id,
+                },
+            ..
+        } = machine.operation.clone()
+        else {
+            return Err(ControllerError::InvalidState);
+        };
+        machine.operation = Operation::Paused {
+            macro_name,
+            started,
+            paused_at,
+            playback_id,
+        };
+        machine.foreground_loss_handled = false;
+        machine.last_error = None;
+        self.changed(&mut machine).await
+    }
+
+    async fn stop_playback_fully(&self) -> Result<Snapshot, ControllerError> {
         self.stop_playback_with_authority(None).await
     }
 
@@ -1223,7 +1450,15 @@ impl Controller {
             machine.foreground_loss_handled = false;
             return self.changed(&mut machine).await;
         }
-        if !matches!(machine.operation, Operation::Playing { .. }) {
+        if !matches!(
+            machine.operation,
+            Operation::Playing { .. }
+                | Operation::Paused { .. }
+                | Operation::WaitingForForeground {
+                    pending: PendingOperation::ResumePlayback { .. },
+                    ..
+                }
+        ) {
             return Err(ControllerError::InvalidState);
         }
         let native = self.native.lock().await;
@@ -1536,10 +1771,11 @@ impl Controller {
                     action: match pending {
                         PendingOperation::Recording { .. } => PendingAction::Recording,
                         PendingOperation::Playing { .. } => PendingAction::Playing,
+                        PendingOperation::ResumePlayback { .. } => PendingAction::Resuming,
                     },
                     macro_name: pending.macro_name().to_owned(),
                 },
-                0.0,
+                pending.elapsed_seconds(),
             ),
             Operation::Recording {
                 macro_name,
@@ -1570,6 +1806,21 @@ impl Controller {
                 let elapsed = started.elapsed().as_secs_f64();
                 (
                     AppStatus::Playing {
+                        macro_name: macro_name.clone(),
+                        elapsed_seconds: elapsed,
+                    },
+                    elapsed,
+                )
+            }
+            Operation::Paused {
+                macro_name,
+                started,
+                paused_at,
+                ..
+            } => {
+                let elapsed = playback_elapsed(started, paused_at);
+                (
+                    AppStatus::Paused {
                         macro_name: macro_name.clone(),
                         elapsed_seconds: elapsed,
                     },
@@ -1631,10 +1882,52 @@ fn same_operation(current: &Operation, expected: &Operation) -> bool {
     match (current, expected) {
         (
             Operation::WaitingForForeground {
-                started: current, ..
+                pending:
+                    PendingOperation::ResumePlayback {
+                        playback_id: current_id,
+                        ..
+                    },
+                started: current_started,
             },
             Operation::WaitingForForeground {
-                started: expected, ..
+                pending:
+                    PendingOperation::ResumePlayback {
+                        playback_id: expected_id,
+                        ..
+                    },
+                started: expected_started,
+            },
+        ) => current_started == expected_started && current_id == expected_id,
+        (
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Recording { .. },
+                started: current,
+                ..
+            },
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Recording { .. },
+                started: expected,
+                ..
+            },
+        ) => current == expected,
+        (
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Playing { .. },
+                started: current,
+            },
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Playing { .. },
+                started: expected,
+            },
+        ) => current == expected,
+        (
+            Operation::Paused {
+                playback_id: current,
+                ..
+            },
+            Operation::Paused {
+                playback_id: expected,
+                ..
             },
         ) => current == expected,
         (
@@ -1730,6 +2023,44 @@ fn state_label(state: &Operation) -> &'static str {
         Operation::WaitingForForeground { .. } => "waiting_for_foreground",
         Operation::Recording { .. } => "recording",
         Operation::Playing { .. } => "playing",
+        Operation::Paused { .. } => "paused",
+    }
+}
+
+fn active_playback_id(operation: &Operation) -> Option<u64> {
+    match operation {
+        Operation::Playing { playback_id, .. } | Operation::Paused { playback_id, .. } => {
+            Some(*playback_id)
+        }
+        Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback { playback_id, .. },
+            ..
+        } => Some(*playback_id),
+        _ => None,
+    }
+}
+
+fn playback_elapsed(started: &Instant, paused_at: &Instant) -> f64 {
+    started
+        .elapsed()
+        .saturating_sub(paused_at.elapsed())
+        .as_secs_f64()
+}
+
+fn pending_paused_operation(pending: PendingOperation) -> Option<Operation> {
+    match pending {
+        PendingOperation::ResumePlayback {
+            macro_name,
+            started,
+            paused_at,
+            playback_id,
+        } => Some(Operation::Paused {
+            macro_name,
+            started,
+            paused_at,
+            playback_id,
+        }),
+        _ => None,
     }
 }
 
@@ -1745,11 +2076,23 @@ fn arm_for_foreground(machine: &mut Machine, pending: PendingOperation) {
 impl PendingOperation {
     fn macro_name(&self) -> &str {
         match self {
-            Self::Recording { macro_name } | Self::Playing { macro_name, .. } => macro_name,
+            Self::Recording { macro_name }
+            | Self::Playing { macro_name, .. }
+            | Self::ResumePlayback { macro_name, .. } => macro_name,
+        }
+    }
+
+    fn elapsed_seconds(&self) -> f64 {
+        match self {
+            Self::ResumePlayback {
+                started, paused_at, ..
+            } => playback_elapsed(started, paused_at),
+            _ => 0.0,
         }
     }
 }
 
+#[cfg(test)]
 fn activate_pending_operation(
     machine: &mut Machine,
     pending: PendingOperation,
@@ -1767,6 +2110,7 @@ fn activate_pending_operation(
             started,
             playback_id,
         },
+        (PendingOperation::ResumePlayback { .. }, _) => return false,
     };
     if matches!(machine.operation, Operation::Playing { .. }) {
         machine.cycles = 0;
@@ -2116,6 +2460,286 @@ mod tests {
         assert!(snapshot.last_error.unwrap().contains("30 secondes"));
     }
 
+    #[tokio::test]
+    async fn resume_wait_timeout_restores_the_same_paused_playback() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        let playback_started = Instant::now() - Duration::from_secs(40);
+        let paused_at = Instant::now() - Duration::from_secs(30);
+        let operation = Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback {
+                macro_name: "Resume me".into(),
+                started: playback_started,
+                paused_at,
+                playback_id: 81,
+            },
+            started: Instant::now() - FOREGROUND_WAIT_TIMEOUT - Duration::from_millis(1),
+        };
+        controller.machine.lock().await.operation = operation.clone();
+
+        controller.monitor_waiting_operation(operation).await;
+
+        let machine = controller.machine.lock().await;
+        assert!(matches!(
+            machine.operation,
+            Operation::Paused {
+                playback_id: 81,
+                ..
+            }
+        ));
+        drop(machine);
+        let snapshot = controller.snapshot().await.unwrap();
+        assert!(matches!(
+            snapshot.status,
+            AppStatus::Paused {
+                macro_name,
+                elapsed_seconds,
+            } if macro_name == "Resume me" && (9.0..11.0).contains(&elapsed_seconds)
+        ));
+        assert!(snapshot.last_error.unwrap().contains("reste en pause"));
+    }
+
+    #[tokio::test]
+    async fn stop_hotkey_routes_paused_playback_to_native_stop() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::Paused {
+            macro_name: "Stop me".into(),
+            started: Instant::now() - Duration::from_secs(10),
+            paused_at: Instant::now() - Duration::from_secs(3),
+            playback_id: 82,
+        };
+
+        assert!(matches!(
+            controller.handle_native_event(NativeEvent::Stop).await,
+            Err(ControllerError::NativeInputUnavailable)
+        ));
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Paused { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_resume_wait_restores_paused_playback_and_status_is_distinct() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        let playback_started = Instant::now() - Duration::from_secs(12);
+        let paused_at = Instant::now() - Duration::from_secs(5);
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback {
+                macro_name: "Keep me paused".into(),
+                started: playback_started,
+                paused_at,
+                playback_id: 85,
+            },
+            started: Instant::now(),
+        };
+
+        let waiting = controller.snapshot().await.unwrap();
+        let status = serde_json::to_value(waiting.status).unwrap();
+        assert_eq!(status["kind"], "waiting_for_foreground");
+        assert_eq!(status["action"], "resuming");
+
+        let snapshot = controller.cancel_resume_wait().await.unwrap();
+
+        assert!(matches!(
+            snapshot.status,
+            AppStatus::Paused {
+                macro_name,
+                ..
+            } if macro_name == "Keep me paused"
+        ));
+        assert_eq!(snapshot.last_error, None);
+        assert!(matches!(
+            controller.machine.lock().await.operation,
+            Operation::Paused {
+                playback_id: 85,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_resume_wait_rejects_a_playback_that_already_resumed() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::Playing {
+            macro_name: "Already resumed".into(),
+            started: Instant::now() - Duration::from_secs(8),
+            playback_id: 87,
+        };
+
+        assert!(matches!(
+            controller.cancel_resume_wait().await,
+            Err(ControllerError::InvalidState)
+        ));
+        assert!(matches!(
+            controller.machine.lock().await.operation,
+            Operation::Playing {
+                playback_id: 87,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_playback_remains_a_full_stop_during_resume_wait() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback {
+                macro_name: "Do not cancel through stop".into(),
+                started: Instant::now() - Duration::from_secs(8),
+                paused_at: Instant::now() - Duration::from_secs(3),
+                playback_id: 88,
+            },
+            started: Instant::now(),
+        };
+
+        assert!(matches!(
+            controller.stop_playback().await,
+            Err(ControllerError::NativeInputUnavailable)
+        ));
+        assert!(matches!(
+            controller.machine.lock().await.operation,
+            Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback {
+                    playback_id: 88,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_and_toggle_hotkeys_keep_full_stop_semantics_during_resume_wait() {
+        for event in [NativeEvent::Stop, NativeEvent::Toggle] {
+            let dir = tempdir().unwrap();
+            let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+            controller.machine.lock().await.operation = Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback {
+                    macro_name: "Stop completely".into(),
+                    started: Instant::now() - Duration::from_secs(8),
+                    paused_at: Instant::now() - Duration::from_secs(3),
+                    playback_id: 86,
+                },
+                started: Instant::now(),
+            };
+
+            assert!(matches!(
+                controller.handle_native_event(event).await,
+                Err(ControllerError::NativeInputUnavailable)
+            ));
+            assert!(matches!(
+                controller.machine.lock().await.operation,
+                Operation::WaitingForForeground {
+                    pending: PendingOperation::ResumePlayback {
+                        playback_id: 86,
+                        ..
+                    },
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_stop_keeps_full_stop_semantics_during_resume_wait() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        let token = "000000000000000000000000000000002";
+        let owner = crate::telegram::TelegramOwner {
+            chat_id: 100,
+            user_id: 200,
+        };
+        controller.configure_telegram(Some(token)).await.unwrap();
+        let (code, _, _) = controller.start_pairing().await.unwrap();
+        assert!(
+            controller
+                .attempt_telegram_pairing(token, &code, 100, 200, true)
+                .await
+                .unwrap()
+        );
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback {
+                macro_name: "Telegram stop".into(),
+                started: Instant::now() - Duration::from_secs(8),
+                paused_at: Instant::now() - Duration::from_secs(3),
+                playback_id: 89,
+            },
+            started: Instant::now(),
+        };
+
+        assert!(matches!(
+            controller.stop_active_operation(token, owner).await,
+            Err(ControllerError::NativeInputUnavailable)
+        ));
+        assert!(matches!(
+            controller.machine.lock().await.operation,
+            Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback {
+                    playback_id: 89,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_full_stop_semantics_during_resume_wait() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback {
+                macro_name: "Shutdown stop".into(),
+                started: Instant::now() - Duration::from_secs(8),
+                paused_at: Instant::now() - Duration::from_secs(3),
+                playback_id: 90,
+            },
+            started: Instant::now(),
+        };
+
+        assert!(matches!(
+            controller.shutdown_services().await,
+            Err(ControllerError::NativeInputUnavailable)
+        ));
+        let machine = controller.machine.lock().await;
+        assert!(!machine.closing);
+        assert!(matches!(
+            machine.operation,
+            Operation::WaitingForForeground {
+                pending: PendingOperation::ResumePlayback {
+                    playback_id: 90,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn waiting_resume_identity_includes_playback_id() {
+        let started = Instant::now();
+        let paused_at = Instant::now();
+        let operation = |playback_id| Operation::WaitingForForeground {
+            pending: PendingOperation::ResumePlayback {
+                macro_name: "Resume me".into(),
+                started: Instant::now(),
+                paused_at,
+                playback_id,
+            },
+            started,
+        };
+
+        assert!(same_operation(&operation(83), &operation(83)));
+        assert!(!same_operation(&operation(83), &operation(84)));
+    }
+
     #[test]
     fn foreground_monitor_keeps_the_manual_stop_result_after_operation_ends() {
         let expected = Operation::Recording {
@@ -2168,7 +2792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playback_guard_loss_is_reported_after_native_release() {
+    async fn playback_guard_loss_pauses_only_after_native_release() {
         let dir = tempdir().unwrap();
         let controller = Controller::new(Store::open_at(dir.path()).unwrap());
         {
@@ -2181,34 +2805,25 @@ mod tests {
         }
 
         controller
-            .handle_native_event(NativeEvent::PlaybackGuardLost {
-                playback_id: 42,
-                release_failed: false,
-            })
+            .handle_native_event(NativeEvent::PlaybackPaused { playback_id: 42 })
             .await
             .unwrap();
 
         let snapshot = controller.snapshot().await.unwrap();
-        assert!(matches!(snapshot.status, AppStatus::Idle));
-        assert!(
-            snapshot
-                .last_error
-                .unwrap()
-                .contains("ne reprendra pas automatiquement")
-        );
+        assert!(matches!(snapshot.status, AppStatus::Paused { .. }));
+        assert_eq!(snapshot.last_error, None);
 
-        controller.machine.lock().await.operation = Operation::Playing {
-            macro_name: "Test".into(),
-            started: Instant::now(),
-            playback_id: 43,
-        };
         controller
-            .handle_native_event(NativeEvent::PlaybackGuardLost {
-                playback_id: 43,
-                release_failed: true,
+            .handle_native_event(NativeEvent::PlaybackFailed {
+                playback_id: 42,
+                reason: PlaybackFailure::Release,
             })
             .await
             .unwrap();
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Idle
+        ));
         assert!(
             controller
                 .snapshot()

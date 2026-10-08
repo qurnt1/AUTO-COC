@@ -28,10 +28,27 @@ const baseSnapshot: Snapshot = {
   lastError: null,
 };
 
-function renderWaiting(action: "recording" | "playing") {
+function renderWaiting(action: "recording" | "playing" | "resuming") {
   const snapshot: Snapshot = {
     ...baseSnapshot,
     status: { kind: "waiting_for_foreground", action, macroName: "Récolte" },
+  };
+  return renderToStaticMarkup(createElement(Atelier, {
+    api: {} as BackendClient,
+    snapshot,
+    busy: null,
+    run: (async (_label, callback) => callback()) as ActionRunner,
+    online: true,
+    showOnboarding: false,
+    onDismissOnboarding: () => {},
+    onCompleteOnboarding: () => {},
+  }));
+}
+
+function renderPaused() {
+  const snapshot: Snapshot = {
+    ...baseSnapshot,
+    status: { kind: "paused", macroName: "Récolte", elapsedSeconds: 12.5 },
   };
   return renderToStaticMarkup(createElement(Atelier, {
     api: {} as BackendClient,
@@ -64,5 +81,26 @@ describe("foreground wait in the workshop", () => {
     expect(html).toContain("Aucune action ne démarre avant la détection de Clash of Clans.");
     expect(html).toContain("Annuler l’attente");
     expect(html).not.toContain("Lecture en cours</strong>");
+  });
+
+  it("distinguishes a pending resume and offers its dedicated cancellation", () => {
+    const html = renderWaiting("resuming");
+
+    expect(html).toContain("Reprise en attente pour « Récolte »");
+    expect(html).toContain("La lecture reprendra dès que le jeu sera de nouveau au premier plan.");
+    expect(html).toContain(">Annuler la reprise</button>");
+    expect(html).not.toContain(">Annuler l’attente</button>");
+  });
+
+  it("shows the safety pause with resume and stop controls", () => {
+    const html = renderPaused();
+
+    expect(html).toContain("En pause, CoC n&#x27;est plus la fenêtre active");
+    expect(html).toContain("Cliquez sur « Reprendre », puis revenez dans Clash of Clans.");
+    expect(html).toContain("La lecture reprendra dès que le jeu sera de nouveau au premier plan.");
+    expect(html).toMatch(/class="run-copy" role="status" aria-atomic="true"/);
+    expect(html).toContain(">Reprendre</button>");
+    expect(html).toContain(">Arrêter la lecture</button>");
+    expect(html).not.toContain(">Lire la macro</button>");
   });
 });

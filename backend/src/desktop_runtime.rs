@@ -105,6 +105,10 @@ impl DesktopRuntime {
         Ok(self.controller.stop_playback().await?)
     }
 
+    pub async fn cancel_resume_wait(&self) -> Result<Snapshot, DesktopRuntimeError> {
+        Ok(self.controller.cancel_resume_wait().await?)
+    }
+
     pub async fn patch_settings(
         &self,
         settings: SettingsPatch,

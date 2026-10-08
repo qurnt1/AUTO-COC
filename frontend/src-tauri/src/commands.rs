@@ -197,6 +197,11 @@ pub async fn stop_playback(state: State<'_, HostState>) -> Result<Snapshot, Comm
 }
 
 #[tauri::command]
+pub async fn cancel_resume_wait(state: State<'_, HostState>) -> Result<Snapshot, CommandError> {
+    state.runtime.cancel_resume_wait().await.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn patch_settings(
     settings: SettingsPatch,
     state: State<'_, HostState>,
