@@ -218,6 +218,13 @@ impl Store {
         &self,
         selected: &Path,
     ) -> Result<(PathBuf, MigrationPreview, bool), StoreError> {
+        Self::preview_legacy_at(&self.root, selected)
+    }
+
+    pub(crate) fn preview_legacy_at(
+        root: &Path,
+        selected: &Path,
+    ) -> Result<(PathBuf, MigrationPreview, bool), StoreError> {
         let config = resolve_legacy_config_dir(selected).ok_or(StoreError::InvalidData)?;
         let settings_found = config.join("data.csv").is_file();
         let mut macros = Vec::new();
@@ -244,8 +251,7 @@ impl Store {
         macros.sort_by(|left, right| natural_cmp(&left.name, &right.name));
         let available = settings_found || !macros.is_empty();
         let fingerprint = legacy_fingerprint(&config)?;
-        let already_imported = self
-            .root
+        let already_imported = root
             .join("migration-manifests")
             .join(format!("{fingerprint}.json"))
             .exists();

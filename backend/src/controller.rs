@@ -26,6 +26,18 @@ const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const SHUTDOWN_CONFIRM_LIFETIME: Duration = Duration::from_secs(30);
 const FOREGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+async fn run_migration_blocking<T, E>(
+    operation: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<StoreError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| E::from(StoreError::InvalidData))?
+}
+
 #[derive(Clone, Debug)]
 enum PendingOperation {
     Recording {
@@ -126,7 +138,7 @@ struct Machine {
 }
 
 pub struct Controller {
-    machine: Mutex<Machine>,
+    machine: Arc<Mutex<Machine>>,
     native: Mutex<Option<NativeInput>>,
     native_events_tx: mpsc::UnboundedSender<NativeEvent>,
     native_events_rx: Mutex<Option<mpsc::UnboundedReceiver<NativeEvent>>>,
@@ -151,7 +163,7 @@ impl Controller {
         let (native_event_loop_shutdown, _) = watch::channel(false);
         let (native_events_tx, native_events_rx) = mpsc::unbounded_channel();
         Self {
-            machine: Mutex::new(Machine {
+            machine: Arc::new(Mutex::new(Machine {
                 store,
                 operation: Operation::Idle,
                 closing: false,
@@ -168,7 +180,7 @@ impl Controller {
                 migration_preview: None,
                 migration_already_imported,
                 foreground_loss_handled: false,
-            }),
+            })),
             native: Mutex::new(None),
             native_events_tx,
             native_events_rx: Mutex::new(Some(native_events_rx)),
@@ -761,9 +773,11 @@ impl Controller {
     pub async fn select_migration_source(
         &self,
     ) -> Result<(Snapshot, MigrationPreview), ControllerError> {
-        let machine = self.machine.lock().await;
-        ensure_idle(&machine)?;
-        drop(machine);
+        let root = {
+            let machine = self.machine.lock().await;
+            ensure_idle(&machine)?;
+            machine.store.root().to_owned()
+        };
         let selected = tokio::task::spawn_blocking(|| {
             rfd::FileDialog::new()
                 .set_title("Choisir l’ancien dossier AUTO-COC")
@@ -772,9 +786,10 @@ impl Controller {
         .await
         .map_err(|_| StoreError::InvalidData)?
         .ok_or(ControllerError::MigrationCancelled)?;
+        let (config, preview, already_imported) =
+            run_migration_blocking(move || Store::preview_legacy_at(&root, &selected)).await?;
         let mut machine = self.machine.lock().await;
         ensure_idle(&machine)?;
-        let (config, preview, already_imported) = machine.store.preview_legacy(&selected)?;
         machine.migration_source = Some(config);
         machine.migration_preview = Some(preview.clone());
         machine.migration_already_imported = already_imported;
@@ -785,25 +800,45 @@ impl Controller {
     pub async fn import_migration_source(
         &self,
     ) -> Result<(Snapshot, MigrationResult), ControllerError> {
-        let mut machine = self.machine.lock().await;
-        ensure_idle(&machine)?;
-        let source = machine
-            .migration_source
-            .clone()
-            .ok_or(ControllerError::MigrationCancelled)?;
-        ensure_idle(&machine)?;
-        let result = {
-            let Machine { store, pairing, .. } = &mut *machine;
-            store.import_legacy_with_token_installation(&source, || {
-                *pairing = None;
-            })?
-        };
-        machine.migration_already_imported = true;
-        let (normalized_source, preview, _) = machine.store.preview_legacy(&source)?;
-        machine.migration_source = Some(normalized_source);
-        machine.migration_preview = Some(preview);
+        self.import_migration_source_with_token_installation(|| {})
+            .await
+    }
+
+    async fn import_migration_source_with_token_installation(
+        &self,
+        before_token_install: impl FnOnce() + Send + 'static,
+    ) -> Result<(Snapshot, MigrationResult), ControllerError> {
+        let machine = Arc::clone(&self.machine);
+        let (mut machine, result) = run_migration_blocking(move || {
+            let mut machine = machine.blocking_lock_owned();
+            ensure_idle(&machine)?;
+            let source = machine
+                .migration_source
+                .clone()
+                .ok_or(ControllerError::MigrationCancelled)?;
+            let imported = {
+                let Machine { store, pairing, .. } = &mut *machine;
+                store.import_legacy_with_token_installation(&source, || {
+                    *pairing = None;
+                    before_token_install();
+                })
+            };
+            let result = imported.and_then(|result| {
+                machine.migration_already_imported = true;
+                machine
+                    .store
+                    .preview_legacy(&source)
+                    .map(|(normalized_source, preview, _)| {
+                        machine.migration_source = Some(normalized_source);
+                        machine.migration_preview = Some(preview);
+                        result
+                    })
+            });
+            Ok::<_, ControllerError>((machine, result))
+        })
+        .await?;
         let snapshot = self.changed(&mut machine).await?;
-        Ok((snapshot, result))
+        Ok((snapshot, result?))
     }
 
     pub async fn start_recording_from_ui(&self) -> Result<Snapshot, ControllerError> {
@@ -1804,6 +1839,17 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn migration_io_runs_on_a_blocking_thread() {
+        let async_thread = std::thread::current().id();
+        let blocking_thread =
+            run_migration_blocking(|| Ok::<_, StoreError>(std::thread::current().id()))
+                .await
+                .unwrap();
+
+        assert_ne!(blocking_thread, async_thread);
+    }
+
     #[test]
     fn start_guard_requires_foreground_only_when_enabled() {
         assert!(matches!(
@@ -2513,6 +2559,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_migration_publishes_a_snapshot_revision() {
+        let app = tempdir().unwrap();
+        let old = tempdir().unwrap();
+        let config = old.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("data.csv"), b"parameter_name;parameter_value\n").unwrap();
+
+        let controller = Controller::new(Store::open_at(app.path()).unwrap());
+        std::fs::write(app.path().join("migration-manifests"), b"not a directory").unwrap();
+        controller.machine.lock().await.migration_source = Some(config);
+        let mut revisions = controller.revision_tx.subscribe();
+        let previous_revision = controller.snapshot().await.unwrap().revision;
+
+        assert!(matches!(
+            controller.import_migration_source().await,
+            Err(ControllerError::Store(StoreError::Io(_)))
+        ));
+        revisions.changed().await.unwrap();
+        let updated_revision = *revisions.borrow();
+        assert_eq!(updated_revision, previous_revision + 1);
+        assert_eq!(
+            controller.snapshot().await.unwrap().revision,
+            updated_revision
+        );
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn migration_token_replacement_clears_old_telegram_authorization() {
@@ -2622,23 +2695,31 @@ mod tests {
         let controller = Controller::new(store);
         {
             let mut machine = controller.machine.lock().await;
+            machine.migration_source = Some(config);
             machine.pairing = Some(Pairing {
                 code: "654321".into(),
                 expires: Instant::now() + Duration::from_secs(30),
                 expires_at: "synthetic-expiry".into(),
                 attempts: 0,
             });
-
-            let root = app.path().to_path_buf();
-            let Machine { store, pairing, .. } = &mut *machine;
-            let result = store.import_legacy_with_token_installation(&config, || {
-                *pairing = None;
-                let manifests = root.join("migration-manifests");
-                std::fs::remove_dir_all(&manifests).unwrap();
-                std::fs::write(manifests, b"synthetic manifest write blocker").unwrap();
-            });
-            assert!(result.is_err());
         }
+
+        let mut revisions = controller.revision_tx.subscribe();
+        let previous_revision = controller.snapshot().await.unwrap().revision;
+        let root = app.path().to_path_buf();
+        assert!(matches!(
+            controller
+                .import_migration_source_with_token_installation(move || {
+                    let manifests = root.join("migration-manifests");
+                    std::fs::remove_dir_all(&manifests).unwrap();
+                    std::fs::write(manifests, b"synthetic manifest write blocker").unwrap();
+                })
+                .await,
+            Err(ControllerError::Store(StoreError::Io(_)))
+        ));
+        revisions.changed().await.unwrap();
+        let snapshot = controller.snapshot().await.unwrap();
+        assert_eq!(snapshot.revision, previous_revision + 1);
 
         assert!(controller.machine.lock().await.pairing.is_none());
         let machine = controller.machine.lock().await;
