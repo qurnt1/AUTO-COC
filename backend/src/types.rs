@@ -34,6 +34,10 @@ impl Default for Help {
                     body: "La lecture rejoue les entrées clavier et souris enregistrées. Gardez l’application ouverte pendant une opération et utilisez Arrêter dès qu’un replay ne se déroule pas comme prévu.".into(),
                 },
                 HelpSection {
+                    title: "Garde du premier plan".into(),
+                    body: "Si l’option est activée, les boutons de l’atelier attendent jusqu’à 30 secondes que la fenêtre Clash of Clans reconnue soit au premier plan. Les raccourcis globaux et Telegram ne sont jamais mis en attente. Pendant une opération, AUTO-COC surveille la fenêtre Windows et son processus hôte crosvm; l’opération s’arrête si l’un des deux disparaît ou si la fenêtre perd le premier plan. Un crash du jeu Android peut passer inaperçu si la fenêtre crosvm reste ouverte avec le même titre.".into(),
+                },
+                HelpSection {
                     title: "Raccourcis par défaut".into(),
                     body: "F1 bascule la lecture et l’arrêt, Ctrl+Shift+1 démarre une lecture, Ctrl+Shift+0 arrête une lecture ou un enregistrement. Les raccourcis personnalisés sont enregistrés seulement si Windows accepte les trois touches.".into(),
                 },
@@ -128,6 +132,11 @@ impl Default for Settings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AppStatus {
     Idle,
+    WaitingForForeground {
+        action: PendingAction,
+        #[serde(rename = "macroName")]
+        macro_name: String,
+    },
     Recording {
         #[serde(rename = "macroName")]
         macro_name: String,
@@ -143,6 +152,13 @@ pub enum AppStatus {
         #[serde(rename = "elapsedSeconds")]
         elapsed_seconds: f64,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingAction {
+    Recording,
+    Playing,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

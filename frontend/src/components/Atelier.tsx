@@ -128,7 +128,24 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
   const selected = snapshot.macros.find((macro) => macro.name === snapshot.selectedMacro) ?? null;
   const active = snapshot.status.kind !== "idle";
   const filtered = snapshot.macros.filter((macro) => macro.name.toLocaleLowerCase("fr").includes(query.trim().toLocaleLowerCase("fr")));
-  const recordingSelectedMacro = snapshot.status.kind === "recording" && snapshot.status.macroName === selected?.name;
+  const waitingAction = snapshot.status.kind === "waiting_for_foreground" ? snapshot.status.action : null;
+  const waitingForSelectedRecording = snapshot.status.kind === "waiting_for_foreground"
+    && snapshot.status.action === "recording"
+    && snapshot.status.macroName === selected?.name;
+  const recordingSelectedMacro = (snapshot.status.kind === "recording" && snapshot.status.macroName === selected?.name)
+    || waitingForSelectedRecording;
+  const recordingProgressPhase = snapshot.status.kind === "recording" ? snapshot.status.phase : waitingForSelectedRecording ? "waiting" : "";
+  const recordingProgressTitle = waitingForSelectedRecording
+    ? "En attente de Clash of Clans"
+    : snapshot.status.kind === "recording" && snapshot.status.phase === "preparing"
+      ? `Préparation · ${snapshot.status.countdownSeconds} s`
+      : "Capture des actions en cours";
+  const recordingProgressDetail = snapshot.status.kind === "waiting_for_foreground"
+    && snapshot.status.action === "recording"
+    && snapshot.status.macroName === selected?.name
+    ? "La préparation de 3 s commencera quand la fenêtre du jeu sera reconnue. Cette attente expire automatiquement au bout de 30 secondes."
+    : "La séquence sera actualisée à l’arrêt de l’enregistrement.";
+  const executionCopy = getExecutionCopy(snapshot.status, selected);
   const selectionVisible = filtered.some((macro) => macro.name === selected?.name);
 
   useEffect(() => {
@@ -264,27 +281,38 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
             <section className="sequence-section" aria-labelledby="sequence-title">
               <div className="section-heading-row">
                 <div><span className="section-kicker">Trace des actions</span><h2 id="sequence-title">La séquence</h2></div>
-                <button className="quiet-button" type="button" disabled={!online || !selected.readable || active || busy !== null} onClick={() => run("record", () => api.startRecording(), "Enregistrement démarré.")}><Icon name="record" size={14} />Enregistrer</button>
+                <button className="quiet-button" type="button" disabled={!online || !selected.readable || active || busy !== null} onClick={() => run("record", () => api.startRecording(), "Demande d’enregistrement envoyée.")}><Icon name="record" size={14} />Enregistrer</button>
               </div>
               <p className="recording-note">La préparation dure 3 s. À l’arrêt, les 3 dernières secondes sont retirées; une capture de 3 s ou moins laisse la macro vide.</p>
               <div className="sequence-panel">
-                {recordingSelectedMacro ? <div className="recording-progress"><span className={`recording-mark ${snapshot.status.kind === "recording" ? snapshot.status.phase : ""}`}><Icon name="record" size={17} /></span><div><strong>{snapshot.status.kind === "recording" && snapshot.status.phase === "preparing" ? `Préparation · ${snapshot.status.countdownSeconds} s` : "Capture des actions en cours"}</strong><span>La séquence sera actualisée à l’arrêt de l’enregistrement.</span></div></div> : selected.readable ? detailLoading ? <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div> : detailError ? <div className="sequence-failed">Impossible de charger le détail des événements.</div> : <Sequence key={selected.name} detail={detail} summary={selected} /> : null}
+                {recordingSelectedMacro ? (
+                  <div className="recording-progress">
+                    <span className={`recording-mark ${recordingProgressPhase}`}><Icon name="record" size={17} /></span>
+                    <div><strong>{recordingProgressTitle}</strong><span>{recordingProgressDetail}</span></div>
+                  </div>
+                ) : selected.readable ? detailLoading ? <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div> : detailError ? <div className="sequence-failed">Impossible de charger le détail des événements.</div> : <Sequence key={selected.name} detail={detail} summary={selected} /> : null}
               </div>
             </section>
 
             <section className="run-section" aria-label="Commandes de lecture">
-              <div className="run-copy">
+              <div
+                className="run-copy"
+                role={snapshot.status.kind === "waiting_for_foreground" ? "status" : undefined}
+                aria-atomic={snapshot.status.kind === "waiting_for_foreground" ? "true" : undefined}
+              >
                 <span className="section-kicker">Exécution</span>
-                <strong>{snapshot.status.kind === "recording" ? `Enregistrement de « ${snapshot.status.macroName} »` : snapshot.status.kind === "playing" ? `Lecture de « ${snapshot.status.macroName} »` : "Prêt à lancer"}</strong>
-                <span>{snapshot.status.kind === "recording" && snapshot.status.phase === "preparing" ? `La capture commence dans ${snapshot.status.countdownSeconds} s.` : snapshot.status.kind !== "idle" ? `Temps écoulé : ${formatDuration(snapshot.status.elapsedSeconds)}` : selected.eventCount ? "Les actions seront rejouées dans leur ordre enregistré." : "Enregistrez une séquence avant de la lancer."}</span>
+                <strong>{executionCopy.title}</strong>
+                <span>{executionCopy.detail}</span>
               </div>
               <div className="run-controls">
-                {snapshot.status.kind === "recording" ? (
+                {snapshot.status.kind === "waiting_for_foreground" ? (
+                  <button className="button stop-button" type="button" onClick={() => run(waitingAction === "recording" ? "cancel-recording-wait" : "cancel-playback-wait", () => waitingAction === "recording" ? api.stopRecording() : api.stopPlayback(), "Attente annulée.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Annuler l’attente</button>
+                ) : snapshot.status.kind === "recording" ? (
                   <button className="button copper" type="button" onClick={() => run("stop-recording", () => api.stopRecording(), "Enregistrement terminé. La séquence a été mise à jour.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Arrêter l’enregistrement</button>
                 ) : snapshot.status.kind === "playing" ? (
                   <button className="button stop-button" type="button" onClick={() => run("stop-playback", () => api.stopPlayback(), "Lecture arrêtée.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Arrêter la lecture</button>
                 ) : (
-                  <button className="button primary play-button" type="button" onClick={() => run("play", () => api.startPlayback(), "Lecture terminée.")} disabled={!online || !selected.readable || !selected.eventCount || busy !== null}><Icon name="play" size={15} />Lire la macro</button>
+                  <button className="button primary play-button" type="button" onClick={() => run("play", () => api.startPlayback(), "Demande de lecture envoyée.")} disabled={!online || !selected.readable || !selected.eventCount || busy !== null}><Icon name="play" size={15} />Lire la macro</button>
                 )}
               </div>
             </section>
@@ -298,7 +326,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               </label>
             </div>
             <div className="session-facts" aria-label="Statistiques de la session locale">
-              <span>{snapshot.status.kind === "playing" ? "Lecture en cours" : "Dernière session de lecture"}</span>
+              <span>{snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "playing" ? "Lecture en attente" : snapshot.status.kind === "playing" ? "Lecture en cours" : "Dernière session de lecture"}</span>
               <div><strong>{snapshot.session.cycles.toLocaleString("fr-FR")}</strong><small>cycles</small></div>
               <div><strong>{formatDuration(snapshot.session.elapsedSeconds)}</strong><small>temps de session</small></div>
             </div>
@@ -313,6 +341,37 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
 }
 
 function statusLabel(status: Snapshot["status"]): string {
+  if (status.kind === "waiting_for_foreground") return "En attente du jeu";
   if (status.kind === "recording") return status.phase === "preparing" ? "Préparation" : "Enregistrement";
   return status.kind === "playing" ? "Lecture en cours" : "En attente";
+}
+
+function getExecutionCopy(status: Snapshot["status"], selected: MacroSummary | null): { title: string; detail: string } {
+  if (status.kind === "waiting_for_foreground") {
+    const action = status.action === "recording" ? "Enregistrement" : "Lecture";
+    return {
+      title: `${action} en attente pour « ${status.macroName} »`,
+      detail: "Aucune action ne démarre avant la détection de Clash of Clans. L’attente expire automatiquement au bout de 30 secondes; utilisez « Annuler l’attente » pour l’interrompre plus tôt.",
+    };
+  }
+  if (status.kind === "recording") {
+    return {
+      title: `Enregistrement de « ${status.macroName} »`,
+      detail: status.phase === "preparing"
+        ? `La capture commence dans ${status.countdownSeconds} s.`
+        : `Temps écoulé : ${formatDuration(status.elapsedSeconds)}`,
+    };
+  }
+  if (status.kind === "playing") {
+    return {
+      title: `Lecture de « ${status.macroName} »`,
+      detail: `Temps écoulé : ${formatDuration(status.elapsedSeconds)}`,
+    };
+  }
+  return {
+    title: "Prêt à lancer",
+    detail: selected?.eventCount
+      ? "Les actions seront rejouées dans leur ordre enregistré."
+      : "Enregistrez une séquence avant de la lancer.",
+  };
 }

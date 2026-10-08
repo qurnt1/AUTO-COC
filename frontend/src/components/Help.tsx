@@ -4,7 +4,7 @@ import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
 
 const quickGuides = [
-  { title: "Créer et enregistrer", body: "Créez une macro, sélectionnez-la dans l’atelier, puis choisissez Enregistrer. Une préparation de 3 secondes précède la capture; les 3 dernières secondes sont retirées à l’arrêt. Si la capture dure 3 secondes ou moins, la macro reste vide." },
+  { title: "Créer et enregistrer", body: "Créez une macro, sélectionnez-la dans l’atelier, puis choisissez Enregistrer. Si la garde de premier plan est activée, le bouton attend au plus 30 secondes que la fenêtre Clash of Clans soit reconnue; la préparation de 3 secondes commence ensuite. Les 3 dernières secondes sont retirées à l’arrêt. Si la capture dure 3 secondes ou moins, la macro reste vide." },
   { title: "Relire ou arrêter", body: "Choisissez une macro lisible et lancez sa lecture depuis l’atelier. F1 lance la macro sélectionnée à l’arrêt et stoppe une lecture active. Pendant un enregistrement, F1 ne fait rien; le raccourci Lire démarre uniquement à l’arrêt et le raccourci Arrêter termine la lecture ou finalise l’enregistrement." },
   { title: "Régler les raccourcis", body: "Ouvrez Réglages puis Raccourcis. Cliquez sur Modifier, appuyez sur une touche ou une combinaison, puis enregistrez." },
 ];
@@ -130,7 +130,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
             <h2>Vos données restent sur ce PC</h2>
             <p>AUTO-COC est une application Tauri : son backend Rust fait partie de l’application et fonctionne sur ce PC. Aucun service distinct n’est à lancer. Le token Telegram n’est jamais affiché dans l’aide ni dans les diagnostics.</p>
             <p>Tant qu’AUTO-COC est ouvert, ses raccourcis globaux et ses hooks Windows clavier/souris restent actifs. Hors d’un enregistrement démarré explicitement avec le bouton Enregistrer, aucun événement n’est ajouté à une macro. Après le délai de préparation de 3 secondes, les événements capturés sont sauvegardés dans la macro à l’arrêt.</p>
-            <p>Si « Exiger Clash of Clans au premier plan » est activé dans Réglages &gt; Général, la lecture et la capture ne démarrent que lorsque le jeu est au premier plan. Si le jeu perd le focus ou se ferme, l’action en cours s’arrête sans reprise automatique.</p>
+            <p>Si « Exiger Clash of Clans au premier plan » est activé dans Réglages &gt; Général, les boutons de l’atelier peuvent attendre jusqu’à 30 secondes la fenêtre Clash of Clans reconnue par AUTO-COC. Les raccourcis globaux et Telegram restent immédiats: ils ne mettent aucune action en attente hors premier plan. Pendant une opération, la garde surveille la fenêtre Windows et son processus hôte crosvm; elle arrête l’opération si l’un des deux disparaît ou si la fenêtre perd le premier plan, sans reprise automatique. Un crash du jeu Android peut ne pas être visible si la fenêtre crosvm reste ouverte avec le même titre.</p>
             <p>Pour fermer AUTO-COC et désactiver ses raccourcis globaux, utilisez Réglages &gt; Outils de cet ordinateur &gt; Quitter AUTO-COC ou fermez complètement la fenêtre. Arrêtez tout enregistrement ou replay en cours avant de quitter.</p>
           </section>
         </aside>

@@ -157,6 +157,8 @@ button:disabled { cursor: not-allowed; }
 .state-recording i { border-color: var(--recording); background: var(--recording); animation: state-pulse 1.7s ease-in-out infinite; }
 .state-playing { color: var(--success); }
 .state-playing i { border-color: var(--success); background: var(--success); }
+.state-waiting_for_foreground { color: var(--accent-ink); }
+.state-waiting_for_foreground i { border-color: var(--accent); background: var(--accent); animation: state-pulse 1.7s ease-in-out infinite; }
 .topbar-protected { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
 .macro-heading { padding: 42px 0 22px; border-bottom: 1px solid var(--line-soft); }
 .macro-title-line { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
@@ -217,6 +219,8 @@ h1, h2, h3, p { margin-top: 0; }
 .recording-progress { display: flex; min-height: 151px; align-items: center; justify-content: center; gap: 13px; padding: 18px; }
 .recording-mark { display: inline-grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; border: 1px solid var(--recording-border); border-radius: 50%; color: var(--recording); background: var(--recording-soft); }
 .recording-mark.capturing { animation: state-pulse 1.7s ease-in-out infinite; }
+.recording-mark.waiting { border-color: var(--accent-border); color: var(--accent-ink); background: var(--accent-soft); }
+.recording-mark.waiting + div strong { color: var(--accent-ink); }
 .recording-progress > div { display: grid; gap: 5px; }
 .recording-progress strong { color: var(--recording); font-size: 12px; }
 .recording-progress > div > span { color: var(--muted); font-size: 10px; line-height: 1.5; }

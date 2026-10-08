@@ -177,7 +177,7 @@ impl NativeInput {
 
     pub async fn start_playback(
         &self,
-        steps: Vec<Value>,
+        steps: &[Value],
         looped: bool,
         require_coc_foreground: bool,
     ) -> io::Result<u64> {
@@ -1031,11 +1031,11 @@ mod win {
 
         pub async fn start_playback(
             &self,
-            steps: Vec<Value>,
+            steps: &[Value],
             looped: bool,
             require_coc_foreground: bool,
         ) -> io::Result<u64> {
-            let parsed = parse_steps(&steps)?;
+            let parsed = parse_steps(steps)?;
             if require_coc_foreground {
                 ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
             }

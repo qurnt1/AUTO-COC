@@ -15,8 +15,8 @@ use crate::{
     native_input::{NativeEvent, NativeInput, PlaybackFailure},
     storage::{Store, StoreError},
     types::{
-        AppStatus, MigrationPreview, MigrationResult, MigrationStatus, RecordingPhase,
-        SessionStatus, Snapshot, TelegramStatus,
+        AppStatus, MigrationPreview, MigrationResult, MigrationStatus, PendingAction,
+        RecordingPhase, SessionStatus, Snapshot, TelegramStatus,
     },
 };
 
@@ -24,6 +24,19 @@ const PAIRING_LIFETIME: Duration = Duration::from_secs(300);
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const SHUTDOWN_CONFIRM_LIFETIME: Duration = Duration::from_secs(30);
+const FOREGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug)]
+enum PendingOperation {
+    Recording {
+        macro_name: String,
+    },
+    Playing {
+        macro_name: String,
+        steps: Arc<Vec<Value>>,
+        looped: bool,
+    },
+}
 
 #[derive(Debug, Error)]
 pub enum ControllerError {
@@ -68,6 +81,10 @@ enum Operation {
     Idle,
     Recording {
         macro_name: String,
+        started: Instant,
+    },
+    WaitingForForeground {
+        pending: PendingOperation,
         started: Instant,
     },
     Playing {
@@ -259,7 +276,17 @@ impl Controller {
                     Operation::Playing { .. } => {
                         self.stop_playback().await?;
                     }
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::Playing { .. },
+                        ..
+                    } => {
+                        self.stop_playback().await?;
+                    }
                     Operation::Recording { .. } => {}
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::Recording { .. },
+                        ..
+                    } => {}
                 }
             }
             NativeEvent::Play => {
@@ -273,7 +300,19 @@ impl Controller {
                     Operation::Recording { .. } => {
                         self.stop_recording().await?;
                     }
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::Recording { .. },
+                        ..
+                    } => {
+                        self.stop_recording().await?;
+                    }
                     Operation::Playing { .. } => {
+                        self.stop_playback().await?;
+                    }
+                    Operation::WaitingForForeground {
+                        pending: PendingOperation::Playing { .. },
+                        ..
+                    } => {
                         self.stop_playback().await?;
                     }
                     Operation::Idle => {}
@@ -335,7 +374,7 @@ impl Controller {
     async fn monitor_coc_foreground(&self) {
         let operation = {
             let machine = self.machine.lock().await;
-            if !machine.store.settings().require_coc_foreground {
+            if machine.closing || !machine.store.settings().require_coc_foreground {
                 return;
             }
             if machine.foreground_loss_handled
@@ -345,9 +384,16 @@ impl Controller {
             }
             match &machine.operation {
                 Operation::Recording { .. } => machine.operation.clone(),
+                Operation::WaitingForForeground { .. } => machine.operation.clone(),
                 Operation::Idle | Operation::Playing { .. } => return,
             }
         };
+
+        if matches!(operation, Operation::WaitingForForeground { .. }) {
+            self.monitor_waiting_operation(operation).await;
+            return;
+        }
+
         let foreground = self
             .native
             .lock()
@@ -382,6 +428,92 @@ impl Controller {
         let _ = self.changed(&mut machine).await;
     }
 
+    async fn monitor_waiting_operation(&self, operation: Operation) {
+        let Operation::WaitingForForeground { started, .. } = &operation else {
+            return;
+        };
+        if started.elapsed() >= FOREGROUND_WAIT_TIMEOUT {
+            let mut machine = self.machine.lock().await;
+            if same_operation(&machine.operation, &operation) {
+                machine.operation = Operation::Idle;
+                machine.last_error = Some(
+                    "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. L’action a été annulée.".into(),
+                );
+                let _ = self.changed(&mut machine).await;
+            }
+            return;
+        }
+
+        let foreground = self
+            .native
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(NativeInput::coc_is_foreground);
+        if !foreground {
+            return;
+        }
+
+        let mut machine = self.machine.lock().await;
+        if machine.closing
+            || !machine.store.settings().require_coc_foreground
+            || !same_operation(&machine.operation, &operation)
+        {
+            return;
+        }
+        if matches!(
+            &machine.operation,
+            Operation::WaitingForForeground { started, .. }
+                if started.elapsed() >= FOREGROUND_WAIT_TIMEOUT
+        ) {
+            machine.operation = Operation::Idle;
+            machine.last_error = Some(
+                "Clash of Clans n’a pas été reconnu au premier plan dans les 30 secondes. L’action a été annulée.".into(),
+            );
+            let _ = self.changed(&mut machine).await;
+            return;
+        }
+        let Operation::WaitingForForeground { pending, .. } = operation else {
+            return;
+        };
+        let native_slot = self.native.lock().await;
+        let Some(native) = native_slot.as_ref() else {
+            machine.operation = Operation::Idle;
+            machine.last_error = Some("Le clavier et la souris ne sont pas disponibles.".into());
+            let _ = self.changed(&mut machine).await;
+            return;
+        };
+
+        let playback_id = match &pending {
+            PendingOperation::Recording { .. } => match native.start_recording(true).await {
+                Ok(()) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(_) => {
+                    machine.operation = Operation::Idle;
+                    machine.last_error = Some("L’enregistrement n’a pas pu démarrer.".into());
+                    let _ = self.changed(&mut machine).await;
+                    return;
+                }
+            },
+            PendingOperation::Playing { steps, looped, .. } => {
+                match native.start_playback(steps.as_slice(), *looped, true).await {
+                    Ok(playback_id) => Some(playback_id),
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                    Err(_) => {
+                        machine.operation = Operation::Idle;
+                        machine.last_error = Some("La lecture n’a pas pu démarrer.".into());
+                        let _ = self.changed(&mut machine).await;
+                        return;
+                    }
+                }
+            }
+        };
+
+        if activate_pending_operation(&mut machine, pending, playback_id) {
+            let _ = self.changed(&mut machine).await;
+        }
+    }
+
     pub async fn shutdown_services(&self) -> Result<(), ControllerError> {
         let operation = {
             let mut machine = self.machine.lock().await;
@@ -408,6 +540,14 @@ impl Controller {
         let stopped = match operation {
             Operation::Recording { .. } => self.stop_recording().await.map(|_| ()),
             Operation::Playing { .. } => self.stop_playback().await.map(|_| ()),
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Recording { .. },
+                ..
+            } => self.stop_recording().await.map(|_| ()),
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Playing { .. },
+                ..
+            } => self.stop_playback().await.map(|_| ()),
             Operation::Idle => Ok(()),
         };
         if let Err(error) = stopped {
@@ -665,7 +805,7 @@ impl Controller {
         Ok((snapshot, result))
     }
 
-    pub async fn start_recording(&self) -> Result<Snapshot, ControllerError> {
+    pub async fn start_recording_from_ui(&self) -> Result<Snapshot, ControllerError> {
         let mut machine = self.machine.lock().await;
         ensure_idle(&machine)?;
         let macro_name = machine
@@ -678,14 +818,19 @@ impl Controller {
         let native = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?;
-        ensure_start_foreground(
-            require_coc_foreground,
-            !require_coc_foreground || native.coc_is_foreground(),
-        )?;
-        native
-            .start_recording(require_coc_foreground)
-            .await
-            .map_err(map_native_error)?;
+        let foreground = !require_coc_foreground || native.coc_is_foreground();
+        if require_coc_foreground && !foreground {
+            arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
+            return self.changed(&mut machine).await;
+        }
+        ensure_start_foreground(require_coc_foreground, foreground)?;
+        if let Err(error) = native.start_recording(require_coc_foreground).await {
+            if require_coc_foreground && error.kind() == std::io::ErrorKind::PermissionDenied {
+                arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
+                return self.changed(&mut machine).await;
+            }
+            return Err(map_native_error(error));
+        }
         machine.operation = Operation::Recording {
             macro_name,
             started: Instant::now(),
@@ -706,6 +851,18 @@ impl Controller {
         let mut machine = self.machine.lock().await;
         if let Some((token, owner)) = authority {
             ensure_telegram_authorized(&machine, token, owner)?;
+        }
+        if matches!(
+            machine.operation,
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Recording { .. },
+                ..
+            }
+        ) {
+            machine.operation = Operation::Idle;
+            machine.last_error = None;
+            machine.foreground_loss_handled = false;
+            return self.changed(&mut machine).await;
         }
         let Operation::Recording { macro_name, .. } = machine.operation.clone() else {
             return Err(ControllerError::InvalidState);
@@ -744,7 +901,11 @@ impl Controller {
     }
 
     pub async fn start_playback(&self) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(None, true, None).await
+        self.start_macro_playback(None, true, None, false).await
+    }
+
+    pub async fn start_playback_from_ui(&self) -> Result<Snapshot, ControllerError> {
+        self.start_macro_playback(None, true, None, true).await
     }
 
     pub async fn start_playback_for_telegram(
@@ -752,7 +913,7 @@ impl Controller {
         token: &str,
         owner: crate::telegram::TelegramOwner,
     ) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(None, true, Some((token, owner)))
+        self.start_macro_playback(None, true, Some((token, owner)), false)
             .await
     }
 
@@ -762,7 +923,7 @@ impl Controller {
         token: &str,
         owner: crate::telegram::TelegramOwner,
     ) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(Some(name), false, Some((token, owner)))
+        self.start_macro_playback(Some(name), false, Some((token, owner)), false)
             .await
     }
 
@@ -771,6 +932,7 @@ impl Controller {
         requested_name: Option<&str>,
         use_saved_loop: bool,
         authority: Option<(&str, crate::telegram::TelegramOwner)>,
+        allow_wait: bool,
     ) -> Result<Snapshot, ControllerError> {
         let mut machine = self.machine.lock().await;
         if let Some((token, owner)) = authority {
@@ -786,20 +948,49 @@ impl Controller {
             return Err(ControllerError::EmptyMacro);
         }
         let macro_name = name.to_owned();
+        let steps = Arc::new(macro_file.steps);
         let looped = use_saved_loop && machine.store.settings().loop_playback;
         let require_coc_foreground = machine.store.settings().require_coc_foreground;
         let native = self.native.lock().await;
         let native = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?;
-        ensure_start_foreground(
-            require_coc_foreground,
-            !require_coc_foreground || native.coc_is_foreground(),
-        )?;
-        let playback_id = native
-            .start_playback(macro_file.steps, looped, require_coc_foreground)
+        let foreground = !require_coc_foreground || native.coc_is_foreground();
+        if require_coc_foreground && !foreground && allow_wait {
+            arm_for_foreground(
+                &mut machine,
+                PendingOperation::Playing {
+                    macro_name,
+                    steps: Arc::clone(&steps),
+                    looped,
+                },
+            );
+            return self.changed(&mut machine).await;
+        }
+        ensure_start_foreground(require_coc_foreground, foreground)?;
+        let pending = (allow_wait && require_coc_foreground).then(|| PendingOperation::Playing {
+            macro_name: macro_name.clone(),
+            steps: Arc::clone(&steps),
+            looped,
+        });
+        let playback_id = match native
+            .start_playback(steps.as_slice(), looped, require_coc_foreground)
             .await
-            .map_err(map_native_error)?;
+        {
+            Ok(playback_id) => playback_id,
+            Err(error)
+                if allow_wait
+                    && require_coc_foreground
+                    && error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                if let Some(pending) = pending {
+                    arm_for_foreground(&mut machine, pending);
+                    return self.changed(&mut machine).await;
+                }
+                return Err(map_native_error(error));
+            }
+            Err(error) => return Err(map_native_error(error)),
+        };
         machine.operation = Operation::Playing {
             macro_name,
             started: Instant::now(),
@@ -827,6 +1018,20 @@ impl Controller {
                     .await
             }
             Operation::Playing { .. } => {
+                self.stop_playback_with_authority(Some((token, owner)))
+                    .await
+            }
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Recording { .. },
+                ..
+            } => {
+                self.stop_recording_with_authority(Some((token, owner)))
+                    .await
+            }
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Playing { .. },
+                ..
+            } => {
                 self.stop_playback_with_authority(Some((token, owner)))
                     .await
             }
@@ -969,6 +1174,18 @@ impl Controller {
         let mut machine = self.machine.lock().await;
         if let Some((token, owner)) = authority {
             ensure_telegram_authorized(&machine, token, owner)?;
+        }
+        if matches!(
+            machine.operation,
+            Operation::WaitingForForeground {
+                pending: PendingOperation::Playing { .. },
+                ..
+            }
+        ) {
+            machine.operation = Operation::Idle;
+            machine.last_error = None;
+            machine.foreground_loss_handled = false;
+            return self.changed(&mut machine).await;
         }
         if !matches!(machine.operation, Operation::Playing { .. }) {
             return Err(ControllerError::InvalidState);
@@ -1278,6 +1495,16 @@ impl Controller {
     async fn snapshot_of(machine: &Machine) -> Result<Snapshot, ControllerError> {
         let (status, elapsed) = match &machine.operation {
             Operation::Idle => (AppStatus::Idle, 0.0),
+            Operation::WaitingForForeground { pending, .. } => (
+                AppStatus::WaitingForForeground {
+                    action: match pending {
+                        PendingOperation::Recording { .. } => PendingAction::Recording,
+                        PendingOperation::Playing { .. } => PendingAction::Playing,
+                    },
+                    macro_name: pending.macro_name().to_owned(),
+                },
+                0.0,
+            ),
             Operation::Recording {
                 macro_name,
                 started,
@@ -1366,6 +1593,14 @@ fn ensure_start_foreground(required: bool, foreground: bool) -> Result<(), Contr
 
 fn same_operation(current: &Operation, expected: &Operation) -> bool {
     match (current, expected) {
+        (
+            Operation::WaitingForForeground {
+                started: current, ..
+            },
+            Operation::WaitingForForeground {
+                started: expected, ..
+            },
+        ) => current == expected,
         (
             Operation::Recording {
                 started: current, ..
@@ -1456,9 +1691,53 @@ fn consume_shutdown_confirmation(
 fn state_label(state: &Operation) -> &'static str {
     match state {
         Operation::Idle => "idle",
+        Operation::WaitingForForeground { .. } => "waiting_for_foreground",
         Operation::Recording { .. } => "recording",
         Operation::Playing { .. } => "playing",
     }
+}
+
+fn arm_for_foreground(machine: &mut Machine, pending: PendingOperation) {
+    machine.operation = Operation::WaitingForForeground {
+        pending,
+        started: Instant::now(),
+    };
+    machine.foreground_loss_handled = false;
+    machine.last_error = None;
+}
+
+impl PendingOperation {
+    fn macro_name(&self) -> &str {
+        match self {
+            Self::Recording { macro_name } | Self::Playing { macro_name, .. } => macro_name,
+        }
+    }
+}
+
+fn activate_pending_operation(
+    machine: &mut Machine,
+    pending: PendingOperation,
+    playback_id: Option<u64>,
+) -> bool {
+    let started = Instant::now();
+    machine.operation = match (pending, playback_id) {
+        (PendingOperation::Recording { macro_name }, _) => Operation::Recording {
+            macro_name,
+            started,
+        },
+        (PendingOperation::Playing { .. }, None) => return false,
+        (PendingOperation::Playing { macro_name, .. }, Some(playback_id)) => Operation::Playing {
+            macro_name,
+            started,
+            playback_id,
+        },
+    };
+    if matches!(machine.operation, Operation::Playing { .. }) {
+        machine.cycles = 0;
+    }
+    machine.foreground_loss_handled = false;
+    machine.last_error = None;
+    true
 }
 
 fn save_pending_recording(machine: &mut Machine) -> Result<bool, ControllerError> {
@@ -1554,6 +1833,209 @@ mod tests {
                 .unwrap(),
             &partial
         );
+    }
+
+    #[tokio::test]
+    async fn waiting_status_is_distinct_and_transitions_to_recording_preparation() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Wait for COC").unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::WaitingForForeground {
+                pending: PendingOperation::Recording {
+                    macro_name: "Wait for COC".into(),
+                },
+                started: Instant::now(),
+            };
+        }
+
+        let waiting = controller.snapshot().await.unwrap();
+        assert!(matches!(
+            waiting.status,
+            AppStatus::WaitingForForeground {
+                action: PendingAction::Recording,
+                ..
+            }
+        ));
+        assert_eq!(waiting.session.elapsed_seconds, 0.0);
+        let serialized = serde_json::to_value(waiting.status).unwrap();
+        assert_eq!(serialized["kind"], "waiting_for_foreground");
+        assert_eq!(serialized["action"], "recording");
+
+        {
+            let mut machine = controller.machine.lock().await;
+            let Operation::WaitingForForeground { pending, .. } = machine.operation.clone() else {
+                panic!("recording should still be waiting");
+            };
+            assert!(activate_pending_operation(&mut machine, pending, None));
+        }
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Recording {
+                phase: RecordingPhase::Preparing,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn waiting_playback_transitions_only_with_a_native_playback_id() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        {
+            let mut machine = controller.machine.lock().await;
+            let pending = PendingOperation::Playing {
+                macro_name: "Read later".into(),
+                steps: Arc::new(vec![serde_json::json!({"t":0.0,"type":"nop","data":{}})]),
+                looped: false,
+            };
+            assert!(!activate_pending_operation(
+                &mut machine,
+                pending.clone(),
+                None
+            ));
+            machine.operation = Operation::WaitingForForeground {
+                pending: pending.clone(),
+                started: Instant::now(),
+            };
+            assert!(activate_pending_operation(&mut machine, pending, Some(27)));
+        }
+
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Playing { .. }
+        ));
+        assert!(matches!(
+            controller.machine.lock().await.operation,
+            Operation::Playing {
+                playback_id: 27,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_recording_preserves_the_existing_macro() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Keep me").unwrap();
+        let original = vec![serde_json::json!({"t":0.25,"type":"nop","data":{}})];
+        store.save_recorded_steps("Keep me", &original).unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::Recording {
+                macro_name: "Keep me".into(),
+            },
+            started: Instant::now(),
+        };
+
+        controller.stop_recording().await.unwrap();
+
+        let machine = controller.machine.lock().await;
+        assert!(matches!(machine.operation, Operation::Idle));
+        assert_eq!(machine.store.get_macro("Keep me").unwrap().steps, original);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_recording_without_replacing_the_macro() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Keep on exit").unwrap();
+        let original = vec![serde_json::json!({"t":0.5,"type":"nop","data":{}})];
+        store
+            .save_recorded_steps("Keep on exit", &original)
+            .unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::Recording {
+                macro_name: "Keep on exit".into(),
+            },
+            started: Instant::now(),
+        };
+
+        controller.shutdown_services().await.unwrap();
+
+        let machine = controller.machine.lock().await;
+        assert!(machine.shutdown_complete);
+        assert!(matches!(machine.operation, Operation::Idle));
+        assert_eq!(
+            machine.store.get_macro("Keep on exit").unwrap().steps,
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_playback_toggle_and_stop_cancel_without_starting_input() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Read later").unwrap();
+        store
+            .save_recorded_steps(
+                "Read later",
+                &[serde_json::json!({"t":0.0,"type":"nop","data":{}})],
+            )
+            .unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::Playing {
+                macro_name: "Read later".into(),
+                steps: Arc::new(vec![serde_json::json!({"t":0.0,"type":"nop","data":{}})]),
+                looped: false,
+            },
+            started: Instant::now(),
+        };
+
+        controller
+            .handle_native_event(NativeEvent::Toggle)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Idle
+        ));
+
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::Recording {
+                macro_name: "Read later".into(),
+            },
+            started: Instant::now(),
+        };
+        controller
+            .handle_native_event(NativeEvent::Stop)
+            .await
+            .unwrap();
+        assert!(matches!(
+            controller.snapshot().await.unwrap().status,
+            AppStatus::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_foreground_wait_expires_instead_of_starting_later() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Wait briefly").unwrap();
+        store.update_settings(None, None, Some(true)).unwrap();
+        let controller = Controller::new(store);
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::Recording {
+                macro_name: "Wait briefly".into(),
+            },
+            started: Instant::now() - FOREGROUND_WAIT_TIMEOUT - Duration::from_millis(1),
+        };
+
+        controller.monitor_coc_foreground().await;
+
+        let snapshot = controller.snapshot().await.unwrap();
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert!(snapshot.last_error.unwrap().contains("30 secondes"));
     }
 
     #[test]
@@ -2266,6 +2748,50 @@ mod tests {
                 .await,
             Err(ControllerError::TelegramUnauthorized)
         ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn telegram_stop_cancels_pending_recording_without_replacing_macro() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Telegram wait").unwrap();
+        let original = vec![serde_json::json!({"t":0.2,"type":"nop","data":{}})];
+        store
+            .save_recorded_steps("Telegram wait", &original)
+            .unwrap();
+        let controller = Controller::new(store);
+        let token = "000000000000000000000000000000001";
+        let owner = crate::telegram::TelegramOwner {
+            chat_id: 100,
+            user_id: 200,
+        };
+        controller.configure_telegram(Some(token)).await.unwrap();
+        let (code, _, _) = controller.start_pairing().await.unwrap();
+        assert!(
+            controller
+                .attempt_telegram_pairing(token, &code, 100, 200, true)
+                .await
+                .unwrap()
+        );
+        controller.machine.lock().await.operation = Operation::WaitingForForeground {
+            pending: PendingOperation::Recording {
+                macro_name: "Telegram wait".into(),
+            },
+            started: Instant::now(),
+        };
+
+        controller
+            .stop_active_operation(token, owner)
+            .await
+            .unwrap();
+
+        let machine = controller.machine.lock().await;
+        assert!(matches!(machine.operation, Operation::Idle));
+        assert_eq!(
+            machine.store.get_macro("Telegram wait").unwrap().steps,
+            original
+        );
     }
 
     #[tokio::test]

@@ -53,12 +53,12 @@ describe("Settings safety option", () => {
     }));
   }
 
-  it("explains automatic stop without resuming and reflects the saved value", () => {
+  it("explains the host-window guard and its Android crash limit", () => {
     const html = renderSettings(true);
 
     expect(html).toContain("Exiger Clash of Clans au premier plan");
-    expect(html).toContain("La lecture et la capture ne démarrent que lorsque le jeu est au premier plan.");
-    expect(html).toContain("S’il est fermé ou perd le premier plan, l’action en cours s’arrête sans reprise automatique.");
+    expect(html).toContain("La garde surveille la fenêtre Windows reconnue et son processus hôte crosvm.");
+    expect(html).toContain("Un crash du jeu Android peut passer inaperçu si la fenêtre crosvm reste ouverte avec le même titre.");
     expect(html).toContain('type="checkbox" checked=""');
   });
 

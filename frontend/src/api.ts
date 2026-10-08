@@ -22,6 +22,7 @@ export type ActionRunner = <T>(label: string, action: () => Promise<T>, message?
 
 export type AppStatus =
   | { kind: "idle" }
+  | { kind: "waiting_for_foreground"; action: "recording" | "playing"; macroName: string }
   | { kind: "recording"; macroName: string; elapsedSeconds: number; phase: "preparing" | "capturing"; countdownSeconds: number }
   | { kind: "playing"; macroName: string; elapsedSeconds: number };
 

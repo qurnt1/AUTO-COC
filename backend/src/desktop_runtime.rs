@@ -90,7 +90,7 @@ impl DesktopRuntime {
     }
 
     pub async fn start_recording(&self) -> Result<Snapshot, DesktopRuntimeError> {
-        Ok(self.controller.start_recording().await?)
+        Ok(self.controller.start_recording_from_ui().await?)
     }
 
     pub async fn stop_recording(&self) -> Result<Snapshot, DesktopRuntimeError> {
@@ -98,7 +98,7 @@ impl DesktopRuntime {
     }
 
     pub async fn start_playback(&self) -> Result<Snapshot, DesktopRuntimeError> {
-        Ok(self.controller.start_playback().await?)
+        Ok(self.controller.start_playback_from_ui().await?)
     }
 
     pub async fn stop_playback(&self) -> Result<Snapshot, DesktopRuntimeError> {
