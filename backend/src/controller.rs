@@ -244,11 +244,12 @@ impl Controller {
                 let Some(controller) = controller.upgrade() else {
                     break;
                 };
-                if controller.handle_native_event(event).await.is_err() {
+                if let Err(error) = controller.handle_native_event(event).await {
                     let mut machine = controller.machine.lock().await;
-                    if machine.last_error.is_none() {
-                        machine.last_error =
-                            Some("Une action clavier n’a pas pu être exécutée.".into());
+                    if let Some(message) =
+                        native_event_error_message(&error, machine.last_error.is_some())
+                    {
+                        machine.last_error = Some(message.into());
                     }
                     let _ = controller.changed(&mut machine).await;
                 }
@@ -1763,6 +1764,19 @@ fn map_native_error(error: std::io::Error) -> ControllerError {
     }
 }
 
+fn native_event_error_message(
+    error: &ControllerError,
+    has_existing_error: bool,
+) -> Option<&'static str> {
+    match error {
+        ControllerError::CocNotForeground => Some(
+            "Affichez Clash of Clans au premier plan avant de démarrer une macro avec un raccourci.",
+        ),
+        _ if !has_existing_error => Some("Une action clavier n’a pas pu être exécutée."),
+        _ => None,
+    }
+}
+
 fn map_shortcut_error(error: std::io::Error) -> ControllerError {
     match error.kind() {
         std::io::ErrorKind::InvalidInput => ControllerError::InvalidShortcut,
@@ -1798,6 +1812,24 @@ mod tests {
         ));
         assert!(ensure_start_foreground(true, true).is_ok());
         assert!(ensure_start_foreground(false, false).is_ok());
+    }
+
+    #[test]
+    fn native_event_error_preserves_specific_and_existing_messages() {
+        assert_eq!(
+            native_event_error_message(&ControllerError::CocNotForeground, true),
+            Some(
+                "Affichez Clash of Clans au premier plan avant de démarrer une macro avec un raccourci."
+            )
+        );
+        assert_eq!(
+            native_event_error_message(&ControllerError::InvalidState, true),
+            None
+        );
+        assert_eq!(
+            native_event_error_message(&ControllerError::InvalidState, false),
+            Some("Une action clavier n’a pas pu être exécutée.")
+        );
     }
 
     #[tokio::test]

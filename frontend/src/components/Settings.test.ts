@@ -42,16 +42,28 @@ describe("normalizeShortcut", () => {
   });
 });
 
-describe("Settings safety option", () => {
-  function renderSettings(requireCocForeground: boolean) {
+describe("Settings", () => {
+  function renderSettings(requireCocForeground: boolean, initialTab: "general" | "shortcuts" = "general") {
     return renderToStaticMarkup(createElement(Settings, {
       api: {} as BackendClient,
       snapshot: { ...snapshot, settings: { ...snapshot.settings, requireCocForeground } },
       busy: null,
       run: (async (_label, action) => action()) as ActionRunner,
       online: true,
+      initialTab,
     }));
   }
+
+  it("gives each shortcut action a distinct accessible name", () => {
+    const html = renderSettings(true, "shortcuts");
+    const names = [...html.matchAll(/aria-label="(Modifier le raccourci [^"]+)"/g)].map((match) => match[1]);
+
+    expect(names).toEqual([
+      "Modifier le raccourci Basculer lecture / arrêt",
+      "Modifier le raccourci Lire la macro",
+      "Modifier le raccourci Arrêter",
+    ]);
+  });
 
   it("explains the host-window guard and its Android crash limit", () => {
     const html = renderSettings(true);

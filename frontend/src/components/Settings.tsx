@@ -4,7 +4,7 @@ import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
 import { normalizeShortcut } from "./normalizeShortcut";
 
-type Props = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean };
+type Props = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; initialTab?: SettingsTab };
 type SettingsTab = "general" | "shortcuts" | "telegram" | "system";
 type ShortcutName = keyof Snapshot["settings"]["shortcuts"];
 type PairingCode = Pick<PairingPreparation, "code" | "expiresAt">;
@@ -22,8 +22,8 @@ function telegramTone(status: Snapshot["settings"]["telegram"]["status"]): strin
   return status === "connected" ? "good" : status === "error" ? "bad" : status === "waiting_pairing" ? "copper" : "neutral";
 }
 
-export function Settings({ api, snapshot, busy, run, online }: Props) {
-  const [tab, setTab] = useState<SettingsTab>("general");
+export function Settings({ api, snapshot, busy, run, online, initialTab = "general" }: Props) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [path, setPath] = useState(snapshot.settings.cocPath);
   const [shortcuts, setShortcuts] = useState(snapshot.settings.shortcuts);
   const [capturing, setCapturing] = useState<ShortcutName | null>(null);
@@ -176,7 +176,7 @@ export function Settings({ api, snapshot, busy, run, online }: Props) {
                     <div className="setting-row-copy"><strong>{shortcutLabels[key]}</strong><span>{key === "toggle" ? "Passe de la lecture à l’arrêt." : key === "play" ? "Lance la macro sélectionnée." : "Interrompt l’action en cours."}</span></div>
                     <div className="shortcut-edit">
                       <kbd className={capturing === key ? "capture-active" : ""}>{capturing === key ? "Appuyez sur les touches…" : shortcuts[key]}</kbd>
-                      <button className="button quiet" type="button" onClick={() => { setShortcutError(""); setCapturing(key); }} disabled={!shortcutsEditable || capturing !== null}>{capturing === key ? "Écoute…" : "Modifier"}</button>
+                      <button className="button quiet" type="button" aria-label={`Modifier le raccourci ${shortcutLabels[key]}`} onClick={() => { setShortcutError(""); setCapturing(key); }} disabled={!shortcutsEditable || capturing !== null}>{capturing === key ? "Écoute…" : "Modifier"}</button>
                     </div>
                   </div>
                 ))}
