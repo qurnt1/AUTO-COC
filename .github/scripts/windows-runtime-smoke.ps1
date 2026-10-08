@@ -499,10 +499,56 @@ finally {
                 elseif ($uninstallerProcess.ExitCode -ne 0) {
                     $uninstallFailure = "NSIS uninstaller exited with code $($uninstallerProcess.ExitCode)."
                 }
-                elseif (Test-Path -LiteralPath $installDir) {
-                    $uninstallFailure = "NSIS uninstaller exited successfully but left the installation directory: '$installDir'."
-                }
                 else {
+                    $runnerTempFull = Get-NormalizedFullPath -Path $runnerTemp
+                    $smokeRootFull = Get-NormalizedFullPath -Path $smokeRoot
+                    $installDirFull = Get-NormalizedFullPath -Path $installDir
+                    $uninstallerFull = Get-NormalizedFullPath -Path $uninstallers[0].FullName
+                    if ((Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($smokeRootFull))) -ine $runnerTempFull -or
+                        (Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($installDirFull))) -ine $smokeRootFull -or
+                        (Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($uninstallerFull))) -ine $installDirFull) {
+                        throw "Refusing NSIS cleanup outside the isolated RUNNER_TEMP install path: '$installDirFull'."
+                    }
+
+                    $installDirItem = $null
+                    try {
+                        $installDirItem = Get-Item -Force -LiteralPath $installDirFull -ErrorAction Stop
+                    }
+                    catch {
+                        if ($_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                            throw
+                        }
+                    }
+
+                    if ($null -ne $installDirItem) {
+                        $smokeRootItem = Get-Item -Force -LiteralPath $smokeRootFull
+                        if (-not $smokeRootItem.PSIsContainer -or
+                            ($smokeRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                            -not $installDirItem.PSIsContainer -or
+                            ($installDirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                            throw "Refusing to inspect or remove a non-directory or reparse-point smoke install path: '$installDirFull'."
+                        }
+
+                        $remainingEntries = @(Get-ChildItem -LiteralPath $installDirFull -Force)
+                        if ($remainingEntries.Count -eq 1 -and
+                            -not $remainingEntries[0].PSIsContainer -and
+                            (Get-NormalizedFullPath -Path $remainingEntries[0].FullName) -ieq $uninstallerFull -and
+                            ($remainingEntries[0].Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                            Remove-Item -LiteralPath $uninstallerFull -Force
+                            $remainingEntries = @(Get-ChildItem -LiteralPath $installDirFull -Force)
+                        }
+
+                        if ($remainingEntries.Count -gt 0) {
+                            $remainingListing = ($remainingEntries | Sort-Object FullName | ForEach-Object { $_.FullName }) -join [Environment]::NewLine
+                            throw "NSIS uninstaller exited successfully but left unexpected entries under '$installDirFull':`n$remainingListing"
+                        }
+
+                        [System.IO.Directory]::Delete($installDirFull, $false)
+                        if (Test-Path -LiteralPath $installDirFull) {
+                            throw "The isolated NSIS install path remains after non-recursive removal: '$installDirFull'."
+                        }
+                    }
+
                     $uninstallVerified = $true
                     Write-Host 'NSIS uninstaller exited successfully and removed the installation directory.'
                 }
@@ -568,8 +614,17 @@ finally {
             Write-Warning $cleanupFailure
         }
         else {
-            $targetSafeForRootCleanup = -not (Test-Path -LiteralPath $tauriTargetFull)
-            if (Test-Path -LiteralPath $tauriTargetFull) {
+            $smokeRootItem = Get-Item -Force -LiteralPath $smokeRootFull -ErrorAction SilentlyContinue
+            $smokeRootSafeForCleanup = $null -ne $smokeRootItem -and
+                (Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($smokeRootFull))) -ieq $tempRoot -and
+                $smokeRootItem.PSIsContainer -and
+                ($smokeRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+            if (-not $smokeRootSafeForCleanup) {
+                $cleanupFailure = "Refusing cleanup through a missing, non-directory, or reparse-point smoke root: '$smokeRootFull'."
+                Write-Warning $cleanupFailure
+            }
+            $targetSafeForRootCleanup = $smokeRootSafeForCleanup -and -not (Test-Path -LiteralPath $tauriTargetFull)
+            if ($smokeRootSafeForCleanup -and (Test-Path -LiteralPath $tauriTargetFull)) {
                 try {
                     $targetAttributes = [System.IO.File]::GetAttributes($tauriTargetFull)
                     if (($targetAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -584,15 +639,18 @@ finally {
                 }
             }
 
-            if ($targetSafeForRootCleanup -and (Test-Path -LiteralPath $smokeRootFull)) {
+            if ($targetSafeForRootCleanup -and $uninstallVerified) {
                 try {
                     Remove-Item -LiteralPath $smokeRootFull -Recurse -Force
                 }
                 catch {
-                    Write-Warning "Could not remove smoke files under RUNNER_TEMP: $($_.Exception.Message)"
+                    Write-Warning "Could not safely remove smoke files under RUNNER_TEMP: $($_.Exception.Message)"
                 }
             }
-            elseif (-not $targetSafeForRootCleanup) {
+            elseif ($targetSafeForRootCleanup) {
+                Write-Warning "Leaving smoke scratch in RUNNER_TEMP because NSIS uninstall was not verified: '$smokeRootFull'."
+            }
+            elseif ($smokeRootSafeForCleanup) {
                 Write-Warning 'Leaving the scratch root in RUNNER_TEMP because the isolated app-data target could not be safely removed.'
             }
         }
