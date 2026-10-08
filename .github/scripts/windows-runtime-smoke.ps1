@@ -305,6 +305,9 @@ try {
     if ($appExecutables.Count -ne 1) {
         throw "Expected one installed app executable; found $($appExecutables.Count)."
     }
+    if ($appExecutables[0].Name -cne 'AUTO-COC.exe') {
+        throw "Expected installed app executable 'AUTO-COC.exe'; found '$($appExecutables[0].Name)'."
+    }
     $appPath = $appExecutables[0].FullName
     $browserPidsBefore = @(Get-ExternalBrowserProcesses | Select-Object -ExpandProperty Id)
 
