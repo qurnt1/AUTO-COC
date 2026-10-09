@@ -1,0 +1,678 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$BundleDirectory
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+function Start-SmokeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Arguments = '',
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [switch]$Hidden,
+        [switch]$CaptureOutput,
+        [hashtable]$Environment = @{}
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Path
+    $startInfo.Arguments = $Arguments
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $Hidden.IsPresent
+    $startInfo.WindowStyle = if ($Hidden) {
+        [System.Diagnostics.ProcessWindowStyle]::Hidden
+    }
+    else {
+        [System.Diagnostics.ProcessWindowStyle]::Normal
+    }
+    if ($CaptureOutput) {
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new()
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new()
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $startInfo.EnvironmentVariables[$entry.Key] = $entry.Value
+    }
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    return $process
+}
+
+function Get-AppProcessIds {
+    param([Parameter(Mandatory = $true)][string]$ExecutablePath)
+
+    $processName = [System.IO.Path]::GetFileNameWithoutExtension($ExecutablePath)
+    return @(
+        Get-Process -Name $processName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and $_.Path -ieq $ExecutablePath } |
+            Select-Object -ExpandProperty Id
+    )
+}
+
+function Get-ExternalBrowserProcesses {
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe' OR Name = 'msedge.exe'" |
+            Select-Object @{ Name = 'Id'; Expression = { [int]$_.ProcessId } }, Name
+    )
+}
+
+function Get-NormalizedFullPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
+
+function Write-CapturedProcessOutput {
+    param(
+        [Parameter(Mandatory = $true)]$StandardOutputTask,
+        [Parameter(Mandatory = $true)]$StandardErrorTask
+    )
+
+    $standardOutput = $StandardOutputTask.GetAwaiter().GetResult()
+    $standardError = $StandardErrorTask.GetAwaiter().GetResult()
+    if (-not [string]::IsNullOrWhiteSpace($standardOutput)) {
+        Write-Host $standardOutput.TrimEnd()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($standardError)) {
+        Write-Warning $standardError.TrimEnd()
+    }
+}
+
+function Stop-SmokeProcess {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return $true
+        }
+
+        if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
+            [void]$Process.CloseMainWindow()
+        }
+        if ($Process.WaitForExit(5000)) {
+            return $true
+        }
+
+        Write-Warning "$Label did not exit after a close request; terminating its process tree."
+        $Process.Kill($true)
+        if ($Process.WaitForExit(5000)) {
+            Write-Warning "$Label required forced termination."
+            return $true
+        }
+
+        Write-Warning "$Label is still running after forced termination and the 5-second wait."
+        return $false
+    }
+    catch {
+        Write-Warning "Could not confirm that $Label stopped: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Wait-ForMainWindow {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastHandle = [IntPtr]::Zero
+    $lastTitle = ''
+    while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "AUTO-COC exited before its main window appeared (exit $($Process.ExitCode))."
+        }
+
+        try {
+            $lastHandle = $Process.MainWindowHandle
+            $lastTitle = $Process.MainWindowTitle
+        }
+        catch [System.InvalidOperationException] {
+            Start-Sleep -Milliseconds 250
+            continue
+        }
+
+        if ($lastHandle -ne [IntPtr]::Zero -and $lastTitle -eq 'AUTO-COC') {
+            return $lastHandle
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw "Timed out waiting for AUTO-COC HWND/title; handle=$lastHandle title='$lastTitle'."
+}
+
+function Start-UiAutomationSmoke {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$PowerShellPath,
+        [Parameter(Mandatory = $true)][long]$WindowHandle,
+        [Parameter(Mandatory = $true)][int]$AppProcessId,
+        [Parameter(Mandatory = $true)][string]$MacroName,
+        [Parameter(Mandatory = $true)][string]$RenamedMacroName,
+        [Parameter(Mandatory = $true)][string]$MacroFilePath,
+        [Parameter(Mandatory = $true)][ValidateSet('setup', 'start-close-recording', 'verify-restart')][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][hashtable]$Environment
+    )
+
+    $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -WindowHandle $WindowHandle -AppProcessId $AppProcessId -MacroName $MacroName -RenamedMacroName $RenamedMacroName -MacroFilePath `"$MacroFilePath`" -Mode $Mode"
+    $process = Start-SmokeProcess -Path $PowerShellPath -Arguments $arguments `
+        -WorkingDirectory $WorkingDirectory -Hidden -CaptureOutput -Environment $Environment
+    return [pscustomobject]@{
+        Process = $process
+        StandardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        StandardErrorTask = $process.StandardError.ReadToEndAsync()
+    }
+}
+
+function Wait-ForUiAutomationSmoke {
+    param(
+        [Parameter(Mandatory = $true)]$Run,
+        [Parameter(Mandatory = $true)][string]$Mode
+    )
+
+    $process = $Run.Process
+    if (-not $process.WaitForExit(120000)) {
+        Write-Warning "Windows UI Automation smoke ($Mode) timed out after 120 seconds; terminating its process tree."
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill($true)
+            }
+            catch [System.InvalidOperationException] {
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    Write-Warning 'The UI Automation helper could not be terminated after its timeout.'
+                }
+            }
+        }
+        if ($process.WaitForExit(5000)) {
+            Write-CapturedProcessOutput -StandardOutputTask $Run.StandardOutputTask -StandardErrorTask $Run.StandardErrorTask
+        }
+        else {
+            Write-Warning 'Windows UI Automation helper remained active 5 seconds after forced termination.'
+        }
+        throw "Windows UI Automation smoke ($Mode) timed out after 120 seconds."
+    }
+
+    Write-CapturedProcessOutput -StandardOutputTask $Run.StandardOutputTask -StandardErrorTask $Run.StandardErrorTask
+    if ($process.ExitCode -ne 0) {
+        throw "Windows UI Automation smoke ($Mode) failed with exit code $($process.ExitCode)."
+    }
+}
+
+$runnerTemp = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+    throw 'RUNNER_TEMP is required for the isolated desktop smoke test.'
+}
+
+$bundlePath = (Resolve-Path -LiteralPath $BundleDirectory).Path
+$installers = @(Get-ChildItem -LiteralPath $bundlePath -Filter '*-setup.exe' -File)
+if ($installers.Count -ne 1) {
+    throw "Expected one NSIS setup executable in '$bundlePath'; found $($installers.Count)."
+}
+
+$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
+$tauriConfig = Get-Content -LiteralPath (Join-Path $repositoryRoot 'frontend/src-tauri/tauri.conf.json') -Raw |
+    ConvertFrom-Json
+$tauriIdentifier = [string]$tauriConfig.identifier
+if ($tauriIdentifier -notmatch '^[A-Za-z0-9.-]+$') {
+    throw "Unexpected Tauri identifier '$tauriIdentifier'; refusing to derive a filesystem path."
+}
+
+$knownLocalAppData = [System.Environment]::GetFolderPath(
+    [System.Environment+SpecialFolder]::LocalApplicationData
+)
+if ([string]::IsNullOrWhiteSpace($knownLocalAppData) -or -not [System.IO.Directory]::Exists($knownLocalAppData)) {
+    throw 'Windows Known Folder LocalApplicationData is unavailable.'
+}
+$tauriAppLocalDataPath = Join-Path $knownLocalAppData $tauriIdentifier
+$existingTauriData = [System.IO.Directory]::GetFileSystemEntries($knownLocalAppData, $tauriIdentifier)
+if ($existingTauriData.Count -gt 0) {
+    throw "Tauri app-local-data path already exists; refusing to touch it: '$tauriAppLocalDataPath'."
+}
+
+$smokeFolderName = "auto-coc-runtime-smoke-$([Guid]::NewGuid().ToString('N'))"
+$existingSmokeRoot = [System.IO.Directory]::GetFileSystemEntries($runnerTemp, $smokeFolderName)
+if ($existingSmokeRoot.Count -gt 0) {
+    throw "Smoke scratch path already exists; refusing to touch it: '$(Join-Path $runnerTemp $smokeFolderName)'."
+}
+
+$smokeRoot = Join-Path $runnerTemp $smokeFolderName
+$installDir = Join-Path $smokeRoot 'install'
+$localAppData = Join-Path $smokeRoot 'local-app-data'
+$webViewData = Join-Path $smokeRoot 'webview2'
+$tauriAppLocalDataTarget = Join-Path $smokeRoot 'tauri-local-data'
+$mainProcess = $null
+$secondProcess = $null
+$installerProcess = $null
+$uninstallerProcess = $null
+$uiAutomationProcess = $null
+$closeRecordingUiAutomationProcess = $null
+$restartUiAutomationProcess = $null
+$restartProcess = $null
+$junctionCreated = $false
+$allSmokeProcessesStopped = $true
+$junctionSafeForTargetCleanup = $true
+$uninstallVerified = $false
+$uninstallFailure = $null
+$cleanupFailure = $null
+
+try {
+    New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+    New-Item -ItemType Directory -Path $localAppData, $webViewData, $tauriAppLocalDataTarget | Out-Null
+    $junction = New-Item -ItemType Junction -Path $tauriAppLocalDataPath -Target $tauriAppLocalDataTarget
+    $junctionCreated = $true
+    $junctionSafeForTargetCleanup = $false
+    $junctionTarget = [System.IO.Path]::GetFullPath([string]$junction.Target)
+    if ($junction.LinkType -ne 'Junction' -or $junctionTarget -ine [System.IO.Path]::GetFullPath($tauriAppLocalDataTarget)) {
+        throw "Could not verify Tauri app-data junction at '$tauriAppLocalDataPath'."
+    }
+    Write-Host "Redirected Tauri app-local-data to RUNNER_TEMP: $tauriAppLocalDataTarget."
+    Write-Host "Installing $($installers[0].Name) into RUNNER_TEMP."
+    $appEnvironment = @{
+        LOCALAPPDATA = $localAppData
+        WEBVIEW2_USER_DATA_FOLDER = $webViewData
+    }
+
+    # NSIS requires /D= to be the final, unquoted argument.
+    $installerProcess = Start-SmokeProcess -Path $installers[0].FullName `
+        -Arguments "/S /D=$installDir" -Hidden -Environment $appEnvironment
+    if (-not $installerProcess.WaitForExit(180000)) {
+        $installerProcess.Kill($true)
+        if (-not $installerProcess.WaitForExit(5000)) {
+            Write-Warning 'NSIS installer remained active 5 seconds after forced termination.'
+        }
+        throw 'NSIS installation timed out after 180 seconds.'
+    }
+    if ($installerProcess.ExitCode -ne 0) {
+        throw "NSIS installation failed with exit code $($installerProcess.ExitCode)."
+    }
+
+    $appExecutables = @(
+        Get-ChildItem -LiteralPath $installDir -Filter '*.exe' -File -Recurse |
+            Where-Object { $_.Name -notmatch '(?i)uninstall' }
+    )
+    if ($appExecutables.Count -ne 1) {
+        throw "Expected one installed app executable; found $($appExecutables.Count)."
+    }
+    if ($appExecutables[0].Name -cne 'AUTO-COC.exe') {
+        throw "Expected installed app executable 'AUTO-COC.exe'; found '$($appExecutables[0].Name)'."
+    }
+    $appPath = $appExecutables[0].FullName
+    $browserPidsBefore = @(Get-ExternalBrowserProcesses | Select-Object -ExpandProperty Id)
+
+    Write-Host "Starting installed app: $($appExecutables[0].Name)."
+    $mainProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
+        -Environment $appEnvironment
+    $mainWindow = Wait-ForMainWindow -Process $mainProcess -TimeoutSeconds 60
+    Write-Host "Main window found: PID $($mainProcess.Id), HWND $mainWindow, title AUTO-COC."
+
+    $uiAutomationScript = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-ui-smoke.ps1')).Path
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $macroSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 12)
+    $macroName = "CI-SMOKE-$macroSuffix"
+    $renamedMacroName = "CI-RENAMED-$macroSuffix"
+    $macroDirectory = Join-Path (Join-Path $localAppData 'AUTO-COC') 'macros'
+    $oldMacroFile = Join-Path $macroDirectory "$macroName.json"
+    $renamedMacroFile = Join-Path $macroDirectory "$renamedMacroName.json"
+    Write-Host 'Exercising macro creation, rename, and empty recording lifecycle through Windows UI Automation.'
+    $uiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+        -WindowHandle $mainWindow.ToInt64() -AppProcessId $mainProcess.Id -MacroName $macroName `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode setup `
+        -WorkingDirectory $smokeRoot -Environment $appEnvironment
+    $uiAutomationProcess = $uiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $uiAutomationRun -Mode setup
+
+    if ((Test-Path -LiteralPath $oldMacroFile) -or -not (Test-Path -LiteralPath $renamedMacroFile)) {
+        throw 'The Rust backend did not persist the expected macro rename in the isolated profile.'
+    }
+    $persistedMacro = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    if ([string]$persistedMacro.name -cne $renamedMacroName) {
+        throw 'The isolated macro file does not contain the renamed macro name.'
+    }
+    if (@($persistedMacro.steps).Count -ne 0) {
+        throw 'The isolated macro file should contain the empty sequence from the UIA recording lifecycle.'
+    }
+    Write-Host 'Rust backend persistence confirmed: only the renamed macro file exists, with an empty sequence.'
+
+    Write-Host 'Starting a second instance.'
+    $secondProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
+        -Environment $appEnvironment
+    if (-not $secondProcess.WaitForExit(15000)) {
+        throw 'Second instance did not exit within 15 seconds.'
+    }
+    if ($secondProcess.ExitCode -ne 0) {
+        throw "Second instance exited with code $($secondProcess.ExitCode)."
+    }
+    $mainProcess.Refresh()
+    if ($mainProcess.HasExited) {
+        throw 'The first instance exited after the second launch.'
+    }
+
+    $appPids = @(Get-AppProcessIds -ExecutablePath $appPath)
+    if ($appPids.Count -ne 1 -or $appPids[0] -ne $mainProcess.Id) {
+        throw "Expected one AUTO-COC process ($($mainProcess.Id)); found: $($appPids -join ', ')."
+    }
+    $windowAfterSecondLaunch = Wait-ForMainWindow -Process $mainProcess -TimeoutSeconds 5
+    if ($windowAfterSecondLaunch -ne $mainWindow) {
+        throw "The first instance changed its main HWND after the second launch."
+    }
+
+    $macroBeforeCloseRecording = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    try {
+        $updatedAtBeforeCloseRecording = [DateTimeOffset]::Parse(
+            [string]$macroBeforeCloseRecording.updated_at,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal
+        )
+    }
+    catch {
+        throw 'The isolated macro has an invalid updated_at value before close-during-recording.'
+    }
+    if (@($macroBeforeCloseRecording.steps).Count -ne 0) {
+        throw 'The isolated macro must be empty before close-during-recording.'
+    }
+
+    Write-Host 'Starting an empty recording, waiting for capture, then closing AUTO-COC while it remains active.'
+    $closeRecordingUiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+        -WindowHandle $mainWindow.ToInt64() -AppProcessId $mainProcess.Id -MacroName $macroName `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode start-close-recording `
+        -WorkingDirectory $smokeRoot -Environment $appEnvironment
+    $closeRecordingUiAutomationProcess = $closeRecordingUiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $closeRecordingUiAutomationRun -Mode start-close-recording
+    $mainProcess.Refresh()
+    if ($mainProcess.HasExited) {
+        throw 'AUTO-COC exited before the active recording could be closed gracefully.'
+    }
+
+    if (-not $mainProcess.CloseMainWindow()) {
+        throw 'CloseMainWindow did not send a close request during the active recording.'
+    }
+    if (-not $mainProcess.WaitForExit(30000)) {
+        throw 'AUTO-COC did not exit within 30 seconds after closing during recording.'
+    }
+    if ($mainProcess.ExitCode -ne 0) {
+        throw "AUTO-COC exited with code $($mainProcess.ExitCode) after closing during recording."
+    }
+
+    $macroAfterCloseRecording = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    try {
+        $updatedAtAfterCloseRecording = [DateTimeOffset]::Parse(
+            [string]$macroAfterCloseRecording.updated_at,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal
+        )
+    }
+    catch {
+        throw 'The isolated macro has an invalid updated_at value after close-during-recording.'
+    }
+    if ($updatedAtAfterCloseRecording -le $updatedAtBeforeCloseRecording) {
+        throw 'The macro updated_at timestamp did not advance after closing during the empty recording.'
+    }
+    if (@($macroAfterCloseRecording.steps).Count -ne 0) {
+        throw 'The isolated macro should remain empty after closing during the recording without injected input.'
+    }
+    Write-Host 'AUTO-COC closed during the empty recording with exit code 0; updated_at advanced and the saved sequence stayed empty.'
+
+    Write-Host 'Relaunching AUTO-COC against the same isolated profile.'
+    $restartProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
+        -Environment $appEnvironment
+    $restartWindow = Wait-ForMainWindow -Process $restartProcess -TimeoutSeconds 60
+    Write-Host "Relaunched main window found: PID $($restartProcess.Id), HWND $restartWindow."
+    $restartUiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+        -WindowHandle $restartWindow.ToInt64() -AppProcessId $restartProcess.Id -MacroName $macroName `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode verify-restart `
+        -WorkingDirectory $smokeRoot -Environment $appEnvironment
+    $restartUiAutomationProcess = $restartUiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $restartUiAutomationRun -Mode verify-restart
+
+    $renamedMacroFile = Join-Path $macroDirectory "$renamedMacroName.json"
+    if ((Test-Path -LiteralPath $oldMacroFile) -or -not (Test-Path -LiteralPath $renamedMacroFile)) {
+        throw 'The renamed macro did not survive the full application restart in the isolated profile.'
+    }
+    $persistedMacro = Get-Content -LiteralPath $renamedMacroFile -Raw | ConvertFrom-Json
+    if ([string]$persistedMacro.name -cne $renamedMacroName -or @($persistedMacro.steps).Count -ne 0) {
+        throw 'The reloaded macro file does not preserve its renamed name and empty sequence.'
+    }
+    $restartAppPids = @(Get-AppProcessIds -ExecutablePath $appPath)
+    if ($restartAppPids.Count -ne 1 -or $restartAppPids[0] -ne $restartProcess.Id) {
+        throw "Expected one AUTO-COC process after relaunch ($($restartProcess.Id)); found: $($restartAppPids -join ', ')."
+    }
+    Write-Host 'UI Automation and isolated storage confirmed the renamed macro reloaded after a complete restart.'
+
+    $newBrowsers = @(
+        Get-ExternalBrowserProcesses |
+            Where-Object { $_.Id -notin $browserPidsBefore }
+    )
+    if ($newBrowsers.Count -gt 0) {
+        throw "External browser process(es) started: $(($newBrowsers | ForEach-Object { "$($_.Name) PID $($_.Id)" }) -join ', ')."
+    }
+    Write-Host 'No new Chrome or Edge browser process detected (WebView2 is excluded).'
+
+    if (-not $restartProcess.CloseMainWindow()) {
+        throw 'CloseMainWindow did not send a close request to the relaunched AUTO-COC.'
+    }
+    if (-not $restartProcess.WaitForExit(30000)) {
+        throw 'The relaunched AUTO-COC did not exit within 30 seconds after CloseMainWindow.'
+    }
+    if ($restartProcess.ExitCode -ne 0) {
+        throw "The relaunched AUTO-COC exited with code $($restartProcess.ExitCode) after graceful close."
+    }
+    Write-Host 'Relaunched AUTO-COC closed cleanly.'
+}
+finally {
+    foreach ($entry in @(
+        @{ Label = 'Windows UI Automation restart helper'; Process = $restartUiAutomationProcess },
+        @{ Label = 'Windows UI Automation close-recording helper'; Process = $closeRecordingUiAutomationProcess },
+        @{ Label = 'Windows UI Automation helper'; Process = $uiAutomationProcess },
+        @{ Label = 'AUTO-COC relaunched process'; Process = $restartProcess },
+        @{ Label = 'AUTO-COC second instance'; Process = $secondProcess },
+        @{ Label = 'AUTO-COC main instance'; Process = $mainProcess },
+        @{ Label = 'NSIS installer'; Process = $installerProcess }
+    )) {
+        if ($null -ne $entry.Process) {
+            if (-not (Stop-SmokeProcess -Process $entry.Process -Label $entry.Label)) {
+                $allSmokeProcessesStopped = $false
+            }
+            $entry.Process.Dispose()
+        }
+    }
+
+    try {
+        if ($allSmokeProcessesStopped -and (Test-Path -LiteralPath $installDir)) {
+            $uninstallers = @(
+                Get-ChildItem -LiteralPath $installDir -Filter '*uninstall*.exe' -File -Recurse
+            )
+            if ($uninstallers.Count -eq 1) {
+                $uninstallerProcess = Start-SmokeProcess -Path $uninstallers[0].FullName `
+                    -Arguments "/S _?=$installDir" -WorkingDirectory $installDir -Hidden
+                if (-not $uninstallerProcess.WaitForExit(60000)) {
+                    $uninstallFailure = 'NSIS uninstaller timed out after 60 seconds.'
+                }
+                elseif ($uninstallerProcess.ExitCode -ne 0) {
+                    $uninstallFailure = "NSIS uninstaller exited with code $($uninstallerProcess.ExitCode)."
+                }
+                else {
+                    $runnerTempFull = Get-NormalizedFullPath -Path $runnerTemp
+                    $smokeRootFull = Get-NormalizedFullPath -Path $smokeRoot
+                    $installDirFull = Get-NormalizedFullPath -Path $installDir
+                    $uninstallerFull = Get-NormalizedFullPath -Path $uninstallers[0].FullName
+                    if ((Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($smokeRootFull))) -ine $runnerTempFull -or
+                        (Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($installDirFull))) -ine $smokeRootFull -or
+                        (Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($uninstallerFull))) -ine $installDirFull) {
+                        throw "Refusing NSIS cleanup outside the isolated RUNNER_TEMP install path: '$installDirFull'."
+                    }
+
+                    $installDirItem = $null
+                    try {
+                        $installDirItem = Get-Item -Force -LiteralPath $installDirFull -ErrorAction Stop
+                    }
+                    catch {
+                        if ($_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                            throw
+                        }
+                    }
+
+                    if ($null -ne $installDirItem) {
+                        $smokeRootItem = Get-Item -Force -LiteralPath $smokeRootFull
+                        if (-not $smokeRootItem.PSIsContainer -or
+                            ($smokeRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                            -not $installDirItem.PSIsContainer -or
+                            ($installDirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                            throw "Refusing to inspect or remove a non-directory or reparse-point smoke install path: '$installDirFull'."
+                        }
+
+                        $remainingEntries = @(Get-ChildItem -LiteralPath $installDirFull -Force)
+                        if ($remainingEntries.Count -eq 1 -and
+                            -not $remainingEntries[0].PSIsContainer -and
+                            (Get-NormalizedFullPath -Path $remainingEntries[0].FullName) -ieq $uninstallerFull -and
+                            ($remainingEntries[0].Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                            Remove-Item -LiteralPath $uninstallerFull -Force
+                            $remainingEntries = @(Get-ChildItem -LiteralPath $installDirFull -Force)
+                        }
+
+                        if ($remainingEntries.Count -gt 0) {
+                            $remainingListing = ($remainingEntries | Sort-Object FullName | ForEach-Object { $_.FullName }) -join [Environment]::NewLine
+                            throw "NSIS uninstaller exited successfully but left unexpected entries under '$installDirFull':`n$remainingListing"
+                        }
+
+                        [System.IO.Directory]::Delete($installDirFull, $false)
+                        if (Test-Path -LiteralPath $installDirFull) {
+                            throw "The isolated NSIS install path remains after non-recursive removal: '$installDirFull'."
+                        }
+                    }
+
+                    $uninstallVerified = $true
+                    Write-Host 'NSIS uninstaller exited successfully and removed the installation directory.'
+                }
+            }
+            else {
+                $uninstallFailure = "Expected exactly one NSIS uninstaller in '$installDir'; found $($uninstallers.Count)."
+            }
+        }
+        elseif (-not $allSmokeProcessesStopped) {
+            $uninstallFailure = 'NSIS uninstall was skipped because a smoke process may still be running.'
+        }
+        else {
+            $uninstallFailure = "NSIS installation directory was missing before uninstall verification: '$installDir'."
+        }
+    }
+    catch {
+        if ($null -eq $uninstallFailure) {
+            $uninstallFailure = "NSIS uninstall verification failed: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        if ($null -ne $uninstallerProcess) {
+            if (-not $uninstallerProcess.HasExited -and
+                -not (Stop-SmokeProcess -Process $uninstallerProcess -Label 'NSIS uninstaller')) {
+                $allSmokeProcessesStopped = $false
+            }
+            $uninstallerProcess.Dispose()
+        }
+    }
+
+    if ($allSmokeProcessesStopped -and $junctionCreated) {
+        try {
+            $junctionItem = Get-Item -Force -LiteralPath $tauriAppLocalDataPath -ErrorAction SilentlyContinue
+            if ($null -eq $junctionItem) {
+                Write-Warning 'The temporary Tauri app-data junction is already absent.'
+                $junctionSafeForTargetCleanup = $true
+            }
+            else {
+                $junctionTarget = Get-NormalizedFullPath -Path ([string]$junctionItem.Target)
+                if ($junctionItem.LinkType -ne 'Junction' -or
+                    $junctionTarget -ine (Get-NormalizedFullPath -Path $tauriAppLocalDataTarget)) {
+                    throw "Refusing to remove a path that is no longer the smoke junction: '$tauriAppLocalDataPath'."
+                }
+
+                # Directory.Delete removes the junction itself; it does not traverse its target.
+                [System.IO.Directory]::Delete($tauriAppLocalDataPath, $false)
+                $junctionSafeForTargetCleanup = $true
+                Write-Host 'Removed the temporary Tauri app-data junction.'
+            }
+        }
+        catch {
+            Write-Warning "Could not remove the temporary Tauri app-data junction: $($_.Exception.Message)"
+        }
+    }
+
+    if ($allSmokeProcessesStopped -and $junctionSafeForTargetCleanup) {
+        $tempRoot = Get-NormalizedFullPath -Path $runnerTemp
+        $smokeRootFull = Get-NormalizedFullPath -Path $smokeRoot
+        $tauriTargetFull = Get-NormalizedFullPath -Path $tauriAppLocalDataTarget
+        if (-not $smokeRootFull.StartsWith($tempRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $tauriTargetFull.StartsWith($smokeRootFull.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $cleanupFailure = "Refusing cleanup outside the smoke scratch root: '$smokeRootFull'."
+            Write-Warning $cleanupFailure
+        }
+        else {
+            $smokeRootItem = Get-Item -Force -LiteralPath $smokeRootFull -ErrorAction SilentlyContinue
+            $smokeRootSafeForCleanup = $null -ne $smokeRootItem -and
+                (Get-NormalizedFullPath -Path ([System.IO.Path]::GetDirectoryName($smokeRootFull))) -ieq $tempRoot -and
+                $smokeRootItem.PSIsContainer -and
+                ($smokeRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+            if (-not $smokeRootSafeForCleanup) {
+                $cleanupFailure = "Refusing cleanup through a missing, non-directory, or reparse-point smoke root: '$smokeRootFull'."
+                Write-Warning $cleanupFailure
+            }
+            $targetSafeForRootCleanup = $smokeRootSafeForCleanup -and -not (Test-Path -LiteralPath $tauriTargetFull)
+            if ($smokeRootSafeForCleanup -and (Test-Path -LiteralPath $tauriTargetFull)) {
+                try {
+                    $targetAttributes = [System.IO.File]::GetAttributes($tauriTargetFull)
+                    if (($targetAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Refusing recursive cleanup of a reparse-point target: '$tauriTargetFull'."
+                    }
+                    Remove-Item -LiteralPath $tauriTargetFull -Recurse -Force
+                    $targetSafeForRootCleanup = $true
+                    Write-Host 'Removed the isolated Tauri app-local-data target.'
+                }
+                catch {
+                    Write-Warning "Could not remove isolated Tauri app-local-data: $($_.Exception.Message)"
+                }
+            }
+
+            if ($targetSafeForRootCleanup -and $uninstallVerified) {
+                try {
+                    Remove-Item -LiteralPath $smokeRootFull -Recurse -Force
+                }
+                catch {
+                    Write-Warning "Could not safely remove smoke files under RUNNER_TEMP: $($_.Exception.Message)"
+                }
+            }
+            elseif ($targetSafeForRootCleanup) {
+                Write-Warning "Leaving smoke scratch in RUNNER_TEMP because NSIS uninstall was not verified: '$smokeRootFull'."
+            }
+            elseif ($smokeRootSafeForCleanup) {
+                Write-Warning 'Leaving the scratch root in RUNNER_TEMP because the isolated app-data target could not be safely removed.'
+            }
+        }
+    }
+    elseif (-not $allSmokeProcessesStopped) {
+        Write-Warning "Leaving smoke scratch and Tauri app-data junction in place because a process may still use '$tauriAppLocalDataTarget'; the hosted runner will be discarded."
+    }
+    else {
+        Write-Warning "Leaving smoke scratch in RUNNER_TEMP because the Tauri junction could not be safely removed."
+    }
+}
+
+if ($null -ne $cleanupFailure) {
+    throw $cleanupFailure
+}
+
+if (-not $uninstallVerified) {
+    if ($null -eq $uninstallFailure) {
+        $uninstallFailure = 'NSIS uninstallation was not verified.'
+    }
+    throw $uninstallFailure
+}
