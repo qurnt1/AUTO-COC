@@ -5,7 +5,7 @@ import { Icon } from "./Icon";
 import { normalizeShortcut } from "./normalizeShortcut";
 
 type Props = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; initialTab?: SettingsTab };
-type SettingsTab = "general" | "shortcuts" | "telegram" | "system";
+export type SettingsTab = "general" | "shortcuts" | "telegram" | "system";
 type ShortcutName = keyof Snapshot["settings"]["shortcuts"];
 type PairingCode = Pick<PairingPreparation, "code" | "expiresAt">;
 
@@ -22,13 +22,22 @@ function telegramTone(status: Snapshot["settings"]["telegram"]["status"]): strin
   return status === "connected" ? "good" : status === "error" ? "bad" : status === "waiting_pairing" ? "copper" : "neutral";
 }
 
+function formatTelegramHandle(username: string): string | null {
+  const trimmed = username.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
+}
+
 export function Settings({ api, snapshot, busy, run, online, initialTab = "general" }: Props) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [path, setPath] = useState(snapshot.settings.cocPath);
   const [shortcuts, setShortcuts] = useState(snapshot.settings.shortcuts);
   const [capturing, setCapturing] = useState<ShortcutName | null>(null);
   const [shortcutError, setShortcutError] = useState("");
+  const [telegramBotUsername, setTelegramBotUsername] = useState("");
+  const [botFatherCopyMessage, setBotFatherCopyMessage] = useState("");
   const [token, setToken] = useState("");
+  const [editingTelegramToken, setEditingTelegramToken] = useState(!snapshot.settings.telegram.tokenConfigured);
   const [tokenMessage, setTokenMessage] = useState("");
   const [verificationMessage, setVerificationMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
@@ -85,6 +94,20 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
   const telegram = snapshot.settings.telegram;
   const telegramTokenVerified = telegram.status === "connected" || telegram.status === "waiting_pairing" || telegram.paired;
   const pairingExpired = pairing !== null && Date.parse(pairing.expiresAt) <= now;
+  const botHandle = formatTelegramHandle(telegramBotUsername);
+  const shouldEditTelegramToken = !telegram.tokenConfigured || editingTelegramToken;
+  let pairingStepStatus = "Après l’étape 2";
+  let pairingStepDescription = "Cette étape s’ouvrira après la vérification du token.";
+  if (telegram.paired) {
+    pairingStepStatus = "Conversation associée";
+    pairingStepDescription = "Votre conversation privée est reliée.";
+  } else if (pairing && !pairingExpired) {
+    pairingStepStatus = "Code en attente";
+    pairingStepDescription = "Envoyez la commande au bot, puis revenez dans AUTO-COC.";
+  } else if (telegramTokenVerified) {
+    pairingStepStatus = "À faire";
+    pairingStepDescription = "Générez une commande, puis envoyez-la au bot dans Telegram.";
+  }
   const shortcutsEditable = online && snapshot.status.kind === "idle" && busy === null;
   const changedShortcuts = (Object.keys(shortcuts) as ShortcutName[]).some((key) => shortcuts[key] !== snapshot.settings.shortcuts[key]);
   const duplicated = new Set(Object.values(shortcuts).map((value) => value.toLocaleLowerCase("fr"))).size !== Object.values(shortcuts).length;
@@ -101,7 +124,10 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
     setTokenMessage("");
     setVerificationMessage("");
     const saved = await run("telegram-token", () => api.saveTelegramToken(token.trim()));
-    if (saved) setToken("");
+    if (saved) {
+      setToken("");
+      setEditingTelegramToken(false);
+    }
     setTokenMessage(saved ? "Token enregistré. Vérifiez-le à l’étape suivante; le champ a été effacé." : "Le token n’a pas été enregistré.");
   }
 
@@ -114,6 +140,16 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
       setVerificationMessage("Telegram n’a pas reconnu ce token. Vérifiez-le auprès de BotFather.");
     } else {
       setVerificationMessage("Token vérifié. Aucun message Telegram n’a été envoyé.");
+    }
+  }
+
+  async function copyBotFatherCommand() {
+    setBotFatherCopyMessage("");
+    try {
+      await navigator.clipboard.writeText("/newbot");
+      setBotFatherCopyMessage("/newbot copié. Collez-le dans votre conversation avec @BotFather.");
+    } catch {
+      setBotFatherCopyMessage("Copie impossible. Envoyez /newbot à @BotFather manuellement.");
     }
   }
 
@@ -223,42 +259,55 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
 
           {tab === "telegram" && (
             <>
-              <div className="settings-section-head"><span className="section-kicker">Connexion facultative</span><h2>Telegram</h2><p>Contrôlez les macros à distance après avoir relié votre propre bot.</p></div>
+              <div className="settings-section-head"><span className="section-kicker">Connexion facultative</span><h2>Telegram</h2><p>Reliez votre bot pour piloter les macros à distance. L’atelier sur ce PC fonctionne sans Telegram.</p></div>
               <ol className="telegram-steps" aria-label="Étapes pour connecter Telegram">
                 <li className="telegram-step">
-                  <div className="telegram-step-heading"><span className="telegram-step-number">01</span><div><h3>Créer votre bot</h3><p>Dans Telegram, ouvrez @BotFather, envoyez <code>/newbot</code> puis copiez le token fourni.</p></div><span className={`telegram-step-state ${telegram.tokenConfigured ? "done" : ""}`}>{telegram.tokenConfigured ? "Token enregistré" : "À faire"}</span></div>
+                  <div className="telegram-step-heading"><span className="telegram-step-number">01</span><div><h3>Créer votre bot</h3><p>Ouvrez @BotFather dans Telegram. La commande vous guidera pour créer le bot.</p></div><span className={`telegram-step-state ${telegram.tokenConfigured ? "done" : ""}`}>{telegram.tokenConfigured ? "Token enregistré" : "À faire"}</span></div>
                   <div className="telegram-step-content">
-                    <label className="field-label" htmlFor="telegram-token">Token du bot</label>
-                    <div className="token-entry"><input id="telegram-token" type="password" autoComplete="new-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenMessage(""); }} placeholder={telegram.tokenConfigured ? "Token enregistré · saisir pour remplacer" : "Coller le token de BotFather"} /><button className="button quiet" type="button" disabled={!online || !token.trim() || busy !== null} onClick={() => void saveToken()}>{busy === "telegram-token" ? "Enregistrement…" : "Enregistrer le token"}</button></div>
-                    <p className="telegram-feedback" role="status">{tokenMessage}</p>
-                    <span className="field-note"><Icon name="shield" size={14} />Stocké dans le coffre Windows. Le token ne sera pas réaffiché.</span>
-                    {telegram.tokenConfigured && <button className="text-button danger-text remove-token" type="button" disabled={!online || busy !== null} onClick={() => setShowTokenRemoval(true)}><Icon name="trash" size={14} />Retirer le token enregistré</button>}
+                    {shouldEditTelegramToken && <>
+                      <button className="button quiet" type="button" onClick={() => void copyBotFatherCommand()}><Icon name="copy" size={15} />Copier /newbot</button>
+                      <p className="telegram-feedback" role="status">{botFatherCopyMessage}</p>
+                    </>}
+                    <label className="field-label" htmlFor="telegram-bot-username">Nom d’utilisateur du bot</label>
+                    <input id="telegram-bot-username" autoComplete="off" spellCheck={false} value={telegramBotUsername} onChange={(event) => setTelegramBotUsername(event.target.value)} placeholder="Ex. @mon_bot" />
+                    <span className="field-note">BotFather vous le donne après la création. Gardez-le pour retrouver votre bot à l’étape 3.</span>
+                    {shouldEditTelegramToken ? <>
+                      <label className="field-label" htmlFor="telegram-token">Token du bot</label>
+                      <div className="token-entry"><input id="telegram-token" type="password" autoComplete="new-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenMessage(""); }} placeholder={telegram.tokenConfigured ? "Saisir le nouveau token" : "Coller le token de BotFather"} /><button className="button quiet" type="button" disabled={!online || !token.trim() || busy !== null} onClick={() => void saveToken()}>{busy === "telegram-token" ? "Enregistrement…" : "Enregistrer le token"}</button></div>
+                      <p className="telegram-feedback" role="status">{tokenMessage}</p>
+                      <span className="field-note"><Icon name="shield" size={14} />Stocké dans le coffre Windows. Le token ne sera pas réaffiché.</span>
+                      {telegram.tokenConfigured && <button className="text-button" type="button" onClick={() => { setToken(""); setEditingTelegramToken(false); }}>Annuler le remplacement</button>}
+                    </> : <>
+                      <span className="muted-copy">Token enregistré et protégé. Il reste masqué.</span>
+                      <p className="telegram-feedback" role="status">{tokenMessage}</p>
+                      <button className="text-button" type="button" onClick={() => setEditingTelegramToken(true)}>Remplacer le token</button>
+                      <button className="text-button danger-text remove-token" type="button" disabled={!online || busy !== null} onClick={() => setShowTokenRemoval(true)}><Icon name="trash" size={14} />Retirer le token enregistré</button>
+                    </>}
                   </div>
                 </li>
                 <li className="telegram-step">
-                  <div className="telegram-step-heading"><span className="telegram-step-number">02</span><div><h3>Vérifier le token</h3><p>Vérifiez que le bot répond. Cette action n’envoie aucun message.</p></div><span className={`telegram-step-state ${telegramTokenVerified ? "done" : ""}`}>{!telegram.tokenConfigured ? "Après l’étape 1" : telegramTokenVerified ? "Vérifié" : "À vérifier"}</span></div>
-                  <div className="telegram-step-content telegram-verify-row">
-                    <span className="muted-copy">{telegramTokenVerified ? "Le bot répond à l’API Telegram." : "Enregistrez le token pour pouvoir le vérifier."}</span>
-                    <button className="button quiet" type="button" disabled={!online || !telegram.tokenConfigured || busy !== null} onClick={() => void verifyTelegramToken()}>{busy === "telegram-test" ? "Vérification…" : "Vérifier le token"}</button>
-                    <p className="telegram-feedback verification-feedback" role="status">{verificationMessage}</p>
-                  </div>
+                  <div className="telegram-step-heading"><span className="telegram-step-number">02</span><div><h3>Vérifier le token</h3><p>Vérifiez que le bot répond. Cette vérification n’envoie aucun message.</p></div><span className={`telegram-step-state ${telegramTokenVerified ? "done" : ""}`}>{!telegram.tokenConfigured ? "Après l’étape 1" : telegramTokenVerified ? "Vérifié" : "À vérifier"}</span></div>
+                  {telegram.tokenConfigured && <div className="telegram-step-content telegram-verify-row">
+                      <span className="muted-copy">{telegramTokenVerified ? "Le bot répond à Telegram." : "Cette étape confirme que le token est valide."}</span>
+                      <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void verifyTelegramToken()}>{busy === "telegram-test" ? "Vérification…" : "Vérifier le token"}</button>
+                      <p className="telegram-feedback verification-feedback" role="status">{verificationMessage}</p>
+                  </div>}
                 </li>
                 <li className="telegram-step">
-                  <div className="telegram-step-heading"><span className="telegram-step-number">03</span><div><h3>Associer votre conversation</h3><p>Reprenez le nom <code>@username</code> donné par BotFather, recherchez-le dans Telegram et ouvrez une conversation privée avec ce bot. Envoyez ensuite <code>/start CODE</code> ci-dessous.</p></div><span className={`telegram-step-state ${telegram.paired ? "done" : pairing && !pairingExpired ? "pending" : ""}`}>{telegram.paired ? "Conversation associée" : pairing && !pairingExpired ? "Code en attente" : "À faire"}</span></div>
-                  <div className="telegram-step-content">
+                  <div className="telegram-step-heading"><span className="telegram-step-number">03</span><div><h3>Associer votre conversation</h3><p>{pairingStepDescription}</p></div><span className={`telegram-step-state ${telegram.paired ? "done" : pairing && !pairingExpired ? "pending" : ""}`}>{pairingStepStatus}</span></div>
+                  {telegramTokenVerified && <div className="telegram-step-content">
                     {telegram.paired ? <p className="telegram-paired-copy">Cette conversation peut maintenant contrôler AUTO-COC.</p> : pairing && !pairingExpired ? (
-                      <div className="pairing-code-block"><span className="section-kicker">Dans la conversation privée avec votre bot, envoyez</span><div className="pairing-code-line"><code>/start {pairing.code}</code><button className="text-button copy-pairing-button" type="button" onClick={() => void copyPairingCode()}><Icon name="copy" size={15} />Copier la commande</button></div><p className="telegram-feedback copy-feedback" role="status">{copyMessage}</p><span className="field-note">Ce code expire le {new Date(pairing.expiresAt).toLocaleString("fr-FR")}.</span><button className="text-button" type="button" disabled={!online || busy !== null} onClick={() => void run("telegram-cancel-pairing", () => api.cancelTelegramPairing(), "Code d’appairage annulé.").then((result) => { if (result) setPairing(null); })}>Annuler le code</button></div>
+                      <div className="pairing-code-block"><span className="section-kicker">Dans Telegram, ouvrez une conversation privée avec {botHandle ?? "le nom du bot donné par BotFather"}, puis envoyez</span><div className="pairing-code-line"><code>/start {pairing.code}</code><button className="text-button copy-pairing-button" type="button" onClick={() => void copyPairingCode()}><Icon name="copy" size={15} />Copier la commande</button></div><p className="telegram-feedback copy-feedback" role="status">{copyMessage}</p><span className="field-note">Revenez dans AUTO-COC : la confirmation apparaîtra ici automatiquement. Le code expire le {new Date(pairing.expiresAt).toLocaleString("fr-FR")}.</span><button className="text-button" type="button" disabled={!online || busy !== null} onClick={() => void run("telegram-cancel-pairing", () => api.cancelTelegramPairing(), "Code d’appairage annulé.").then((result) => { if (result) setPairing(null); })}>Annuler le code</button></div>
                     ) : (
                       <div className="telegram-pairing-action">
-                        {!telegramTokenVerified && <p className="form-hint">{telegram.tokenConfigured ? "Vérifiez le token à l’étape 2 pour créer le code." : "Enregistrez puis vérifiez le token pour créer le code."}</p>}
                         {pairingExpired && <p className="form-hint" role="status">Le code a expiré. Générez-en un nouveau pour reprendre l’association.</p>}
-                        <button className="button quiet" type="button" disabled={!online || !telegramTokenVerified || telegram.paired || busy !== null} onClick={() => void startPairing()}>{busy === "telegram-pairing" ? "Création du code…" : pairingExpired ? "Générer un nouveau code" : "Générer un code"}</button>
+                        <button className="button quiet" type="button" disabled={!online || telegram.paired || busy !== null} onClick={() => void startPairing()}>{busy === "telegram-pairing" ? "Création du code…" : pairingExpired ? "Générer un nouveau code" : "Générer une commande d’appairage"}</button>
                       </div>
                     )}
-                  </div>
+                  </div>}
                 </li>
               </ol>
-              <div className="telegram-status-summary"><span className={`status-chip ${telegramTone(telegram.status)}`}><i aria-hidden="true" />{telegram.paired ? "Conversation associée" : telegramTokenVerified ? "Bot vérifié" : telegram.tokenConfigured ? statusCopy[telegram.status] : "Non configuré"}</span><span>Les trois étapes sont facultatives pour utiliser les macros sur ce PC.</span></div>
+              <div className="telegram-status-summary"><span className={`status-chip ${telegramTone(telegram.status)}`}><i aria-hidden="true" />{telegram.paired ? "Conversation associée" : telegramTokenVerified ? "Bot vérifié" : telegram.tokenConfigured ? statusCopy[telegram.status] : "Non configuré"}</span><span>Les macros sur ce PC fonctionnent sans Telegram.</span></div>
             </>
           )}
 

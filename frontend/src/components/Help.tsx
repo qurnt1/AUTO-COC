@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import type { ActionRunner, BackendClient, Diagnostics, HelpDocument, Snapshot } from "../api";
 import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
+import { getOnboardingStage } from "../onboardingStage";
+import type { SettingsTab } from "./Settings";
 
-const quickGuides = [
-  { title: "Créer et enregistrer", body: "Créez une macro dans l’atelier puis cliquez sur Enregistrer. Une fois le compte à rebours terminé, laissez tourner l’enregistrement plus de 3 s. Les 3 dernières secondes sont retirées à l’arrêt." },
-  { title: "Relire", body: "Choisissez une macro et cliquez sur Lire. Clash of Clans doit être la fenêtre active; une perte de focus met en pause ou arrête le replay selon l’option des réglages." },
-  { title: "Modifier les raccourcis", body: "Ouvrez Réglages > Raccourcis, choisissez Modifier, appuyez sur la combinaison souhaitée puis enregistrez." },
+const quickGuides: { title: string; body: string; action: string; destination: "atelier" | "settings"; settingsTab?: SettingsTab }[] = [
+  { title: "Créer une macro", body: "Nommez-la, enregistrez plus de 3 s, puis arrêtez. Les 3 dernières secondes sont retirées.", action: "Ouvrir l’atelier", destination: "atelier" as const },
+  { title: "Lire une macro", body: "Choisissez une séquence prête. Clash of Clans doit être au premier plan.", action: "Ouvrir l’atelier", destination: "atelier" as const },
+  { title: "Piloter avec Telegram", body: "Associez votre bot dans les réglages pour commander les macros à distance.", action: "Ouvrir Telegram", destination: "settings" as const, settingsTab: "telegram" as const },
 ];
 
 export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboarding, onCompleteOnboarding }: {
@@ -15,7 +17,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
   busy: string | null;
   run: ActionRunner;
   online: boolean;
-  navigate: (view: "atelier" | "settings") => void;
+  navigate: (view: "atelier" | "settings", settingsTab?: SettingsTab) => void;
   onResumeOnboarding: () => void;
   onCompleteOnboarding: () => void;
 }) {
@@ -52,28 +54,29 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
   }
 
   const keys = snapshot?.settings.shortcuts;
+  const onboardingStage = snapshot ? getOnboardingStage(snapshot) : "create";
 
   return (
     <main className="help-page">
       <header className="page-header">
         <div className="breadcrumbs"><span>Guides</span><Icon name="chevron" size={13} /><span>Aide</span></div>
-        <h1 tabIndex={-1}>Les gestes essentiels</h1>
-        <p>Créer, enregistrer et relire une macro sans chercher dans les réglages.</p>
+        <h1 tabIndex={-1}>Que voulez-vous faire ?</h1>
+        <p>Choisissez une tâche pour continuer.</p>
       </header>
 
-      {snapshot && !snapshot.onboardingComplete && <OnboardingGuide mode="help" disabled={!online} busy={busy === "onboarding"} onComplete={onCompleteOnboarding} onResume={onResumeOnboarding} />}
+      {snapshot && !snapshot.onboardingComplete && <OnboardingGuide mode="help" stage={onboardingStage} disabled={!online} busy={busy === "onboarding"} onComplete={onCompleteOnboarding} onResume={onResumeOnboarding} />}
 
       <div className="help-layout">
         <div className="help-main-column">
           {snapshot?.onboardingComplete !== false && <section className="help-section" aria-labelledby="first-steps-title">
-            <div className="section-heading-row"><div><span className="section-kicker">Bien démarrer</span><h2 id="first-steps-title">Les premiers gestes</h2></div></div>
+            <div className="section-heading-row"><div><span className="section-kicker">Actions principales</span><h2 id="first-steps-title">Commencer ici</h2></div></div>
             <ol className="help-steps-list">
-              {quickGuides.map((item, index) => <li key={item.title}><span className="help-step-index">0{index + 1}</span><div><h3>{item.title}</h3><p>{item.body}</p></div></li>)}
+              {quickGuides.map((item, index) => <li key={item.title}><span className="help-step-index" aria-hidden="true">0{index + 1}</span><div><h3>{item.title}</h3><p>{item.body}</p><button className="text-button" type="button" aria-label={`${item.action} : ${item.title}`} onClick={() => navigate(item.destination, item.settingsTab)}>{item.action}<Icon name="arrow" size={14} /></button></div></li>)}
             </ol>
           </section>}
 
           <section className="help-section keyboard-reference" aria-labelledby="shortcuts-title">
-            <div className="section-heading-row"><div><span className="section-kicker">Contrôle rapide</span><h2 id="shortcuts-title">Vos raccourcis</h2></div><button className="text-button" type="button" disabled={!snapshot} onClick={() => navigate("settings")}>Modifier<Icon name="arrow" size={14} /></button></div>
+            <div className="section-heading-row"><div><span className="section-kicker">Contrôle rapide</span><h2 id="shortcuts-title">Vos raccourcis</h2></div><button className="text-button" type="button" disabled={!snapshot} onClick={() => navigate("settings", "shortcuts")}>Modifier<Icon name="arrow" size={14} /></button></div>
             {keys ? <>
               <div className="shortcut-reference-row"><span>Basculer lecture / arrêt</span><kbd>{keys.toggle}</kbd></div>
               <div className="shortcut-reference-row"><span>Lire la macro</span><kbd>{keys.play}</kbd></div>

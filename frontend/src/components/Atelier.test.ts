@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ActionRunner, BackendClient, Snapshot } from "../api";
-import { Atelier } from "./Atelier";
+import { Atelier, handleMacroNavigationKey } from "./Atelier";
 
 const baseSnapshot: Snapshot = {
   revision: 2,
@@ -105,6 +105,37 @@ describe("foreground wait in the workshop", () => {
 });
 
 describe("first-use guide and macro selection", () => {
+  it("prevents page scrolling at the listbox boundaries without moving selection", () => {
+    const boundaryKeys = [
+      ["ArrowUp", 0],
+      ["Home", 0],
+      ["ArrowDown", 1],
+      ["End", 1],
+    ] as const;
+
+    for (const [key, index] of boundaryKeys) {
+      let prevented = false;
+      const destination = handleMacroNavigationKey({
+        key,
+        preventDefault: () => { prevented = true; },
+      }, index, 2);
+
+      expect(prevented).toBe(true);
+      expect(destination).toBe(index);
+    }
+  });
+
+  it("leaves unrelated keys to the native button behavior", () => {
+    let prevented = false;
+    const destination = handleMacroNavigationKey({
+      key: "Enter",
+      preventDefault: () => { prevented = true; },
+    }, 0, 2);
+
+    expect(prevented).toBe(false);
+    expect(destination).toBeNull();
+  });
+
   it("explains the highlighted selection without an ambiguous marker", () => {
     const html = renderToStaticMarkup(createElement(Atelier, {
       api: {} as BackendClient,

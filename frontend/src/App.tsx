@@ -6,7 +6,7 @@ import { Atelier } from "./components/Atelier";
 import { Help } from "./components/Help";
 import { ActionErrorFeedback } from "./components/ActionErrorFeedback";
 import { Icon } from "./components/Icon";
-import { Settings } from "./components/Settings";
+import { Settings, type SettingsTab } from "./components/Settings";
 import appIcon from "./assets/app-icon.png";
 
 type View = "atelier" | "settings" | "help";
@@ -57,6 +57,7 @@ export default function App() {
 function DesktopApp() {
   const [api] = useState(() => createBackendClient());
   const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname));
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [connectionError, setConnectionError] = useState("");
@@ -202,8 +203,9 @@ function DesktopApp() {
     window.requestAnimationFrame(() => document.querySelector<HTMLElement>("#main-content h1")?.focus({ preventScroll: true }));
   }, [view]);
 
-  function navigate(next: View) {
+  function navigate(next: View, tab?: SettingsTab) {
     setMobileNavOpen(false);
+    if (next === "settings" && next !== view) setSettingsTab(tab ?? "general");
     if (next !== view) window.history.pushState({}, "", pathForView(next));
     setView(next);
   }
@@ -283,7 +285,7 @@ function DesktopApp() {
         <div className="sidebar-library-label"><span>Bibliothèque</span><span className="library-count">{snapshot?.macros.length ?? "—"}</span></div>
         {snapshot && snapshot.macros.length > 0 ? (
           <nav className="sidebar-macros" aria-label="Accès aux macros">
-            {snapshot.macros.slice(0, 5).map((macro) => <button key={macro.name} type="button" className={`sidebar-macro ${macro.name === snapshot.selectedMacro ? "selected" : ""}`} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}><span aria-hidden="true" />{macro.name}</button>)}
+            {snapshot.macros.slice(0, 5).map((macro) => <button key={macro.name} type="button" className={`sidebar-macro ${macro.name === snapshot.selectedMacro ? "selected" : ""}`} aria-pressed={macro.name === snapshot.selectedMacro} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}><span aria-hidden="true" />{macro.name}</button>)}
             {snapshot.macros.length > 5 && <button className="sidebar-more" type="button" onClick={() => navigate("atelier")}>Voir les {snapshot.macros.length - 5} autres</button>}
           </nav>
         ) : <p className="sidebar-empty">Vos macros apparaîtront ici.</p>}
@@ -306,7 +308,7 @@ function DesktopApp() {
         {connection === "disconnected" && snapshot && <div className="reconnecting-strip" role="status"><span className="connection-mark disconnected"><i /></span>AUTO-COC ne répond pas. Les commandes sont temporairement indisponibles.</div>}
 
         {snapshot && view === "atelier" && <Atelier api={api} snapshot={snapshot} busy={busy} run={run} online={online} showOnboarding={!snapshot.onboardingComplete && !onboardingDismissed} onDismissOnboarding={dismissOnboarding} onCompleteOnboarding={() => { void completeOnboarding(); }} />}
-        {snapshot && view === "settings" && <Settings api={api} snapshot={snapshot} busy={busy} run={run} online={online} />}
+        {snapshot && view === "settings" && <Settings api={api} snapshot={snapshot} busy={busy} run={run} online={online} initialTab={settingsTab} />}
         {view === "help" && <Help api={api} snapshot={snapshot} busy={busy} run={run} navigate={navigate} online={online} onResumeOnboarding={resumeOnboarding} onCompleteOnboarding={() => { void completeOnboarding(); }} />}
         {!snapshot && connection !== "disconnected" && <div className="page-loading" role="status"><div className="loading-trace"><i /><i /><i /></div><span>Chargement de votre atelier</span></div>}
       </div>

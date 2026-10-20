@@ -97,23 +97,78 @@ describe("Settings", () => {
     expect(html).toContain("Les entrées restent ciblées sur la fenêtre du jeu.");
   });
 
-  it("shows Telegram setup as three concrete steps and names the token check accurately", () => {
+  it("guides bot creation first and unlocks token verification only after saving", () => {
     const html = renderSettings(true, "telegram");
 
     expect(html).toContain('aria-label="Étapes pour connecter Telegram"');
     expect(html).toContain("Créer votre bot");
     expect(html).toContain("@BotFather");
-    expect(html).toContain("/newbot");
+    expect(html).toContain('id="telegram-bot-username"');
+    expect(html).toContain('placeholder="Ex. @mon_bot"');
+    expect(html).toContain("Copier /newbot");
+    expect(html).toContain('id="telegram-token" type="password"');
+    expect(html).toContain('class="telegram-feedback" role="status"></p>');
+    expect(html).not.toMatch(/<button[^>]*>Vérifier le token<\/button>/);
+    expect(html).not.toContain("Générer une commande d’appairage");
+    expect(html).not.toContain("/start");
+
+    const savedToken = {
+      ...snapshot.settings.telegram,
+      tokenConfigured: true,
+      status: "disconnected" as const,
+    };
+    const nextStep = renderSettings(true, "telegram", savedToken);
+
+    expect(nextStep).toContain("Vérifier le token");
+    expect(nextStep).toContain("Remplacer le token");
+    expect(nextStep).not.toContain("Générer une commande d’appairage");
+    expect(nextStep).not.toContain("/start");
+    expect(nextStep).not.toContain('id="telegram-token"');
+  });
+
+  it("reveals the pairing command only after generation and tells the user to return", () => {
+    const verifiedTelegram = {
+      ...snapshot.settings.telegram,
+      tokenConfigured: true,
+      status: "connected" as const,
+    };
+    const verified = renderSettings(true, "telegram", verifiedTelegram);
+
+    expect(verified).toContain("Générer une commande d’appairage");
+    expect(verified).not.toContain("/start");
+
+    const waitingTelegram = {
+      ...verifiedTelegram,
+      status: "waiting_pairing" as const,
+      pairingCode: "CODE-SANS-SECRET",
+      pairingExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const waiting = renderSettings(true, "telegram", waitingTelegram);
+
+    expect(waiting).toContain("Dans Telegram, ouvrez une conversation privée avec le nom du bot donné par BotFather");
+    expect(waiting).toContain("/start CODE-SANS-SECRET");
+    expect(waiting).toContain("Revenez dans AUTO-COC : la confirmation apparaîtra ici automatiquement.");
+    expect(waiting).toContain('class="telegram-feedback copy-feedback" role="status"></p>');
+    expect(waiting).toContain('class="telegram-feedback verification-feedback" role="status"></p>');
+    expect(waiting).toContain("Token enregistré et protégé. Il reste masqué.");
+    expect(waiting).not.toContain('id="telegram-token"');
+  });
+
+  it("keeps the optional Telegram purpose and distinguishes its current statuses", () => {
+    const html = renderSettings(true, "telegram");
+
+    expect(html).toContain("L’atelier sur ce PC fonctionne sans Telegram.");
+    expect(html).toContain("Les macros sur ce PC fonctionnent sans Telegram.");
     expect(html).toContain("Vérifier le token");
     expect(html).toContain("Associer votre conversation");
-    expect(html).toContain("Reprenez le nom <code>@username</code> donné par BotFather, recherchez-le dans Telegram et ouvrez une conversation privée avec ce bot.");
-    expect(html).toContain("Envoyez ensuite <code>/start CODE</code> ci-dessous.");
-    expect(html).toContain("Enregistrez le token pour pouvoir le vérifier.");
     expect(html).not.toContain("Tester la connexion");
     expect(html).not.toContain("migration");
   });
 
-  it("keeps Telegram save, verification, and copy feedback separate and labels the copy action", () => {
+  it("keeps Telegram token, BotFather copy, verification, and pairing feedback separate", () => {
+    const firstStep = renderSettings(true, "telegram");
+    expect(firstStep.match(/class="telegram-feedback" role="status"/g)).toHaveLength(2);
+
     const waitingTelegram = {
       ...snapshot.settings.telegram,
       tokenConfigured: true,
@@ -140,6 +195,7 @@ describe("Settings", () => {
     expect(saved).toContain("Token enregistré");
     expect(saved).toContain("À vérifier");
     expect(saved).toContain("Vérifier le token");
+    expect(saved).toContain("Remplacer le token");
 
     const waitingTelegram = {
       ...snapshot.settings.telegram,
@@ -151,7 +207,7 @@ describe("Settings", () => {
     const waiting = renderSettings(true, "telegram", waitingTelegram);
     expect(waiting).toContain("Code en attente");
     expect(waiting).toContain("/start CODE-SANS-SECRET");
-    expect(waiting).toContain("Ce code expire le");
+    expect(waiting).toContain("Le code expire le");
   });
 
   it("shows a completed Telegram conversation association explicitly", () => {

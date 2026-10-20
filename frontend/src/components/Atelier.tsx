@@ -4,6 +4,7 @@ import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
 import { formatDuration } from "./formatDuration";
+import { getOnboardingStage } from "../onboardingStage";
 import {
   getSequencePageBounds,
   getTimelineMarkers,
@@ -13,6 +14,25 @@ import {
 
 type DialogState = { kind: "create" } | { kind: "rename"; macro: MacroSummary } | { kind: "delete"; macro: MacroSummary } | null;
 type PageProps = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void };
+
+// eslint-disable-next-line react-refresh/only-export-components -- exported for focused navigation tests.
+export function handleMacroNavigationKey(
+  event: { key: string; preventDefault: () => void },
+  index: number,
+  itemCount: number,
+): number | null {
+  let destination: number;
+  switch (event.key) {
+    case "ArrowDown": destination = index + 1; break;
+    case "ArrowUp": destination = index - 1; break;
+    case "Home": destination = 0; break;
+    case "End": destination = itemCount - 1; break;
+    default: return null;
+  }
+
+  event.preventDefault();
+  return Math.max(0, Math.min(destination, itemCount - 1));
+}
 
 const eventNames: Record<string, { label: string; icon: "mouse" | "key" | "scroll" | "dots" }> = {
   mouse_move: { label: "Déplacement", icon: "mouse" },
@@ -146,11 +166,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
     : "La séquence sera actualisée à l’arrêt de l’enregistrement.";
   const executionCopy = getExecutionCopy(snapshot.status, selected);
   const selectionVisible = filtered.some((macro) => macro.name === selected?.name);
-  const onboardingStage = snapshot.macros.length === 0
-    ? "create"
-    : !selected || (!selected.readable && snapshot.macros.some((macro) => macro.name !== selected.name && macro.readable))
-      ? "select"
-      : !selected.readable ? "create" : selected.eventCount > 0 ? "play" : "record";
+  const onboardingStage = getOnboardingStage(snapshot);
 
   useEffect(() => {
     setDetail(null);
@@ -244,9 +260,8 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                 tabIndex={current || (!selectionVisible && index === 0) ? 0 : -1}
                 onClick={() => run("select", () => api.selectMacro(macro.name))}
                 onKeyDown={(event) => {
-                  const destination = event.key === "ArrowDown" ? index + 1 : event.key === "ArrowUp" ? index - 1 : event.key === "Home" ? 0 : event.key === "End" ? filtered.length - 1 : -1;
-                  if (destination < 0 || destination >= filtered.length) return;
-                  event.preventDefault();
+                  const destination = handleMacroNavigationKey(event, index, filtered.length);
+                  if (destination === null || destination === index) return;
                   const target = filtered[destination];
                   void run("select", () => api.selectMacro(target.name));
                   window.requestAnimationFrame(() => document.getElementById(`macro-${encodeURIComponent(target.name)}`)?.focus());

@@ -3,9 +3,9 @@ import { Icon } from "./Icon";
 type Stage = "create" | "select" | "record" | "play";
 
 const steps = [
-  { key: "create", title: "Créer ou choisir une macro", detail: "Donnez-lui un nom ou choisissez-la dans la bibliothèque." },
-  { key: "record", title: "Capturer une séquence", detail: "Après le compte à rebours, enregistrez plus de 3 s. Les 3 dernières secondes seront retirées." },
-  { key: "play", title: "Relire dans Clash of Clans", detail: "Le jeu doit être la fenêtre active." },
+  { key: "create", title: "Créer une macro" },
+  { key: "record", title: "Enregistrer une séquence" },
+  { key: "play", title: "Lire dans Clash of Clans" },
 ] as const;
 
 const actionLabels: Record<Stage, string> = {
@@ -26,11 +26,17 @@ export function OnboardingGuide({ mode, stage = "create", disabled, busy, onPrim
   onResume?: () => void;
 }) {
   const helpMode = mode === "help";
-  const activeStep = stage === "select" ? 0 : steps.findIndex((step) => step.key === stage);
+  const activeStep = stage === "record" ? 1 : stage === "play" ? 2 : 0;
+  const stageTitle: Record<Stage, string> = {
+    create: steps[0].title,
+    select: "Choisir une macro",
+    record: steps[1].title,
+    play: steps[2].title,
+  };
   const stageCopy: Record<Stage, string> = {
-    create: "Commencez par nommer la macro que vous allez enregistrer.",
-    select: "Parcourez la bibliothèque, puis sélectionnez une macro lisible pour continuer.",
-    record: "Après le compte à rebours, laissez l’enregistrement tourner plus de 3 s avant de l’arrêter.",
+    create: "Donnez un nom à la macro que vous allez enregistrer.",
+    select: "Choisissez une macro lisible dans la bibliothèque.",
+    record: "Après le compte à rebours, enregistrez plus de 3 s. Les 3 dernières secondes sont retirées.",
     play: "La séquence est prête. Clash of Clans doit être la fenêtre active pour la lire.",
   };
 
@@ -38,16 +44,16 @@ export function OnboardingGuide({ mode, stage = "create", disabled, busy, onPrim
     <section className={`onboarding-guide ${helpMode ? "" : "onboarding-guide-atelier"}`} aria-labelledby="onboarding-title">
       <div className="onboarding-icon" aria-hidden="true"><Icon name="keyboard" size={18} /></div>
       <div className="onboarding-copy">
-        <span className="section-kicker">{helpMode ? "Guide de démarrage" : `Première utilisation · étape ${activeStep + 1} sur 3`}</span>
-        <h2 id="onboarding-title">{helpMode ? "Les trois gestes pour démarrer" : stage === "select" ? "Choisir une macro" : steps[activeStep]?.title ?? steps[0].title}</h2>
-        {!helpMode && <p>{stageCopy[stage]}</p>}
-        <ol className="onboarding-checklist">
-          {steps.map((step, index) => (
-            <li key={step.key} className={!helpMode && index < activeStep ? "complete" : !helpMode && index === activeStep ? "current" : ""} aria-current={index === activeStep && !helpMode ? "step" : undefined}>
-              <span>{!helpMode && index < activeStep ? <Icon name="check" size={12} /> : `0${index + 1}`}</span>
-              <div><strong>{step.title}</strong><small>{step.detail}</small></div>
-            </li>
-          ))}
+        <span className="section-kicker">{helpMode ? `Étape active · ${activeStep + 1} sur 3` : `Première utilisation · étape ${activeStep + 1} sur 3`}</span>
+        <h2 id="onboarding-title">{stageTitle[stage]}</h2>
+        <p>{stageCopy[stage]}</p>
+        <ol className="onboarding-checklist" aria-label={`Progression du guide, étape ${activeStep + 1} sur 3`}>
+          {steps.map((step, index) => {
+            const title = index === activeStep ? stageTitle[stage] : step.title;
+            return <li key={step.key} className={index < activeStep ? "complete" : index === activeStep ? "current" : ""} aria-label={`${title}, ${index < activeStep ? "terminée" : index === activeStep ? "étape actuelle" : "à venir"}`} aria-current={index === activeStep ? "step" : undefined}>
+              <span>{index < activeStep ? <Icon name="check" size={12} /> : `0${index + 1}`}</span>
+            </li>;
+          })}
         </ol>
       </div>
       <div className="onboarding-actions">
