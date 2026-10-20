@@ -283,6 +283,39 @@ try {
         LOCALAPPDATA = $localAppData
         WEBVIEW2_USER_DATA_FOLDER = $webViewData
     }
+    $appDataDirectory = Join-Path $localAppData 'AUTO-COC'
+    New-Item -ItemType Directory -Path $appDataDirectory | Out-Null
+    $smokeSettings = [ordered]@{
+        schemaVersion = 1
+        settings = [ordered]@{
+            loop = $false
+            requireCocForeground = $false
+            cocPath = ''
+            shortcuts = [ordered]@{
+                toggle = 'F1'
+                play = 'Ctrl+Shift+1'
+                stop = 'Ctrl+Shift+0'
+            }
+            telegram = [ordered]@{
+                tokenConfigured = $false
+                paired = $false
+                status = 'not_configured'
+                pairingCode = $null
+                pairingExpiresAt = $null
+            }
+        }
+        selectedMacro = $null
+        onboardingComplete = $false
+        present = @()
+        telegramOwner = $null
+    }
+    $settingsJson = ConvertTo-Json -InputObject $smokeSettings -Depth 5
+    [System.IO.File]::WriteAllText(
+        (Join-Path $appDataDirectory 'settings.json'),
+        $settingsJson,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host 'Isolated UIA profile: foreground guard off for empty recording without CoC.'
 
     # NSIS requires /D= to be the final, unquoted argument.
     $installerProcess = Start-SmokeProcess -Path $installers[0].FullName `
