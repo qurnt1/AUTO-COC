@@ -28,13 +28,13 @@ export function Dialog({ title, description, onClose, children }: {
   }, []);
 
   return (
-    <dialog className="dialog" ref={ref} aria-labelledby="dialog-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
+    <dialog className="dialog" ref={ref} aria-labelledby="dialog-title" aria-describedby={description ? "dialog-description" : undefined} onCancel={(event) => { event.preventDefault(); onClose(); }}>
       <div className="dialog-topline">
         <span className="dialog-marker" aria-hidden="true" />
         <button className="icon-button subtle" type="button" aria-label="Fermer" onClick={onClose}><Icon name="close" /></button>
       </div>
       <h2 id="dialog-title">{title}</h2>
-      {description && <p className="dialog-description">{description}</p>}
+      {description && <p className="dialog-description" id="dialog-description">{description}</p>}
       {children}
     </dialog>
   );

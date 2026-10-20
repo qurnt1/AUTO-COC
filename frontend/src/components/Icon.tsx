@@ -1,6 +1,6 @@
 import type { ReactNode, SVGProps } from "react";
 
-type IconName = "grid" | "sliders" | "help" | "search" | "plus" | "play" | "stop" | "record" | "more" | "lock" | "chevron" | "arrow" | "close" | "edit" | "trash" | "check" | "folder" | "keyboard" | "shield" | "activity" | "refresh" | "spark" | "mouse" | "key" | "scroll" | "dots";
+type IconName = "grid" | "sliders" | "help" | "search" | "plus" | "play" | "stop" | "record" | "more" | "chevron" | "arrow" | "close" | "edit" | "trash" | "check" | "folder" | "keyboard" | "shield" | "activity" | "refresh" | "spark" | "mouse" | "key" | "scroll" | "dots" | "copy";
 
 const paths: Record<IconName, ReactNode> = {
   grid: <><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/></>,
@@ -12,7 +12,6 @@ const paths: Record<IconName, ReactNode> = {
   stop: <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none"/>,
   record: <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/>,
   more: <><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></>,
-  lock: <><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></>,
   chevron: <path d="m9 18 6-6-6-6"/>,
   arrow: <><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></>,
   close: <><path d="m6 6 12 12M18 6 6 18"/></>,
@@ -29,6 +28,7 @@ const paths: Record<IconName, ReactNode> = {
   key: <><circle cx="8" cy="10" r="4"/><path d="m11 13 8 8m-3-3 2-2m-5-1 2-2"/></>,
   scroll: <><path d="M4 7v10M8 5v14M12 8v8M16 4v16M20 7v10"/></>,
   dots: <><path d="M4 12h.1M8 12h.1M12 12h.1M16 12h.1M20 12h.1" strokeWidth="3"/></>,
+  copy: <><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></>,
 };
 
 export function Icon({ name, size = 18, ...props }: SVGProps<SVGSVGElement> & { name: IconName; size?: number }) {

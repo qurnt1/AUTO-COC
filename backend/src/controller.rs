@@ -1,5 +1,4 @@
 use std::{
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,12 +11,9 @@ use tokio::{
 };
 
 use crate::{
-    native_input::{NativeEvent, NativeInput, PlaybackFailure},
+    native_input::{NativeEvent, NativeInput, PlaybackFailure, PlaybackStopReason},
     storage::{Store, StoreError},
-    types::{
-        AppStatus, MigrationPreview, MigrationResult, MigrationStatus, PendingAction,
-        RecordingPhase, SessionStatus, Snapshot, TelegramStatus,
-    },
+    types::{AppStatus, PendingAction, RecordingPhase, SessionStatus, Snapshot, TelegramStatus},
 };
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(300);
@@ -25,18 +21,6 @@ const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const SHUTDOWN_CONFIRM_LIFETIME: Duration = Duration::from_secs(30);
 const FOREGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-
-async fn run_migration_blocking<T, E>(
-    operation: impl FnOnce() -> Result<T, E> + Send + 'static,
-) -> Result<T, E>
-where
-    T: Send + 'static,
-    E: From<StoreError> + Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|_| E::from(StoreError::InvalidData))?
-}
 
 #[derive(Clone, Debug)]
 enum PendingOperation {
@@ -90,8 +74,6 @@ pub enum ControllerError {
     Expired,
     #[error("telegram pairing is temporarily rate limited")]
     PairingRateLimited,
-    #[error("migration folder selection was cancelled")]
-    MigrationCancelled,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +118,7 @@ struct Machine {
     closing: bool,
     shutdown_complete: bool,
     pending_recording: Option<(String, Vec<Value>, bool)>,
+    coc_reload_in_progress: bool,
     coc_launched_once: bool,
     cycles: u64,
     revision: u64,
@@ -143,10 +126,44 @@ struct Machine {
     pairing_cooldown_until: Option<Instant>,
     shutdown: Option<ShutdownConfirmation>,
     last_error: Option<String>,
-    migration_source: Option<PathBuf>,
-    migration_preview: Option<MigrationPreview>,
-    migration_already_imported: bool,
     foreground_loss_handled: bool,
+}
+
+struct CocReloadReservation {
+    machine: Arc<Mutex<Machine>>,
+    revision_tx: watch::Sender<u64>,
+    task: Option<JoinHandle<std::io::Result<()>>>,
+    succeeded: Option<bool>,
+    active: bool,
+}
+
+impl Drop for CocReloadReservation {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let machine = Arc::clone(&self.machine);
+        let revision_tx = self.revision_tx.clone();
+        let task = self.task.take();
+        let succeeded = self.succeeded;
+        runtime.spawn(async move {
+            let succeeded = if let Some(task) = task {
+                matches!(task.await, Ok(Ok(())))
+            } else {
+                succeeded.unwrap_or(false)
+            };
+            let mut machine = machine.lock().await;
+            machine.coc_reload_in_progress = false;
+            if succeeded {
+                machine.coc_launched_once = true;
+                machine.revision = machine.revision.saturating_add(1);
+                revision_tx.send_replace(machine.revision);
+            }
+        });
+    }
 }
 
 pub struct Controller {
@@ -170,7 +187,6 @@ struct ShutdownRaceGate {
 
 impl Controller {
     pub fn new(store: Store) -> Self {
-        let migration_already_imported = store.migration_was_imported().unwrap_or(false);
         let (revision_tx, _) = watch::channel(1);
         let (native_event_loop_shutdown, _) = watch::channel(false);
         let (native_events_tx, native_events_rx) = mpsc::unbounded_channel();
@@ -181,6 +197,7 @@ impl Controller {
                 closing: false,
                 shutdown_complete: false,
                 pending_recording: None,
+                coc_reload_in_progress: false,
                 coc_launched_once: false,
                 cycles: 0,
                 revision: 1,
@@ -188,9 +205,6 @@ impl Controller {
                 pairing_cooldown_until: None,
                 shutdown: None,
                 last_error: None,
-                migration_source: None,
-                migration_preview: None,
-                migration_already_imported,
                 foreground_loss_handled: false,
             })),
             native: Mutex::new(None),
@@ -382,25 +396,48 @@ impl Controller {
             }
             NativeEvent::PlaybackEnded { playback_id } => {
                 let mut machine = self.machine.lock().await;
-                if active_playback_id(&machine.operation) == Some(playback_id) {
-                    machine.operation = Operation::Idle;
+                let acknowledge = self.acknowledge_playback_terminal(playback_id).await;
+                if apply_playback_terminal(
+                    &mut machine,
+                    &NativeEvent::PlaybackEnded { playback_id },
+                ) {
                     self.changed(&mut machine).await?;
                 }
+                acknowledge?;
             }
             NativeEvent::PlaybackFailed {
                 playback_id,
                 reason,
             } => {
                 let mut machine = self.machine.lock().await;
-                if active_playback_id(&machine.operation) == Some(playback_id) {
-                    machine.operation = Operation::Idle;
-                    machine.last_error = Some(match reason {
-                        PlaybackFailure::Input => "La lecture a été interrompue par une erreur de saisie Windows.".into(),
-                        PlaybackFailure::Release => "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris.".into(),
-                        PlaybackFailure::InputAndRelease => "La lecture a échoué et AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris.".into(),
-                    });
+                let acknowledge = self.acknowledge_playback_terminal(playback_id).await;
+                if apply_playback_terminal(
+                    &mut machine,
+                    &NativeEvent::PlaybackFailed {
+                        playback_id,
+                        reason,
+                    },
+                ) {
                     self.changed(&mut machine).await?;
                 }
+                acknowledge?;
+            }
+            NativeEvent::PlaybackStopped {
+                playback_id,
+                reason,
+            } => {
+                let mut machine = self.machine.lock().await;
+                let acknowledge = self.acknowledge_playback_terminal(playback_id).await;
+                if apply_playback_terminal(
+                    &mut machine,
+                    &NativeEvent::PlaybackStopped {
+                        playback_id,
+                        reason,
+                    },
+                ) {
+                    self.changed(&mut machine).await?;
+                }
+                acknowledge?;
             }
             NativeEvent::PlaybackPaused { playback_id } => {
                 let mut machine = self.machine.lock().await;
@@ -650,6 +687,9 @@ impl Controller {
     pub async fn shutdown_services(&self) -> Result<(), ControllerError> {
         let operation = {
             let mut machine = self.machine.lock().await;
+            if machine.coc_reload_in_progress {
+                return Err(ControllerError::InvalidState);
+            }
             if machine.closing {
                 return if machine.shutdown_complete
                     && matches!(machine.operation, Operation::Idle)
@@ -878,94 +918,6 @@ impl Controller {
         self.changed(&mut machine).await
     }
 
-    pub async fn migration_status(
-        &self,
-    ) -> Result<(MigrationStatus, Option<MigrationPreview>), ControllerError> {
-        let machine = self.machine.lock().await;
-        Ok((
-            MigrationStatus {
-                source_selected: machine.migration_source.is_some(),
-                available: machine
-                    .migration_preview
-                    .as_ref()
-                    .is_some_and(|preview| preview.available),
-                already_imported: machine.migration_already_imported,
-            },
-            machine.migration_preview.clone(),
-        ))
-    }
-
-    pub async fn select_migration_source(
-        &self,
-    ) -> Result<(Snapshot, MigrationPreview), ControllerError> {
-        let root = {
-            let machine = self.machine.lock().await;
-            ensure_idle(&machine)?;
-            machine.store.root().to_owned()
-        };
-        let selected = tokio::task::spawn_blocking(|| {
-            rfd::FileDialog::new()
-                .set_title("Choisir l’ancien dossier AUTO-COC")
-                .pick_folder()
-        })
-        .await
-        .map_err(|_| StoreError::InvalidData)?
-        .ok_or(ControllerError::MigrationCancelled)?;
-        let (config, preview, already_imported) =
-            run_migration_blocking(move || Store::preview_legacy_at(&root, &selected)).await?;
-        let mut machine = self.machine.lock().await;
-        ensure_idle(&machine)?;
-        machine.migration_source = Some(config);
-        machine.migration_preview = Some(preview.clone());
-        machine.migration_already_imported = already_imported;
-        let snapshot = self.changed(&mut machine).await?;
-        Ok((snapshot, preview))
-    }
-
-    pub async fn import_migration_source(
-        &self,
-    ) -> Result<(Snapshot, MigrationResult), ControllerError> {
-        self.import_migration_source_with_token_installation(|| {})
-            .await
-    }
-
-    async fn import_migration_source_with_token_installation(
-        &self,
-        before_token_install: impl FnOnce() + Send + 'static,
-    ) -> Result<(Snapshot, MigrationResult), ControllerError> {
-        let machine = Arc::clone(&self.machine);
-        let (mut machine, result) = run_migration_blocking(move || {
-            let mut machine = machine.blocking_lock_owned();
-            ensure_idle(&machine)?;
-            let source = machine
-                .migration_source
-                .clone()
-                .ok_or(ControllerError::MigrationCancelled)?;
-            let imported = {
-                let Machine { store, pairing, .. } = &mut *machine;
-                store.import_legacy_with_token_installation(&source, || {
-                    *pairing = None;
-                    before_token_install();
-                })
-            };
-            let result = imported.and_then(|result| {
-                machine.migration_already_imported = true;
-                machine
-                    .store
-                    .preview_legacy(&source)
-                    .map(|(normalized_source, preview, _)| {
-                        machine.migration_source = Some(normalized_source);
-                        machine.migration_preview = Some(preview);
-                        result
-                    })
-            });
-            Ok::<_, ControllerError>((machine, result))
-        })
-        .await?;
-        let snapshot = self.changed(&mut machine).await?;
-        Ok((snapshot, result?))
-    }
-
     pub async fn start_recording_from_ui(&self) -> Result<Snapshot, ControllerError> {
         let mut machine = self.machine.lock().await;
         ensure_idle(&machine)?;
@@ -1062,7 +1014,7 @@ impl Controller {
     }
 
     pub async fn start_playback(&self) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(None, true, None, false).await
+        self.start_macro_playback(true, None, false).await
     }
 
     pub async fn start_playback_from_ui(&self) -> Result<Snapshot, ControllerError> {
@@ -1078,7 +1030,7 @@ impl Controller {
             }
             _ => {}
         }
-        self.start_macro_playback(None, true, None, true).await
+        self.start_macro_playback(true, None, true).await
     }
 
     async fn request_playback_resume(&self) -> Result<Snapshot, ControllerError> {
@@ -1132,23 +1084,12 @@ impl Controller {
         token: &str,
         owner: crate::telegram::TelegramOwner,
     ) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(None, true, Some((token, owner)), false)
-            .await
-    }
-
-    pub async fn play_named_macro_for_telegram(
-        &self,
-        name: &str,
-        token: &str,
-        owner: crate::telegram::TelegramOwner,
-    ) -> Result<Snapshot, ControllerError> {
-        self.start_macro_playback(Some(name), false, Some((token, owner)), false)
+        self.start_macro_playback(true, Some((token, owner)), false)
             .await
     }
 
     async fn start_macro_playback(
         &self,
-        requested_name: Option<&str>,
         use_saved_loop: bool,
         authority: Option<(&str, crate::telegram::TelegramOwner)>,
         allow_wait: bool,
@@ -1158,10 +1099,7 @@ impl Controller {
             ensure_telegram_authorized(&machine, token, owner)?;
         }
         ensure_idle(&machine)?;
-        let name = match requested_name {
-            Some(name) => name,
-            None => machine.store.selected_macro().ok_or(StoreError::NotFound)?,
-        };
+        let name = machine.store.selected_macro().ok_or(StoreError::NotFound)?;
         let macro_file = machine.store.get_macro(name)?;
         if macro_file.steps.is_empty() {
             return Err(ControllerError::EmptyMacro);
@@ -1174,8 +1112,10 @@ impl Controller {
         let native = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?;
-        let foreground = !require_coc_foreground || native.coc_is_foreground();
-        if require_coc_foreground && !foreground && allow_wait {
+        let foreground = native.coc_is_foreground();
+        let should_wait =
+            playback_waits_for_foreground(require_coc_foreground, allow_wait, foreground)?;
+        if should_wait {
             arm_for_foreground(
                 &mut machine,
                 PendingOperation::Playing {
@@ -1186,7 +1126,7 @@ impl Controller {
             );
             return self.changed(&mut machine).await;
         }
-        ensure_start_foreground(require_coc_foreground, foreground)?;
+        ensure_start_foreground(true, foreground)?;
         let pending = (allow_wait && require_coc_foreground).then(|| PendingOperation::Playing {
             macro_name: macro_name.clone(),
             steps: Arc::clone(&steps),
@@ -1461,16 +1401,29 @@ impl Controller {
         ) {
             return Err(ControllerError::InvalidState);
         }
+        let playback_id =
+            active_playback_id(&machine.operation).ok_or(ControllerError::InvalidState)?;
         let native = self.native.lock().await;
-        native
+        let terminal = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?
             .stop_playback()
-            .await
-            .map_err(map_native_error)?;
-        machine.operation = Operation::Idle;
-        machine.foreground_loss_handled = false;
-        self.changed(&mut machine).await
+            .await;
+        let stopped = apply_stopped_playback_result(&mut machine, playback_id, terminal);
+        let snapshot = self.changed(&mut machine).await?;
+        stopped?;
+        Ok(snapshot)
+    }
+
+    async fn acknowledge_playback_terminal(&self, playback_id: u64) -> Result<(), ControllerError> {
+        let native = self.native.lock().await;
+        if let Some(native) = native.as_ref() {
+            native
+                .acknowledge_playback_terminal(playback_id)
+                .await
+                .map_err(map_native_error)?;
+        }
+        Ok(())
     }
 
     pub async fn start_pairing(&self) -> Result<(String, String, Snapshot), ControllerError> {
@@ -1732,6 +1685,48 @@ impl Controller {
         self.launch_coc_with_authority(Some((token, owner))).await
     }
 
+    pub async fn reload_coc_for_telegram(
+        &self,
+        token: &str,
+        owner: crate::telegram::TelegramOwner,
+    ) -> Result<Snapshot, ControllerError> {
+        let path = {
+            let mut machine = self.machine.lock().await;
+            ensure_telegram_authorized(&machine, token, owner)?;
+            ensure_idle(&machine)?;
+            machine.coc_reload_in_progress = true;
+            machine.store.settings().coc_path.clone()
+        };
+
+        let mut reservation = CocReloadReservation {
+            machine: Arc::clone(&self.machine),
+            revision_tx: self.revision_tx.clone(),
+            task: Some(tokio::task::spawn_blocking(move || {
+                crate::system::reload_configured_path(&path)
+            })),
+            succeeded: None,
+            active: true,
+        };
+        let reload = reservation
+            .task
+            .as_mut()
+            .expect("reload task is set")
+            .await
+            .map_err(|_| ControllerError::NativeInputFailed)
+            .and_then(|result| {
+                result.map_err(|error| ControllerError::Store(StoreError::Io(error)))
+            });
+        reservation.succeeded = Some(reload.is_ok());
+        reservation.task.take();
+
+        let mut machine = self.machine.lock().await;
+        machine.coc_reload_in_progress = false;
+        reservation.active = false;
+        reload?;
+        machine.coc_launched_once = true;
+        self.changed(&mut machine).await
+    }
+
     async fn launch_coc_with_authority(
         &self,
         authority: Option<(&str, crate::telegram::TelegramOwner)>,
@@ -1848,14 +1843,6 @@ impl Controller {
                 elapsed_seconds: elapsed,
                 cycles: machine.cycles,
             },
-            migration: MigrationStatus {
-                source_selected: machine.migration_source.is_some(),
-                available: machine
-                    .migration_preview
-                    .as_ref()
-                    .is_some_and(|preview| preview.available),
-                already_imported: machine.migration_already_imported,
-            },
             onboarding_complete: machine.store.onboarding_complete(),
             last_error: machine.last_error.clone(),
         })
@@ -1863,7 +1850,10 @@ impl Controller {
 }
 
 fn ensure_idle(machine: &Machine) -> Result<(), ControllerError> {
-    if !machine.closing && matches!(&machine.operation, Operation::Idle) {
+    if !machine.closing
+        && !machine.coc_reload_in_progress
+        && matches!(&machine.operation, Operation::Idle)
+    {
         Ok(())
     } else {
         Err(ControllerError::InvalidState)
@@ -1875,6 +1865,20 @@ fn ensure_start_foreground(required: bool, foreground: bool) -> Result<(), Contr
         Err(ControllerError::CocNotForeground)
     } else {
         Ok(())
+    }
+}
+
+fn playback_waits_for_foreground(
+    require_coc_foreground: bool,
+    allow_wait: bool,
+    foreground: bool,
+) -> Result<bool, ControllerError> {
+    if foreground {
+        Ok(false)
+    } else if require_coc_foreground && allow_wait {
+        Ok(true)
+    } else {
+        Err(ControllerError::CocNotForeground)
     }
 }
 
@@ -2040,6 +2044,99 @@ fn active_playback_id(operation: &Operation) -> Option<u64> {
     }
 }
 
+fn playback_failure_message(reason: PlaybackFailure) -> &'static str {
+    match reason {
+        PlaybackFailure::Input => "La lecture a été interrompue par une erreur de saisie Windows.",
+        PlaybackFailure::Release => {
+            "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris."
+        }
+        PlaybackFailure::InputAndRelease => {
+            "La lecture a échoué et AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris."
+        }
+    }
+}
+
+fn playback_stop_message(reason: PlaybackStopReason) -> &'static str {
+    match reason {
+        PlaybackStopReason::FocusLost => {
+            "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée et ne reprendra pas automatiquement."
+        }
+        PlaybackStopReason::TargetLost => {
+            "La fenêtre ou le processus Clash of Clans a disparu. La lecture a été arrêtée."
+        }
+    }
+}
+
+fn apply_playback_terminal(machine: &mut Machine, event: &NativeEvent) -> bool {
+    let (playback_id, failure, stop_reason) = match event {
+        NativeEvent::PlaybackEnded { playback_id } => (*playback_id, None, None),
+        NativeEvent::PlaybackFailed {
+            playback_id,
+            reason,
+        } => (*playback_id, Some(*reason), None),
+        NativeEvent::PlaybackStopped {
+            playback_id,
+            reason,
+        } => (*playback_id, None, Some(*reason)),
+        _ => return false,
+    };
+    if active_playback_id(&machine.operation) != Some(playback_id) {
+        return false;
+    }
+    machine.operation = Operation::Idle;
+    machine.foreground_loss_handled = false;
+    if let Some(reason) = failure {
+        machine.last_error = Some(playback_failure_message(reason).into());
+    }
+    if let Some(reason) = stop_reason {
+        machine.last_error = Some(playback_stop_message(reason).into());
+    }
+    true
+}
+
+fn apply_stopped_playback_result(
+    machine: &mut Machine,
+    playback_id: u64,
+    result: std::io::Result<Option<NativeEvent>>,
+) -> Result<(), ControllerError> {
+    let terminal = match result {
+        Ok(Some(terminal)) => terminal,
+        Ok(None) | Err(_) => {
+            machine.operation = Operation::Idle;
+            machine.foreground_loss_handled = false;
+            machine.last_error = Some(
+                "La fin de la lecture n’a pas pu être confirmée par le périphérique d’entrée."
+                    .into(),
+            );
+            return Err(ControllerError::NativeInputFailed);
+        }
+    };
+    let terminal_id = match &terminal {
+        NativeEvent::PlaybackEnded { playback_id }
+        | NativeEvent::PlaybackFailed { playback_id, .. }
+        | NativeEvent::PlaybackStopped { playback_id, .. } => *playback_id,
+        _ => {
+            machine.operation = Operation::Idle;
+            machine.foreground_loss_handled = false;
+            machine.last_error =
+                Some("Le périphérique d’entrée a renvoyé un résultat de lecture invalide.".into());
+            return Err(ControllerError::NativeInputFailed);
+        }
+    };
+    if terminal_id != playback_id || !apply_playback_terminal(machine, &terminal) {
+        machine.operation = Operation::Idle;
+        machine.foreground_loss_handled = false;
+        machine.last_error =
+            Some("Le périphérique d’entrée a renvoyé un résultat de lecture inattendu.".into());
+        return Err(ControllerError::NativeInputFailed);
+    }
+    if matches!(terminal, NativeEvent::PlaybackFailed { .. }) {
+        Err(ControllerError::NativeInputFailed)
+    } else {
+        Ok(())
+    }
+}
+
 fn playback_elapsed(started: &Instant, paused_at: &Instant) -> f64 {
     started
         .elapsed()
@@ -2182,17 +2279,6 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn migration_io_runs_on_a_blocking_thread() {
-        let async_thread = std::thread::current().id();
-        let blocking_thread =
-            run_migration_blocking(|| Ok::<_, StoreError>(std::thread::current().id()))
-                .await
-                .unwrap();
-
-        assert_ne!(blocking_thread, async_thread);
-    }
 
     #[test]
     fn start_guard_requires_foreground_only_when_enabled() {
@@ -2782,7 +2868,7 @@ mod tests {
             Err(ControllerError::InvalidState)
         ));
         assert!(
-            !controller
+            controller
                 .snapshot()
                 .await
                 .unwrap()
@@ -2927,6 +3013,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coc_reload_reservation_excludes_macro_operations() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.coc_reload_in_progress = true;
+
+        assert!(matches!(
+            controller.create_macro("Blocked").await,
+            Err(ControllerError::InvalidState)
+        ));
+    }
+
+    #[tokio::test]
     async fn shutdown_confirmation_cannot_run_during_playback() {
         let dir = tempdir().unwrap();
         let controller = Controller::new(Store::open_at(dir.path()).unwrap());
@@ -3051,6 +3149,170 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replay_cannot_start_outside_coc_when_automatic_guard_is_disabled() {
+        assert!(matches!(
+            playback_waits_for_foreground(false, false, false),
+            Err(ControllerError::CocNotForeground)
+        ));
+        assert!(matches!(
+            playback_waits_for_foreground(false, true, false),
+            Err(ControllerError::CocNotForeground)
+        ));
+        assert!(!playback_waits_for_foreground(false, false, true).unwrap());
+        assert!(playback_waits_for_foreground(true, true, false).unwrap());
+    }
+
+    #[tokio::test]
+    async fn controller_stop_result_keeps_release_failure_idle_and_visible() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        {
+            let mut machine = controller.machine.lock().await;
+            machine.operation = Operation::Playing {
+                macro_name: "Release failure".into(),
+                started: Instant::now(),
+                playback_id: 71,
+            };
+
+            let result = apply_stopped_playback_result(
+                &mut machine,
+                71,
+                Ok(Some(NativeEvent::PlaybackFailed {
+                    playback_id: 71,
+                    reason: PlaybackFailure::Release,
+                })),
+            );
+
+            assert!(matches!(result, Err(ControllerError::NativeInputFailed)));
+            assert!(matches!(machine.operation, Operation::Idle));
+            assert!(
+                machine
+                    .last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("n’a pas pu relâcher")
+            );
+            let snapshot = controller.changed(&mut machine).await.unwrap();
+            assert!(matches!(snapshot.status, AppStatus::Idle));
+            assert!(
+                snapshot
+                    .last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("n’a pas pu relâcher")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_stop_result_treats_normal_cancellation_as_success() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        let mut machine = controller.machine.lock().await;
+        machine.operation = Operation::Playing {
+            macro_name: "Cancelled normally".into(),
+            started: Instant::now(),
+            playback_id: 72,
+        };
+
+        apply_stopped_playback_result(
+            &mut machine,
+            72,
+            Ok(Some(NativeEvent::PlaybackEnded { playback_id: 72 })),
+        )
+        .unwrap();
+
+        assert!(matches!(machine.operation, Operation::Idle));
+        assert_eq!(machine.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn controller_stop_result_reports_focus_loss_as_safe_stop() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        let mut machine = controller.machine.lock().await;
+        machine.operation = Operation::Playing {
+            macro_name: "Focus lost".into(),
+            started: Instant::now(),
+            playback_id: 74,
+        };
+
+        apply_stopped_playback_result(
+            &mut machine,
+            74,
+            Ok(Some(NativeEvent::PlaybackStopped {
+                playback_id: 74,
+                reason: PlaybackStopReason::FocusLost,
+            })),
+        )
+        .unwrap();
+
+        assert!(matches!(machine.operation, Operation::Idle));
+        assert_eq!(
+            machine.last_error.as_deref(),
+            Some(
+                "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée et ne reprendra pas automatiquement."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_natural_target_loss_is_reported_without_input_failure() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::Paused {
+            macro_name: "Target lost".into(),
+            started: Instant::now(),
+            paused_at: Instant::now(),
+            playback_id: 75,
+        };
+
+        controller
+            .handle_native_event(NativeEvent::PlaybackStopped {
+                playback_id: 75,
+                reason: PlaybackStopReason::TargetLost,
+            })
+            .await
+            .unwrap();
+        let snapshot = controller.snapshot().await.unwrap();
+
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("La fenêtre ou le processus Clash of Clans a disparu. La lecture a été arrêtée.")
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_stop_join_failure_is_idle_visible_and_returned() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        let mut machine = controller.machine.lock().await;
+        machine.operation = Operation::Playing {
+            macro_name: "Join failure".into(),
+            started: Instant::now(),
+            playback_id: 73,
+        };
+
+        let result = apply_stopped_playback_result(
+            &mut machine,
+            73,
+            Err(std::io::Error::other("playback task panicked")),
+        );
+        let snapshot = controller.changed(&mut machine).await.unwrap();
+
+        assert!(matches!(result, Err(ControllerError::NativeInputFailed)));
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("n’a pas pu être confirmée")
+        );
+    }
+
     #[tokio::test]
     async fn stale_playback_failure_does_not_stop_a_new_playback() {
         let dir = tempdir().unwrap();
@@ -3121,254 +3383,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn migration_import_rechecks_idle_after_the_source_was_selected() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        let macros = config.join("macros");
-        std::fs::create_dir_all(&macros).unwrap();
-        let source_macro = serde_json::json!({
-            "name":"Recharger COC",
-            "updated_at":"2025-01-01T00:00:00Z",
-            "sha1":"legacy",
-            "steps":[{"t":0.0,"type":"nop","data":{}}]
-        });
-        std::fs::write(
-            macros.join("Recharger COC.json"),
-            serde_json::to_vec(&source_macro).unwrap(),
-        )
-        .unwrap();
-
-        let controller = Controller::new(Store::open_at(app.path()).unwrap());
-        let protected_path = app.path().join("macros/Recharger COC.json");
-        let placeholder = std::fs::read(&protected_path).unwrap();
-        {
-            let mut machine = controller.machine.lock().await;
-            machine.migration_source = Some(config);
-            machine.operation = Operation::Recording {
-                macro_name: "Recharger COC".into(),
-                started: Instant::now(),
-            };
-        }
-
-        assert!(matches!(
-            controller.import_migration_source().await,
-            Err(ControllerError::InvalidState)
-        ));
-        assert_eq!(std::fs::read(&protected_path).unwrap(), placeholder);
-
-        controller.machine.lock().await.operation = Operation::Idle;
-        let (_, result) = controller.import_migration_source().await.unwrap();
-        assert_eq!(result.imported.macros, 1);
-        assert_eq!(
-            controller
-                .machine
-                .lock()
-                .await
-                .store
-                .get_macro("Recharger COC")
-                .unwrap()
-                .steps,
-            source_macro["steps"].as_array().unwrap().clone()
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_migration_publishes_a_snapshot_revision() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("data.csv"), b"parameter_name;parameter_value\n").unwrap();
-
-        let controller = Controller::new(Store::open_at(app.path()).unwrap());
-        std::fs::write(app.path().join("migration-manifests"), b"not a directory").unwrap();
-        controller.machine.lock().await.migration_source = Some(config);
-        let mut revisions = controller.revision_tx.subscribe();
-        let previous_revision = controller.snapshot().await.unwrap().revision;
-
-        assert!(matches!(
-            controller.import_migration_source().await,
-            Err(ControllerError::Store(StoreError::Io(_)))
-        ));
-        revisions.changed().await.unwrap();
-        let updated_revision = *revisions.borrow();
-        assert_eq!(updated_revision, previous_revision + 1);
-        assert_eq!(
-            controller.snapshot().await.unwrap().revision,
-            updated_revision
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn migration_token_replacement_clears_old_telegram_authorization() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        std::fs::create_dir_all(&config).unwrap();
-        let old_token = "synthetic-old-migration-token";
-        let new_token = "synthetic-new-migration-token";
-
-        let mut store = Store::open_at(app.path()).unwrap();
-        crate::storage::save_token(app.path(), old_token.as_bytes()).unwrap();
-        store.settings_mut().telegram.token_configured = true;
-        store.settings_mut().telegram.paired = true;
-        store.settings_mut().telegram.status = TelegramStatus::WaitingPairing;
-        store.settings_mut().telegram.pairing_code = Some("654321".into());
-        store.settings_mut().telegram.pairing_expires_at = Some("synthetic-expiry".into());
-        store.set_telegram_owner(100, 200);
-        store.persist().unwrap();
-        std::fs::write(
-            app.path().join("telegram-token.bin"),
-            b"synthetic-corrupt-ciphertext",
-        )
-        .unwrap();
-        std::fs::write(
-            config.join("data.csv"),
-            format!("parameter_name;parameter_value\ntelegram_bot_token;{new_token}\n"),
-        )
-        .unwrap();
-
-        let controller = Controller::new(store);
-        {
-            let mut machine = controller.machine.lock().await;
-            machine.migration_source = Some(config);
-            machine.pairing = Some(Pairing {
-                code: "654321".into(),
-                expires: Instant::now() + Duration::from_secs(30),
-                expires_at: "synthetic-expiry".into(),
-                attempts: 0,
-            });
-        }
-
-        let (snapshot, result) = controller.import_migration_source().await.unwrap();
-        assert_eq!(result.imported.settings, 1);
-        assert!(snapshot.settings.telegram.token_configured);
-        assert!(!snapshot.settings.telegram.paired);
-        assert!(snapshot.settings.telegram.pairing_code.is_none());
-        assert!(snapshot.settings.telegram.pairing_expires_at.is_none());
-        assert!(controller.machine.lock().await.pairing.is_none());
-        assert_eq!(controller.machine.lock().await.store.telegram_owner(), None);
-        assert_eq!(
-            crate::storage::load_token(app.path()).unwrap().as_deref(),
-            Some(new_token)
-        );
-        assert!(
-            !controller
-                .authorize_telegram_identity(new_token, 100, 200, true)
-                .await
-        );
-
-        let persisted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(app.path().join("settings.json")).unwrap())
-                .unwrap();
-        assert_eq!(persisted["settings"]["telegram"]["tokenConfigured"], true);
-        assert_eq!(persisted["settings"]["telegram"]["paired"], false);
-        assert_eq!(
-            persisted["settings"]["telegram"]["pairingCode"],
-            serde_json::Value::Null
-        );
-        assert_eq!(
-            persisted["settings"]["telegram"]["pairingExpiresAt"],
-            serde_json::Value::Null
-        );
-        assert_eq!(persisted["telegramOwner"], serde_json::Value::Null);
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn migration_failure_after_token_install_still_cancels_old_pairing() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        std::fs::create_dir_all(&config).unwrap();
-        let old_token = "synthetic-old-partial-migration-token";
-        let new_token = "synthetic-new-partial-migration-token";
-        std::fs::write(
-            config.join("data.csv"),
-            format!("parameter_name;parameter_value\ntelegram_bot_token;{new_token}\n"),
-        )
-        .unwrap();
-
-        let mut store = Store::open_at(app.path()).unwrap();
-        crate::storage::save_token(app.path(), old_token.as_bytes()).unwrap();
-        store.settings_mut().telegram.token_configured = true;
-        store.settings_mut().telegram.paired = true;
-        store.settings_mut().telegram.status = TelegramStatus::WaitingPairing;
-        store.settings_mut().telegram.pairing_code = Some("654321".into());
-        store.settings_mut().telegram.pairing_expires_at = Some("synthetic-expiry".into());
-        store.set_telegram_owner(100, 200);
-        store.persist().unwrap();
-        std::fs::write(
-            app.path().join("telegram-token.bin"),
-            b"synthetic-corrupt-ciphertext-for-partial-migration",
-        )
-        .unwrap();
-
-        let controller = Controller::new(store);
-        {
-            let mut machine = controller.machine.lock().await;
-            machine.migration_source = Some(config);
-            machine.pairing = Some(Pairing {
-                code: "654321".into(),
-                expires: Instant::now() + Duration::from_secs(30),
-                expires_at: "synthetic-expiry".into(),
-                attempts: 0,
-            });
-        }
-
-        let mut revisions = controller.revision_tx.subscribe();
-        let previous_revision = controller.snapshot().await.unwrap().revision;
-        let root = app.path().to_path_buf();
-        assert!(matches!(
-            controller
-                .import_migration_source_with_token_installation(move || {
-                    let manifests = root.join("migration-manifests");
-                    std::fs::remove_dir_all(&manifests).unwrap();
-                    std::fs::write(manifests, b"synthetic manifest write blocker").unwrap();
-                })
-                .await,
-            Err(ControllerError::Store(StoreError::Io(_)))
-        ));
-        revisions.changed().await.unwrap();
-        let snapshot = controller.snapshot().await.unwrap();
-        assert_eq!(snapshot.revision, previous_revision + 1);
-
-        assert!(controller.machine.lock().await.pairing.is_none());
-        let machine = controller.machine.lock().await;
-        assert!(machine.store.settings().telegram.token_configured);
-        assert!(!machine.store.settings().telegram.paired);
-        assert!(machine.store.settings().telegram.pairing_code.is_none());
-        assert!(
-            machine
-                .store
-                .settings()
-                .telegram
-                .pairing_expires_at
-                .is_none()
-        );
-        assert_eq!(machine.store.telegram_owner(), None);
-        drop(machine);
-        assert_eq!(
-            crate::storage::load_token(app.path()).unwrap().as_deref(),
-            Some(new_token)
-        );
-        assert!(
-            !controller
-                .authorize_telegram_identity(new_token, 100, 200, true)
-                .await
-        );
-
-        let persisted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(app.path().join("settings.json")).unwrap())
-                .unwrap();
-        assert_eq!(persisted["settings"]["telegram"]["tokenConfigured"], true);
-        assert_eq!(persisted["settings"]["telegram"]["paired"], false);
-        assert_eq!(persisted["telegramOwner"], serde_json::Value::Null);
-    }
-
     #[test]
     fn failed_recording_save_keeps_steps_for_a_later_retry() {
         let dir = tempdir().unwrap();
@@ -3387,6 +3401,7 @@ mod tests {
             closing: false,
             shutdown_complete: false,
             pending_recording: Some(("Retry".into(), steps.clone(), true)),
+            coc_reload_in_progress: false,
             coc_launched_once: false,
             cycles: 0,
             revision: 1,
@@ -3394,9 +3409,6 @@ mod tests {
             pairing_cooldown_until: None,
             shutdown: None,
             last_error: None,
-            migration_source: None,
-            migration_preview: None,
-            migration_already_imported: false,
             foreground_loss_handled: false,
         };
 

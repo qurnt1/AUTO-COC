@@ -1,7 +1,6 @@
 use auto_coc::{
-    DesktopRuntimeError, Diagnostics, Help, MigrationImport, MigrationSelection,
-    MigrationStatusResponse, PairingStart, PersistenceError, ServiceError, SettingsPatch,
-    ShortcutSettings, ShutdownPreparation, Snapshot,
+    DesktopRuntimeError, Diagnostics, Help, PairingStart, PersistenceError, ServiceError,
+    SettingsPatch, ShortcutSettings, ShutdownPreparation, Snapshot,
 };
 use serde::Serialize;
 use tauri::{AppHandle, State, ipc::Response};
@@ -39,10 +38,6 @@ impl From<ServiceError> for CommandError {
             ServiceError::Store(PersistenceError::Conflict) => {
                 Self::new("conflict", "Une macro de ce nom existe déjà.")
             }
-            ServiceError::Store(PersistenceError::Protected) => Self::new(
-                "protected_macro",
-                "Cette macro système ne peut pas être modifiée.",
-            ),
             ServiceError::Store(PersistenceError::Unreadable) => Self::new(
                 "macro_unreadable",
                 "Cette macro contient des données invalides et n’a pas été modifiée.",
@@ -109,9 +104,6 @@ impl From<ServiceError> for CommandError {
                 "pairing_rate_limited",
                 "Trop d’essais. Attendez avant de générer un nouveau code.",
             ),
-            ServiceError::MigrationCancelled => {
-                Self::new("migration_cancelled", "Sélection de dossier annulée.")
-            }
         }
     }
 }
@@ -292,31 +284,6 @@ pub async fn telegram_test(state: State<'_, HostState>) -> Result<Snapshot, Comm
 }
 
 #[tauri::command]
-pub async fn get_migration(
-    state: State<'_, HostState>,
-) -> Result<MigrationStatusResponse, CommandError> {
-    state.runtime.get_migration().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn select_migration_source(
-    state: State<'_, HostState>,
-) -> Result<MigrationSelection, CommandError> {
-    state
-        .runtime
-        .select_migration_source()
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn import_migration(
-    state: State<'_, HostState>,
-) -> Result<MigrationImport, CommandError> {
-    state.runtime.import_migration().await.map_err(Into::into)
-}
-
-#[tauri::command]
 pub async fn shutdown_prepare(
     state: State<'_, HostState>,
 ) -> Result<ShutdownPreparation, CommandError> {
@@ -352,20 +319,4 @@ pub async fn complete_onboarding(state: State<'_, HostState>) -> Result<Snapshot
         .complete_onboarding()
         .await
         .map_err(Into::into)
-}
-
-#[cfg(test)]
-mod tests {
-    use auto_coc::ServiceError;
-
-    use super::CommandError;
-
-    #[test]
-    fn migration_cancellation_uses_frontend_error_contract() {
-        let error = CommandError::from(ServiceError::MigrationCancelled);
-        let payload = serde_json::to_value(error).unwrap();
-
-        assert_eq!(payload["code"], "migration_cancelled");
-        assert_eq!(payload["message"], "Sélection de dossier annulée.");
-    }
 }

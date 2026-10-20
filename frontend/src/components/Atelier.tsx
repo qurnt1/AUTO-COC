@@ -146,6 +146,11 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
     : "La séquence sera actualisée à l’arrêt de l’enregistrement.";
   const executionCopy = getExecutionCopy(snapshot.status, selected);
   const selectionVisible = filtered.some((macro) => macro.name === selected?.name);
+  const onboardingStage = snapshot.macros.length === 0
+    ? "create"
+    : !selected || (!selected.readable && snapshot.macros.some((macro) => macro.name !== selected.name && macro.readable))
+      ? "select"
+      : !selected.readable ? "create" : selected.eventCount > 0 ? "play" : "record";
 
   useEffect(() => {
     setDetail(null);
@@ -189,12 +194,31 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
 
   return (
     <>
-    {showOnboarding && <OnboardingGuide mode="atelier" disabled={!online} busy={busy === "onboarding"} onComplete={onCompleteOnboarding} onDismiss={onDismissOnboarding} />}
+    {showOnboarding && !active && <OnboardingGuide
+      mode="atelier"
+      stage={onboardingStage}
+      disabled={!online || busy !== null}
+      busy={busy === "onboarding"}
+      onPrimaryAction={() => {
+        if (onboardingStage === "create") setDialog({ kind: "create" });
+        else if (onboardingStage === "select") {
+          const targetMacro = snapshot.macros.find((macro) => macro.readable && macro.name !== selected?.name)
+            ?? snapshot.macros[0];
+          if (targetMacro) {
+            setQuery("");
+            window.requestAnimationFrame(() => document.getElementById(`macro-${encodeURIComponent(targetMacro.name)}`)?.focus());
+          }
+        } else if (onboardingStage === "record") void run("record", () => api.startRecording());
+        else document.getElementById("play-macro-button")?.focus();
+      }}
+      onComplete={onCompleteOnboarding}
+      onDismiss={onDismissOnboarding}
+    />}
     <main className="workbench">
       <aside className="library" aria-label="Bibliothèque des macros">
         <div className="library-heading">
           <div><span className="section-kicker">Bibliothèque</span><h2>Vos macros</h2></div>
-          <button className="icon-button add-button" type="button" aria-label="Créer une macro" title="Créer une macro" onClick={() => setDialog({ kind: "create" })} disabled={!online || active}>
+            <button className="icon-button add-button" type="button" aria-label="Créer une macro" title="Créer une macro" onClick={() => setDialog({ kind: "create" })} disabled={!online || active || busy !== null}>
             <Icon name="plus" />
           </button>
         </div>
@@ -205,6 +229,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
           {query && <button type="button" className="clear-search" aria-label="Effacer la recherche" onClick={() => setQuery("")}><Icon name="close" size={14} /></button>}
         </label>
         <div className="library-meta"><span>{snapshot.macros.length} {snapshot.macros.length > 1 ? "macros" : "macro"}</span></div>
+        {filtered.length > 0 && <p className="library-selection-hint">Sélectionnez une macro pour afficher sa séquence. La ligne en surbrillance est celle qui est sélectionnée.</p>}
         <div className="macro-list" role="listbox" aria-label="Macros">
           {filtered.map((macro, index) => {
             const current = macro.name === selected?.name;
@@ -228,12 +253,10 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                 }}
                 disabled={!online || active || busy !== null}
               >
-                <span className="macro-item-marker" aria-hidden="true"><span /></span>
                 <span className="macro-item-copy">
-                  <span className="macro-item-name">{macro.protected && <span className="macro-system-tag">Système</span>}{macro.name}{macro.protected && <Icon className="protected-icon" name="lock" size={13} />}</span>
+                  <span className="macro-item-name">{macro.name}</span>
                   <span className="macro-item-meta">{macro.readable ? `${macro.eventCount} événements` : "À vérifier"}<span className="meta-dot">·</span>{formatDuration(macro.durationSeconds)}</span>
                 </span>
-                {current && <Icon className="selected-chevron" name="chevron" size={15} />}
               </button>
             );
           })}
@@ -242,13 +265,9 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               <Icon name={query ? "search" : "activity"} size={19} />
               <p>{query ? "Aucune macro trouvée" : "Votre bibliothèque est vide"}</p>
               <span>{query ? "Essayez un autre nom." : "Créez une macro pour commencer."}</span>
-              {!query && <button type="button" className="text-button" onClick={() => setDialog({ kind: "create" })} disabled={!online || active || busy !== null}>Créer la première</button>}
             </div>
           )}
         </div>
-        <button className="library-create" type="button" onClick={() => setDialog({ kind: "create" })} disabled={!online || active}>
-          <Icon name="plus" size={16} /><span>Nouvelle macro</span>
-        </button>
       </aside>
 
       <section className="macro-workspace" aria-label="Détail de la macro">
@@ -258,8 +277,8 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
             <span className="section-kicker">L’atelier commence ici</span>
             <h1 tabIndex={-1}>{snapshot.macros.length ? "Choisissez une macro" : "Créez votre première macro"}</h1>
             <p>{snapshot.macros.length ? "Sélectionnez une macro dans la bibliothèque pour voir sa séquence et la lancer." : "Enregistrez une suite d’actions, puis rejouez-la quand vous en avez besoin."}</p>
-            {!snapshot.macros.length && <button className="button primary" type="button" onClick={() => setDialog({ kind: "create" })} disabled={!online || active || busy !== null}><Icon name="plus" size={16} />Créer une macro</button>}
-            {snapshot.macros.length > 0 && <div className="empty-tip"><Icon name="keyboard" size={16} />Vous pouvez aussi parcourir la liste avec les flèches du clavier.</div>}
+            {!snapshot.macros.length && <div className="empty-tip"><Icon name="plus" size={16} />Utilisez le bouton + dans la bibliothèque pour commencer.</div>}
+            {snapshot.macros.length > 0 && <div className="empty-tip"><Icon name="keyboard" size={16} />Parcourez la liste avec les flèches du clavier, puis Entrée pour choisir.</div>}
           </div>
         ) : (
           <>
@@ -267,22 +286,18 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               <div className="breadcrumbs"><span>Atelier</span><Icon name="chevron" size={13} /><span>Macro</span></div>
               <div className="workspace-tools">
                 <span className={`state-label state-${snapshot.status.kind}`}><i aria-hidden="true" />{statusLabel(snapshot.status)}</span>
-                {selected.protected && <span className="topbar-protected"><Icon name="lock" size={13} />Système</span>}
               </div>
             </div>
             <div className="macro-heading">
               <div className="macro-title-line">
                 <h1 tabIndex={-1}>{selected.name}</h1>
-                {selected.protected && <span className="protected-tag"><Icon name="lock" size={12} />Macro système</span>}
               </div>
               <p>{selected.readable ? "Séquence prête à être examinée ou rejouée." : selected.issue ?? "Cette macro ne peut pas être lue."}</p>
-              {!selected.protected && (
-                <div className="macro-actions-menu">
-                  <button className="text-button" type="button" disabled={!online || active || busy !== null} onClick={() => setDialog({ kind: "rename", macro: selected })}><Icon name="edit" size={15} />Renommer</button>
-                  <span className="action-divider" />
-                  <button className="text-button danger-text" type="button" disabled={!online || active || busy !== null} onClick={() => setDialog({ kind: "delete", macro: selected })}><Icon name="trash" size={15} />Supprimer</button>
-                </div>
-              )}
+              <div className="macro-actions-menu">
+                <button className="text-button" type="button" disabled={!online || active || busy !== null} onClick={() => setDialog({ kind: "rename", macro: selected })}><Icon name="edit" size={15} />Renommer</button>
+                <span className="action-divider" />
+                <button className="text-button danger-text" type="button" disabled={!online || active || busy !== null} onClick={() => setDialog({ kind: "delete", macro: selected })}><Icon name="trash" size={15} />Supprimer</button>
+              </div>
             </div>
 
             {!selected.readable && <div className="inline-alert error"><Icon name="activity" size={17} /><div><strong>La séquence ne peut pas être lue</strong><span>{selected.issue ?? "Vérifiez le fichier de cette macro ou demandez de l’aide."}</span></div></div>}
@@ -293,7 +308,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                 <div><span className="section-kicker">Trace des actions</span><h2 id="sequence-title">La séquence</h2></div>
                 <button className="quiet-button" type="button" disabled={!online || !selected.readable || active || busy !== null} onClick={() => run("record", () => api.startRecording(), "Demande d’enregistrement envoyée.")}><Icon name="record" size={14} />Enregistrer</button>
               </div>
-              <p className="recording-note">La préparation dure 3 s. À l’arrêt, les 3 dernières secondes sont retirées; une capture de 3 s ou moins laisse la macro vide.</p>
+              <p className="recording-note">Après le compte à rebours, laissez l’enregistrement tourner plus de 3 s avant de l’arrêter. Les 3 dernières secondes seront retirées.</p>
               <div className="sequence-panel">
                 {recordingSelectedMacro ? (
                   <div className="recording-progress">
@@ -331,9 +346,10 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                     <button className="button stop-button" type="button" onClick={() => run("stop-playback", () => api.stopPlayback(), "Lecture arrêtée.")} disabled={!online || busy !== null}><Icon name="stop" size={15} />Arrêter la lecture</button>
                   </>
                 ) : (
-                  <button className="button primary play-button" type="button" onClick={() => run("play", () => api.startPlayback(), "Demande de lecture envoyée.")} disabled={!online || !selected.readable || !selected.eventCount || busy !== null}><Icon name="play" size={15} />Lire la macro</button>
+                  <button id="play-macro-button" className="button primary play-button" type="button" onClick={() => run("play", () => api.startPlayback(), "Demande de lecture envoyée.")} disabled={!online || !selected.readable || !selected.eventCount || busy !== null}><Icon name="play" size={15} />Lire la macro</button>
                 )}
               </div>
+              {snapshot.status.kind === "idle" && selected.readable && selected.eventCount > 0 && <p className="play-safety-note"><Icon name="shield" size={14} />Pour lire, Clash of Clans doit être la fenêtre active.</p>}
             </section>
 
             <div className="macro-facts" aria-label="Informations sur la macro">

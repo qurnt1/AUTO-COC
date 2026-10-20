@@ -11,9 +11,7 @@ pub use desktop_runtime::{
     SnapshotSubscription,
 };
 pub use types::{
-    AppStatus, Diagnostics, Help, HelpSection, MacroFile, MacroSummary, MigrationCounts,
-    MigrationImport, MigrationMacroPreview, MigrationPreview, MigrationResult, MigrationSelection,
-    MigrationStatus, MigrationStatusResponse, PairingStart, RecordingPhase, SessionStatus,
-    Settings, SettingsPatch, ShortcutSettings, ShutdownPreparation, Snapshot, TelegramSettings,
-    TelegramStatus,
+    AppStatus, Diagnostics, Help, HelpSection, MacroFile, MacroSummary, PairingStart,
+    RecordingPhase, SessionStatus, Settings, SettingsPatch, ShortcutSettings, ShutdownPreparation,
+    Snapshot, TelegramSettings, TelegramStatus,
 };

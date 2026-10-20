@@ -17,7 +17,6 @@ function snapshot(revision: number, elapsedSeconds = 0): Snapshot {
       telegram: { tokenConfigured: false, paired: false, status: "not_configured", pairingCode: null, pairingExpiresAt: null },
     },
     session: { elapsedSeconds, cycles: 0 },
-    migration: { sourceSelected: false, available: false, alreadyImported: false },
     onboardingComplete: false,
     lastError: null,
   };
@@ -210,7 +209,6 @@ describe("TauriBackendClient", () => {
   it("maps frontend operations to the agreed command names and DTO arguments", async () => {
     const fake = makeBridge((command) => {
       if (command === "screenshot") return Uint8Array.from([137, 80, 78, 71]).buffer;
-      if (command === "select_migration_source") return null;
       if (command === "quit_application") return undefined;
       return snapshot(1);
     });
@@ -235,9 +233,6 @@ describe("TauriBackendClient", () => {
     await client.testTelegram();
     await client.openMacrosFolder();
     await client.quitApplication();
-    await client.getMigration();
-    await expect(client.selectMigrationSource()).resolves.toBeNull();
-    await client.importMigration();
     await client.prepareShutdown();
     await client.confirmShutdown("confirm-1");
     await client.getHelp();
@@ -250,13 +245,12 @@ describe("TauriBackendClient", () => {
       "start_recording", "stop_recording", "start_playback", "stop_playback",
       "patch_settings", "put_shortcuts", "launch_coc", "telegram_config",
       "telegram_config_clear", "pairing_start", "pairing_cancel", "telegram_test",
-      "open_macros_folder", "quit_application", "get_migration", "select_migration_source",
-      "import_migration", "shutdown_prepare", "shutdown_confirm", "get_help",
+      "open_macros_folder", "quit_application", "shutdown_prepare", "shutdown_confirm", "get_help",
       "get_diagnostics", "complete_onboarding", "screenshot",
     ]);
     expect(fake.calls[9].args).toEqual({ settings: { loop: true, cocPath: "C:/CoC.exe", requireCocForeground: true } });
     expect(fake.calls[10].args).toEqual({ shortcuts: { toggle: "F2", play: "Ctrl+1", stop: "Ctrl+2" } });
-    expect(fake.calls[23].args).toEqual({ confirmationId: "confirm-1" });
+    expect(fake.calls[20].args).toEqual({ confirmationId: "confirm-1" });
     expect(screenshot.type).toBe("image/png");
     expect([...new Uint8Array(await screenshot.arrayBuffer())]).toEqual([137, 80, 78, 71]);
   });

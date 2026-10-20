@@ -2,7 +2,6 @@ export type MacroSummary = {
   name: string;
   eventCount: number;
   durationSeconds: number;
-  protected: boolean;
   readable: boolean;
   issue: string | null;
 };
@@ -29,21 +28,6 @@ export type AppStatus =
 
 export type TelegramStatus = "not_configured" | "disconnected" | "waiting_pairing" | "connected" | "error";
 
-export type MigrationMacro = { name: string; eventCount: number; readable: boolean; issue: string | null };
-export type MigrationPreview = { available: boolean; settingsFound: boolean; macros: MigrationMacro[] };
-export type MigrationState = {
-  status: { sourceSelected: boolean; available: boolean; alreadyImported: boolean };
-  preview: MigrationPreview | null;
-};
-export type MigrationSelectionResult = { snapshot: Snapshot; preview: MigrationPreview };
-export type MigrationImportResult = {
-  snapshot: Snapshot;
-  imported: { settings: number; macros: number };
-  collisions: string[];
-  preserved: string[];
-  errors: string[];
-};
-
 export type Snapshot = {
   revision: number;
   status: AppStatus;
@@ -63,7 +47,6 @@ export type Snapshot = {
     };
   };
   session: { elapsedSeconds: number; cycles: number };
-  migration: MigrationState["status"];
   onboardingComplete: boolean;
   lastError: string | null;
 };
@@ -105,9 +88,6 @@ export interface BackendClient {
   testTelegram(): Promise<Snapshot>;
   openMacrosFolder(): Promise<Snapshot>;
   quitApplication(): Promise<void>;
-  getMigration(signal?: AbortSignal): Promise<MigrationState>;
-  selectMigrationSource(): Promise<MigrationSelectionResult | null>;
-  importMigration(): Promise<MigrationImportResult>;
   prepareShutdown(): Promise<ShutdownPreparation>;
   confirmShutdown(confirmationId: string): Promise<Snapshot>;
   getScreenshot(signal?: AbortSignal): Promise<Blob>;

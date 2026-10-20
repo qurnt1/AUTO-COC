@@ -12,8 +12,8 @@ use crate::{
     storage::Store,
     telegram,
     types::{
-        Diagnostics, Help, MigrationImport, MigrationSelection, MigrationStatusResponse,
-        PairingStart, SettingsPatch, ShortcutSettings, ShutdownPreparation, Snapshot,
+        Diagnostics, Help, PairingStart, SettingsPatch, ShortcutSettings, ShutdownPreparation,
+        Snapshot,
     },
 };
 
@@ -167,27 +167,6 @@ impl DesktopRuntime {
         Ok(self.controller.test_telegram().await?)
     }
 
-    pub async fn get_migration(&self) -> Result<MigrationStatusResponse, DesktopRuntimeError> {
-        let (status, preview) = self.controller.migration_status().await?;
-        Ok(MigrationStatusResponse { status, preview })
-    }
-
-    pub async fn select_migration_source(&self) -> Result<MigrationSelection, DesktopRuntimeError> {
-        let (snapshot, preview) = self.controller.select_migration_source().await?;
-        Ok(MigrationSelection { snapshot, preview })
-    }
-
-    pub async fn import_migration(&self) -> Result<MigrationImport, DesktopRuntimeError> {
-        let (snapshot, result) = self.controller.import_migration_source().await?;
-        Ok(MigrationImport {
-            snapshot,
-            imported: result.imported,
-            collisions: result.collisions,
-            preserved: result.preserved,
-            errors: result.errors,
-        })
-    }
-
     pub async fn shutdown_prepare(&self) -> Result<ShutdownPreparation, DesktopRuntimeError> {
         let (confirmation_id, expires_at) = self.controller.prepare_shutdown().await?;
         Ok(ShutdownPreparation {
@@ -296,15 +275,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn help_and_migration_dtos_keep_frontend_field_names() {
+    async fn help_dto_keeps_frontend_field_names() {
         let dir = tempdir().unwrap();
         let runtime = runtime_in(dir.path().to_path_buf()).await;
 
         let help = serde_json::to_value(runtime.get_help().await).unwrap();
-        let migration = serde_json::to_value(runtime.get_migration().await.unwrap()).unwrap();
         assert!(help["sections"].is_array());
-        assert!(migration["status"].is_object());
-        assert!(migration.get("preview").is_some());
         runtime.quit_application().await.unwrap();
     }
 }

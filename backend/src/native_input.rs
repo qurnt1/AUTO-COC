@@ -47,6 +47,10 @@ pub enum NativeEvent {
         playback_id: u64,
         reason: PlaybackFailure,
     },
+    PlaybackStopped {
+        playback_id: u64,
+        reason: PlaybackStopReason,
+    },
     PlaybackPaused {
         playback_id: u64,
     },
@@ -59,26 +63,73 @@ pub enum PlaybackFailure {
     InputAndRelease,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackStopReason {
+    FocusLost,
+    TargetLost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForegroundLossAction {
+    Pause,
+    Stop,
+}
+
+fn foreground_loss_action(pause_on_focus_loss: bool) -> ForegroundLossAction {
+    if pause_on_focus_loss {
+        ForegroundLossAction::Pause
+    } else {
+        ForegroundLossAction::Stop
+    }
+}
+
 fn playback_completion_event(
     playback_id: u64,
     input_failed: bool,
     release_failed: bool,
+    stop_reason: Option<PlaybackStopReason>,
 ) -> NativeEvent {
-    match (input_failed, release_failed) {
-        (false, false) => NativeEvent::PlaybackEnded { playback_id },
-        (true, false) => NativeEvent::PlaybackFailed {
+    if release_failed {
+        NativeEvent::PlaybackFailed {
+            playback_id,
+            reason: if input_failed {
+                PlaybackFailure::InputAndRelease
+            } else {
+                PlaybackFailure::Release
+            },
+        }
+    } else if input_failed {
+        NativeEvent::PlaybackFailed {
             playback_id,
             reason: PlaybackFailure::Input,
-        },
-        (false, true) => NativeEvent::PlaybackFailed {
+        }
+    } else if let Some(reason) = stop_reason {
+        NativeEvent::PlaybackStopped {
             playback_id,
-            reason: PlaybackFailure::Release,
-        },
-        (true, true) => NativeEvent::PlaybackFailed {
-            playback_id,
-            reason: PlaybackFailure::InputAndRelease,
-        },
+            reason,
+        }
+    } else {
+        NativeEvent::PlaybackEnded { playback_id }
     }
+}
+
+fn finalized_playback_event(
+    playback_id: u64,
+    input_failed: bool,
+    release_failed: bool,
+    stop_reason: Option<PlaybackStopReason>,
+    release: impl FnOnce() -> io::Result<()>,
+    publish: impl FnOnce(&NativeEvent),
+) -> NativeEvent {
+    let final_release_failed = release().is_err();
+    let event = playback_completion_event(
+        playback_id,
+        input_failed,
+        release_failed || final_release_failed,
+        stop_reason,
+    );
+    publish(&event);
+    event
 }
 
 fn playback_cycle_event(
@@ -193,13 +244,25 @@ impl NativeInput {
         }
     }
 
-    pub async fn stop_playback(&self) -> io::Result<()> {
+    pub async fn stop_playback(&self) -> io::Result<Option<NativeEvent>> {
         #[cfg(windows)]
         {
             self.inner.stop_playback().await
         }
         #[cfg(not(windows))]
         {
+            Err(unsupported())
+        }
+    }
+
+    pub async fn acknowledge_playback_terminal(&self, playback_id: u64) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.acknowledge_playback_terminal(playback_id).await
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = playback_id;
             Err(unsupported())
         }
     }
@@ -264,10 +327,60 @@ fn ensure_coc_foreground(required: bool, foreground: bool) -> io::Result<()> {
     }
 }
 
-fn is_coc_window_identity(title: &str, image_path: &str) -> bool {
+pub(crate) fn is_coc_window_identity(title: &str, image_path: &str) -> bool {
     let process_name = image_path.rsplit(['\\', '/']).next().unwrap_or(image_path);
     title.to_lowercase().contains("clash of clans")
         && process_name.eq_ignore_ascii_case("crosvm.exe")
+}
+
+fn decode_window_title(length: i32, last_error: u32, buffer: &[u16]) -> io::Result<String> {
+    if length == 0 {
+        return if last_error == 0 {
+            Ok(String::new())
+        } else {
+            Err(io::Error::from_raw_os_error(last_error as i32))
+        };
+    }
+    let length = usize::try_from(length)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid window title length"))?;
+    let title = buffer
+        .get(..length)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid window title length"))?;
+    Ok(String::from_utf16_lossy(title))
+}
+
+pub(crate) fn coc_windows() -> io::Result<Vec<isize>> {
+    #[cfg(windows)]
+    {
+        win::coc_windows()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(unsupported())
+    }
+}
+
+pub(crate) fn close_coc_window(window: isize) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        win::close_coc_window(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Err(unsupported())
+    }
+}
+
+pub(crate) fn wait_for_coc_windows() -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        win::wait_for_coc_windows()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(unsupported())
+    }
 }
 
 fn same_process_instance(
@@ -573,10 +686,26 @@ enum MouseButton {
 
 #[derive(Debug, Clone)]
 enum ReplayEvent {
-    Move { x: i32, y: i32 },
-    Click { button: MouseButton, down: bool },
-    Scroll { dx: i32, dy: i32 },
-    Key { virtual_key: u16, down: bool },
+    Move {
+        x: i32,
+        y: i32,
+    },
+    Click {
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        down: bool,
+    },
+    Scroll {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
+    Key {
+        virtual_key: u16,
+        down: bool,
+    },
     Nop,
 }
 
@@ -624,19 +753,21 @@ fn parse_steps(steps: &[Value]) -> io::Result<Vec<ReplayStep>> {
                     Some("middle") => MouseButton::Middle,
                     _ => return Err(invalid_input("macro mouse button is invalid")),
                 };
-                read_i32(data.get("x"))?;
-                read_i32(data.get("y"))?;
+                let x = read_i32(data.get("x"))?;
+                let y = read_i32(data.get("y"))?;
                 let down = match data.get("action").and_then(Value::as_str) {
                     Some("down") => true,
                     Some("up") => false,
                     _ => return Err(invalid_input("macro mouse action is invalid")),
                 };
-                ReplayEvent::Click { button, down }
+                ReplayEvent::Click { x, y, button, down }
             }
             "scroll" => {
-                read_i32(data.get("x"))?;
-                read_i32(data.get("y"))?;
+                let x = read_i32(data.get("x"))?;
+                let y = read_i32(data.get("y"))?;
                 ReplayEvent::Scroll {
+                    x,
+                    y,
                     dx: read_i32(data.get("dx"))?,
                     dy: read_i32(data.get("dy"))?,
                 }
@@ -691,7 +822,10 @@ mod win {
         time::sleep_until,
     };
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, FILETIME, HWND, LPARAM, WPARAM},
+        Foundation::{
+            CloseHandle, FILETIME, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WPARAM,
+        },
+        Graphics::Gdi::ScreenToClient,
         System::{
             Diagnostics::Debug::Beep,
             LibraryLoader::GetModuleHandleW,
@@ -702,21 +836,18 @@ mod win {
         },
         UI::{
             Input::KeyboardAndMouse::{
-                INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-                KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
-                MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-                MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-                MOUSEEVENTF_WHEEL, MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey,
+                MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetWindowTextW,
-                GetWindowThreadProcessId, IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-                LLKHF_LOWER_IL_INJECTED, LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED, MSG,
-                MSLLHOOKSTRUCT, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW,
-                SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-                WH_MOUSE_LL, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+                CallNextHookEx, DispatchMessageW, EnumWindows, GetClientRect, GetForegroundWindow,
+                GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+                KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, LLMHF_INJECTED,
+                LLMHF_LOWER_IL_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
+                PostMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
+                UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_CLOSE, WM_HOTKEY, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                WM_SYSKEYDOWN, WM_SYSKEYUP,
             },
         },
     };
@@ -727,10 +858,14 @@ mod win {
     const HOTKEY_IDS: [i32; 3] = [HOTKEY_TOGGLE, HOTKEY_PLAY, HOTKEY_STOP];
     const INJECTION_TAG: usize = 0x4155_4343;
     const WHEEL_DELTA: i32 = 120;
-    const SM_XVIRTUALSCREEN: i32 = 76;
-    const SM_YVIRTUALSCREEN: i32 = 77;
-    const SM_CXVIRTUALSCREEN: i32 = 78;
-    const SM_CYVIRTUALSCREEN: i32 = 79;
+    const MK_LBUTTON: WPARAM = 0x0001;
+    const MK_RBUTTON: WPARAM = 0x0002;
+    const MK_SHIFT: WPARAM = 0x0004;
+    const MK_CONTROL: WPARAM = 0x0008;
+    const MK_MBUTTON: WPARAM = 0x0010;
+    const COC_CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
+    const COC_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+    const PAUSED_TARGET_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
     #[derive(Clone)]
     struct Recording {
@@ -787,10 +922,10 @@ mod win {
             let target = self.coc_window.load(Ordering::Acquire) as HWND;
             let process_id = self.coc_process_id.load(Ordering::Acquire);
             let expected_created_at = self.coc_process_created_at.load(Ordering::Acquire);
-            let is_valid = window_title_matches(target)
-                && process_image_and_creation_time(process_id).is_some_and(
+            let is_valid = window_title(target).ok().is_some_and(|title| {
+                process_image_and_creation_time(process_id).is_some_and(
                     |(path, current_created_at)| {
-                        is_coc_window_identity(&window_title(target), &path)
+                        is_coc_window_identity(&title, &path)
                             && same_process_instance(
                                 process_id,
                                 expected_created_at,
@@ -798,23 +933,6 @@ mod win {
                                 current_created_at,
                             )
                     },
-                );
-            self.coc_identity_valid.store(is_valid, Ordering::Release);
-            is_valid
-        }
-
-        fn cached_coc_instance_is_foreground(&self) -> bool {
-            if !self.cached_coc_is_foreground() {
-                return false;
-            }
-            let process_id = self.coc_process_id.load(Ordering::Acquire);
-            let expected_created_at = self.coc_process_created_at.load(Ordering::Acquire);
-            let is_valid = process_creation_time(process_id).is_some_and(|current_created_at| {
-                same_process_instance(
-                    process_id,
-                    expected_created_at,
-                    process_id,
-                    current_created_at,
                 )
             });
             self.coc_identity_valid.store(is_valid, Ordering::Release);
@@ -829,7 +947,7 @@ mod win {
         }
         let mut process_id = 0;
         unsafe { GetWindowThreadProcessId(window, &mut process_id) };
-        let title = window_title(window);
+        let title = window_title(window).ok()?;
         if process_id == 0 || !title.to_ascii_lowercase().contains("clash of clans") {
             return None;
         }
@@ -838,25 +956,144 @@ mod win {
         is_coc_window_identity(&title, &image_path).then_some((window, process_id, created_at))
     }
 
+    pub(super) fn coc_windows() -> io::Result<Vec<isize>> {
+        enumerate_coc_windows()
+            .map(|windows| windows.into_iter().map(|window| window as isize).collect())
+    }
+
+    pub(super) fn close_coc_window(window: isize) -> io::Result<()> {
+        let window = window as HWND;
+        if !window_matches_coc(window)? {
+            return Ok(());
+        }
+        // The observed and closed object is the validated CoC game window, not the shared
+        // Google Play Games crosvm.exe host; real restart behavior still needs validation there.
+        if unsafe { PostMessageW(window, WM_CLOSE, 0, 0) } == 0 {
+            if !window_matches_coc(window)? {
+                return Ok(());
+            }
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_for_coc_windows() -> io::Result<()> {
+        let deadline = Instant::now() + COC_CLOSE_TIMEOUT;
+        loop {
+            if enumerate_coc_windows()?.is_empty() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Clash of Clans did not close",
+                ));
+            }
+            thread::sleep(COC_CLOSE_POLL_INTERVAL);
+        }
+    }
+
+    fn enumerate_coc_windows() -> io::Result<Vec<HWND>> {
+        struct Enumeration {
+            windows: Vec<HWND>,
+            error: Option<io::Error>,
+        }
+
+        unsafe extern "system" fn collect_coc_window(window: HWND, parameter: LPARAM) -> i32 {
+            let enumeration = unsafe { &mut *(parameter as *mut Enumeration) };
+            match window_matches_coc(window) {
+                Ok(true) => enumeration.windows.push(window),
+                Ok(false) => {}
+                Err(error) => {
+                    enumeration.error = Some(error);
+                    return 0;
+                }
+            }
+            1
+        }
+
+        let mut enumeration = Enumeration {
+            windows: Vec::new(),
+            error: None,
+        };
+        let enumerated = unsafe {
+            EnumWindows(
+                Some(collect_coc_window),
+                (&mut enumeration as *mut Enumeration) as LPARAM,
+            )
+        } != 0;
+        if let Some(error) = enumeration.error {
+            return Err(error);
+        }
+        if !enumerated {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(enumeration.windows)
+    }
+
+    fn window_matches_coc(window: HWND) -> io::Result<bool> {
+        if window.is_null() || unsafe { IsWindow(window) } == 0 {
+            return Ok(false);
+        }
+        let title = window_title(window)?;
+        if title.is_empty() || !title.to_ascii_lowercase().contains("clash of clans") {
+            return Ok(false);
+        }
+        let mut process_id = 0;
+        let thread_id = unsafe { GetWindowThreadProcessId(window, &mut process_id) };
+        if thread_id == 0 || process_id == 0 {
+            return identity_read_failed_for_live_window(
+                window,
+                io::Error::other("could not read the process ID for the Clash of Clans window"),
+            );
+        }
+        let image_path = match process_image_path(process_id) {
+            Ok(image_path) => image_path,
+            Err(error) => return identity_read_failed_for_live_window(window, error),
+        };
+        Ok(is_coc_window_identity(&title, &image_path))
+    }
+
+    fn identity_read_failed_for_live_window(window: HWND, error: io::Error) -> io::Result<bool> {
+        if unsafe { IsWindow(window) } == 0 {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    fn process_image_path(process_id: u32) -> io::Result<String> {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if process.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let image_path = process_image_path_from_handle(process);
+        unsafe { CloseHandle(process) };
+        image_path
+    }
+
     fn process_image_and_creation_time(process_id: u32) -> Option<(String, u64)> {
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
         if process.is_null() {
             return None;
         }
-        let mut image_path = [0u16; 1024];
-        let mut length = image_path.len() as u32;
-        let image_read = unsafe {
-            QueryFullProcessImageNameW(process, 0, image_path.as_mut_ptr(), &mut length) != 0
-        };
+        let image_path = process_image_path_from_handle(process);
         let created_at = process_creation_time_from_handle(process);
         unsafe { CloseHandle(process) };
-        if !image_read {
-            return None;
+        Some((image_path.ok()?, created_at?))
+    }
+
+    fn process_image_path_from_handle(
+        process: windows_sys::Win32::Foundation::HANDLE,
+    ) -> io::Result<String> {
+        let mut image_path = [0u16; 1024];
+        let mut length = image_path.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(process, 0, image_path.as_mut_ptr(), &mut length) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
         }
-        Some((
-            String::from_utf16_lossy(&image_path[..length as usize]),
-            created_at?,
-        ))
+        Ok(String::from_utf16_lossy(&image_path[..length as usize]))
     }
 
     fn process_creation_time(process_id: u32) -> Option<u64> {
@@ -894,23 +1131,34 @@ mod win {
             .filter(|created_at| *created_at != 0)
     }
 
-    fn window_title(window: HWND) -> String {
+    fn window_title(window: HWND) -> io::Result<String> {
         let mut title = [0u16; 512];
+        unsafe { SetLastError(0) };
         let length = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
-        String::from_utf16_lossy(&title[..length.max(0) as usize])
-    }
-
-    fn window_title_matches(window: HWND) -> bool {
-        window_title(window)
-            .to_ascii_lowercase()
-            .contains("clash of clans")
+        let last_error = unsafe { GetLastError() };
+        decode_window_title(length, last_error, &title)
     }
 
     struct PlaybackControl {
         id: u64,
         cancel: watch::Sender<bool>,
         resume: watch::Sender<()>,
-        task: AsyncJoinHandle<()>,
+        target: CocTarget,
+        task: AsyncJoinHandle<NativeEvent>,
+    }
+
+    async fn join_playback_task(
+        task: &mut AsyncJoinHandle<NativeEvent>,
+    ) -> io::Result<NativeEvent> {
+        task.await
+            .map_err(|_| io::Error::other("playback task failed"))
+    }
+
+    #[derive(Clone, Copy)]
+    struct CocTarget {
+        window: isize,
+        process_id: u32,
+        process_created_at: u64,
     }
 
     enum WorkerCommand {
@@ -1048,16 +1296,31 @@ mod win {
             require_coc_foreground: bool,
         ) -> io::Result<u64> {
             let parsed = parse_steps(steps)?;
-            if require_coc_foreground {
-                ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
-            }
             let mut playback = self.shared.playback.lock().await;
-            if playback.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "playback is already active",
-                ));
+            if let Some(control) = playback.as_mut() {
+                if !control.task.is_finished() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "playback is already active",
+                    ));
+                }
+                let joined = join_playback_task(&mut control.task).await;
+                playback.take();
+                joined?;
             }
+            let target = current_foreground_coc_window()
+                .map(|(window, process_id, process_created_at)| CocTarget {
+                    window: window as isize,
+                    process_id,
+                    process_created_at,
+                })
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Clash of Clans must be the foreground window to start playback",
+                    )
+                })?;
+            ensure_coc_foreground(true, target_is_foreground(target))?;
             let id = self.shared.next_playback_id.fetch_add(1, Ordering::Relaxed);
             let (cancel, cancel_rx) = watch::channel(false);
             let (resume, resume_rx) = watch::channel(());
@@ -1068,40 +1331,60 @@ mod win {
                     id,
                     parsed,
                     looped,
+                    target,
                     require_coc_foreground,
                     cancel_rx,
                     resume_rx,
                 )
-                .await;
+                .await
             });
             *playback = Some(PlaybackControl {
                 id,
                 cancel,
                 resume,
+                target,
                 task,
             });
             Ok(id)
         }
 
-        pub async fn stop_playback(&self) -> io::Result<()> {
-            let control = self.shared.playback.lock().await.take();
-            let Some(control) = control else {
-                return Ok(());
+        pub async fn stop_playback(&self) -> io::Result<Option<NativeEvent>> {
+            let mut playback = self.shared.playback.lock().await;
+            let Some(control) = playback.as_mut() else {
+                return Ok(None);
             };
             control.cancel.send_replace(true);
-            control
-                .task
-                .await
-                .map_err(|_| io::Error::other("playback task failed"))
+            let joined = join_playback_task(&mut control.task).await;
+            playback.take();
+            joined.map(Some)
+        }
+
+        pub async fn acknowledge_playback_terminal(&self, playback_id: u64) -> io::Result<()> {
+            let mut playback = self.shared.playback.lock().await;
+            let Some(control) = playback
+                .as_mut()
+                .filter(|control| control.id == playback_id)
+            else {
+                return Ok(());
+            };
+            let joined = join_playback_task(&mut control.task).await;
+            playback.take();
+            joined.map(|_| ())
         }
 
         pub async fn resume_playback(&self, playback_id: u64) -> io::Result<()> {
-            let foreground = self.shared.cached_coc_identity_is_foreground();
             let playback = self.shared.playback.lock().await;
             let control = playback
                 .as_ref()
                 .filter(|control| control.id == playback_id)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "playback is not active"))?;
+            if control.task.is_finished() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "playback is no longer active",
+                ));
+            }
+            let foreground = target_is_foreground(control.target);
             signal_playback_resume(&control.resume, foreground)
         }
 
@@ -1535,17 +1818,19 @@ mod win {
         id: u64,
         steps: Vec<ReplayStep>,
         looped: bool,
-        require_coc_foreground: bool,
+        target: CocTarget,
+        pause_on_focus_loss: bool,
         mut cancel: watch::Receiver<bool>,
         mut resume: watch::Receiver<()>,
-    ) {
+    ) -> NativeEvent {
         let mut guard = PlaybackGuard {
             held: HeldInputs::default(),
-            shared: Arc::clone(&shared),
+            target,
+            armed: true,
         };
         let mut input_failed = false;
         let mut release_failed = false;
-        let mut last_identity_check = None;
+        let mut stop_reason = None;
         'playback: loop {
             let mut start = tokio::time::Instant::now();
             let mut elapsed = Duration::ZERO;
@@ -1554,22 +1839,9 @@ mod win {
                 elapsed = elapsed.saturating_add(step.delay);
                 let mut deadline = start + elapsed;
                 'step: loop {
-                    match wait_for_replay_step(
-                        deadline,
-                        &mut cancel,
-                        require_coc_foreground,
-                        || {
-                            let now = Instant::now();
-                            if last_identity_check.is_none_or(|last| {
-                                now.duration_since(last) >= Duration::from_millis(100)
-                            }) {
-                                last_identity_check = Some(now);
-                                shared.cached_coc_identity_is_foreground()
-                            } else {
-                                shared.cached_coc_is_foreground()
-                            }
-                        },
-                    )
+                    match wait_for_replay_step(deadline, &mut cancel, true, || {
+                        target_is_foreground(target)
+                    })
                     .await
                     {
                         ReplayWait::Ready => {}
@@ -1577,9 +1849,16 @@ mod win {
                             break 'playback;
                         }
                         ReplayWait::ForegroundLost => {
+                            if foreground_loss_action(pause_on_focus_loss)
+                                == ForegroundLossAction::Stop
+                            {
+                                stop_reason = Some(PlaybackStopReason::FocusLost);
+                                break 'playback;
+                            }
                             match pause_for_foreground(
                                 id,
                                 &shared,
+                                target,
                                 &mut guard,
                                 &mut cancel,
                                 &mut resume,
@@ -1588,10 +1867,13 @@ mod win {
                             {
                                 PlaybackPauseResult::Resumed(paused_for) => {
                                     shift_replay_timing(&mut start, &mut deadline, paused_for);
-                                    last_identity_check = None;
                                     continue 'step;
                                 }
                                 PlaybackPauseResult::Cancelled => {
+                                    break 'playback;
+                                }
+                                PlaybackPauseResult::TargetLost => {
+                                    stop_reason = Some(PlaybackStopReason::TargetLost);
                                     break 'playback;
                                 }
                                 PlaybackPauseResult::ReleaseFailed => {
@@ -1601,17 +1883,15 @@ mod win {
                             }
                         }
                     }
-                    if let Err(error) = apply_event(
-                        &shared,
-                        &step.event,
-                        &mut guard.held,
-                        require_coc_foreground,
-                    ) {
-                        if require_coc_foreground && error.kind() == io::ErrorKind::PermissionDenied
+                    if let Err(error) = apply_event(&step.event, &mut guard.held, target) {
+                        if error.kind() == io::ErrorKind::PermissionDenied
+                            && foreground_loss_action(pause_on_focus_loss)
+                                == ForegroundLossAction::Pause
                         {
                             match pause_for_foreground(
                                 id,
                                 &shared,
+                                target,
                                 &mut guard,
                                 &mut cancel,
                                 &mut resume,
@@ -1620,10 +1900,13 @@ mod win {
                             {
                                 PlaybackPauseResult::Resumed(paused_for) => {
                                     shift_replay_timing(&mut start, &mut deadline, paused_for);
-                                    last_identity_check = None;
                                     continue 'step;
                                 }
                                 PlaybackPauseResult::Cancelled => {
+                                    break 'playback;
+                                }
+                                PlaybackPauseResult::TargetLost => {
+                                    stop_reason = Some(PlaybackStopReason::TargetLost);
                                     break 'playback;
                                 }
                                 PlaybackPauseResult::ReleaseFailed => {
@@ -1648,25 +1931,29 @@ mod win {
                 break;
             }
         }
-        let final_release_failed = guard.release().is_err();
-        let completion =
-            playback_completion_event(id, input_failed, release_failed || final_release_failed);
-        let _ = shared.events.send(completion);
-        let mut playback = shared.playback.lock().await;
-        if playback.as_ref().is_some_and(|control| control.id == id) {
-            playback.take();
-        }
+        finalized_playback_event(
+            id,
+            input_failed,
+            release_failed,
+            stop_reason,
+            || guard.finish(),
+            |event| {
+                let _ = shared.events.send(event.clone());
+            },
+        )
     }
 
     enum PlaybackPauseResult {
         Resumed(Duration),
         Cancelled,
+        TargetLost,
         ReleaseFailed,
     }
 
     async fn pause_for_foreground(
         id: u64,
         shared: &Shared,
+        target: CocTarget,
         guard: &mut PlaybackGuard,
         cancel: &mut watch::Receiver<bool>,
         resume: &mut watch::Receiver<()>,
@@ -1674,6 +1961,7 @@ mod win {
         pause_after_release(
             cancel,
             resume,
+            || target_window(target, false).is_ok(),
             || guard.release(),
             || {
                 let _ = shared
@@ -1687,6 +1975,7 @@ mod win {
     async fn pause_after_release(
         cancel: &mut watch::Receiver<bool>,
         resume: &mut watch::Receiver<()>,
+        target_is_available: impl FnMut() -> bool,
         release: impl FnOnce() -> io::Result<()>,
         publish_paused: impl FnOnce(),
     ) -> PlaybackPauseResult {
@@ -1695,7 +1984,7 @@ mod win {
             return PlaybackPauseResult::ReleaseFailed;
         }
         publish_paused();
-        match wait_for_playback_resume(cancel, resume).await {
+        match wait_for_playback_resume(cancel, resume, target_is_available).await {
             PlaybackPauseResult::Resumed(_) => PlaybackPauseResult::Resumed(paused_at.elapsed()),
             result => result,
         }
@@ -1719,10 +2008,14 @@ mod win {
     async fn wait_for_playback_resume(
         cancel: &mut watch::Receiver<bool>,
         resume: &mut watch::Receiver<()>,
+        mut target_is_available: impl FnMut() -> bool,
     ) -> PlaybackPauseResult {
         loop {
             if cancel.has_changed().is_err() || *cancel.borrow() {
                 return PlaybackPauseResult::Cancelled;
+            }
+            if !target_is_available() {
+                return PlaybackPauseResult::TargetLost;
             }
             tokio::select! {
                 changed = cancel.changed() => {
@@ -1734,8 +2027,12 @@ mod win {
                     if changed.is_err() {
                         return PlaybackPauseResult::Cancelled;
                     }
+                    if !target_is_available() {
+                        return PlaybackPauseResult::TargetLost;
+                    }
                     return PlaybackPauseResult::Resumed(Duration::ZERO);
                 }
+                _ = sleep_until(tokio::time::Instant::now() + PAUSED_TARGET_POLL_INTERVAL) => {}
             }
         }
     }
@@ -1743,23 +2040,44 @@ mod win {
     #[derive(Default)]
     struct HeldInputs {
         keys: HashSet<u16>,
-        buttons: HashSet<MouseButton>,
+        buttons: HashMap<MouseButton, (i32, i32)>,
     }
 
     struct PlaybackGuard {
         held: HeldInputs,
-        shared: Arc<Shared>,
+        target: CocTarget,
+        armed: bool,
     }
 
     impl PlaybackGuard {
         fn release(&mut self) -> io::Result<()> {
-            release_inputs(&self.shared, &mut self.held)
+            release_targeted_inputs(self.target, &mut self.held)
+        }
+
+        fn finish(&mut self) -> io::Result<()> {
+            let (armed, held, target) = (&mut self.armed, &mut self.held, self.target);
+            finish_guard_release(armed, || release_targeted_inputs(target, held))
         }
     }
 
     impl Drop for PlaybackGuard {
         fn drop(&mut self) {
-            let _ = self.release();
+            release_guard_on_drop(self.armed, || self.release());
+        }
+    }
+
+    fn finish_guard_release(
+        armed: &mut bool,
+        mut release: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let result = release().or_else(|_| release());
+        *armed = false;
+        result
+    }
+
+    fn release_guard_on_drop(armed: bool, release: impl FnOnce() -> io::Result<()>) {
+        if armed {
+            let _ = release();
         }
     }
 
@@ -1799,25 +2117,27 @@ mod win {
     }
 
     fn apply_event(
-        shared: &Shared,
         event: &ReplayEvent,
         held: &mut HeldInputs,
-        require_coc_foreground: bool,
+        target: CocTarget,
     ) -> io::Result<()> {
         match event {
-            ReplayEvent::Move { x, y } => send_mouse_move(shared, *x, *y, require_coc_foreground),
-            ReplayEvent::Click { button, down } => {
-                send_mouse_button(shared, *button, *down, require_coc_foreground)?;
+            ReplayEvent::Move { x, y } => send_targeted_mouse_move(target, *x, *y, held),
+            ReplayEvent::Click { x, y, button, down } => {
+                let held_position =
+                    send_targeted_mouse_button(target, *x, *y, *button, *down, held)?;
                 if *down {
-                    held.buttons.insert(*button);
+                    held.buttons.insert(*button, held_position);
                 } else {
                     held.buttons.remove(button);
                 }
                 Ok(())
             }
-            ReplayEvent::Scroll { dx, dy } => send_scroll(shared, *dx, *dy, require_coc_foreground),
+            ReplayEvent::Scroll { x, y, dx, dy } => {
+                send_targeted_scroll(target, *x, *y, *dx, *dy, held)
+            }
             ReplayEvent::Key { virtual_key, down } => {
-                send_key(shared, *virtual_key, *down, require_coc_foreground)?;
+                send_targeted_key(target, *virtual_key, *down, &held.keys)?;
                 if *down {
                     held.keys.insert(*virtual_key);
                 } else {
@@ -1829,17 +2149,299 @@ mod win {
         }
     }
 
-    fn release_inputs(shared: &Shared, held: &mut HeldInputs) -> io::Result<()> {
-        release_inputs_with(held, |input| send_inputs(shared, &[input], false))
+    fn is_extended_key(key: u16) -> bool {
+        matches!(
+            key,
+            0x21..=0x2e | 0x5b..=0x5d | 0x6f | 0x90..=0x92 | 0xa3 | 0xa5 | 0xad..=0xb3
+        )
     }
 
-    fn release_inputs_with(
-        held: &mut HeldInputs,
-        mut send: impl FnMut(INPUT) -> io::Result<()>,
+    fn target_window(target: CocTarget, require_foreground: bool) -> io::Result<HWND> {
+        let window = target.window as HWND;
+        if window.is_null() || unsafe { IsWindow(window) } == 0 {
+            return Err(invalid_target_window());
+        }
+        let mut process_id = 0;
+        if unsafe { GetWindowThreadProcessId(window, &mut process_id) } == 0
+            || process_id != target.process_id
+            || process_creation_time(process_id) != Some(target.process_created_at)
+        {
+            return Err(invalid_target_window());
+        }
+        if !window_title(window)?
+            .to_ascii_lowercase()
+            .contains("clash of clans")
+        {
+            return Err(invalid_target_window());
+        }
+        let visible = unsafe { IsWindowVisible(window) } != 0;
+        let foreground = unsafe { GetForegroundWindow() } == window;
+        if !target_visibility_allowed(require_foreground, visible, foreground) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Clash of Clans is no longer the foreground window",
+            ));
+        }
+        Ok(window)
+    }
+
+    fn invalid_target_window() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "the captured Clash of Clans window is no longer available",
+        )
+    }
+
+    fn target_visibility_allowed(
+        require_foreground: bool,
+        visible: bool,
+        foreground: bool,
+    ) -> bool {
+        !require_foreground || (visible && foreground)
+    }
+
+    fn target_is_foreground(target: CocTarget) -> bool {
+        target_window(target, true).is_ok()
+    }
+
+    fn target_client_point(target: CocTarget, x: i32, y: i32) -> io::Result<(HWND, POINT)> {
+        let window = target_window(target, true)?;
+        let mut point = POINT { x, y };
+        if unsafe { ScreenToClient(window, &mut point) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut client = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetClientRect(window, &mut client) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if point.x < client.left
+            || point.y < client.top
+            || point.x >= client.right
+            || point.y >= client.bottom
+        {
+            return Err(invalid_input(
+                "recorded mouse position is outside the Clash of Clans client area",
+            ));
+        }
+        Ok((window, point))
+    }
+
+    fn pack_window_coordinates(x: i32, y: i32) -> io::Result<LPARAM> {
+        let x =
+            i16::try_from(x).map_err(|_| invalid_input("mouse x coordinate is out of range"))?;
+        let y =
+            i16::try_from(y).map_err(|_| invalid_input("mouse y coordinate is out of range"))?;
+        Ok((u32::from(x as u16) | (u32::from(y as u16) << 16)) as i32 as LPARAM)
+    }
+
+    fn post_target_message(
+        target: CocTarget,
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        require_foreground: bool,
     ) -> io::Result<()> {
+        if target_window(target, require_foreground)? != window {
+            return Err(invalid_target_window());
+        }
+        if unsafe { PostMessageW(window, message, wparam, lparam) } == 0 {
+            return Err(io::Error::other(format!(
+                "could not post input to the Clash of Clans window: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    fn send_targeted_mouse_move(
+        target: CocTarget,
+        x: i32,
+        y: i32,
+        held: &HeldInputs,
+    ) -> io::Result<()> {
+        let (window, point) = target_client_point(target, x, y)?;
+        post_target_message(
+            target,
+            window,
+            WM_MOUSEMOVE,
+            mouse_key_state(held, None),
+            pack_window_coordinates(point.x, point.y)?,
+            true,
+        )
+    }
+
+    fn send_targeted_mouse_button(
+        target: CocTarget,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        down: bool,
+        held: &HeldInputs,
+    ) -> io::Result<(i32, i32)> {
+        let (window, point) = target_client_point(target, x, y)?;
+        let lparam = pack_window_coordinates(point.x, point.y)?;
+        post_target_message(
+            target,
+            window,
+            WM_MOUSEMOVE,
+            mouse_key_state(held, None),
+            lparam,
+            true,
+        )?;
+        let message = match (button, down) {
+            (MouseButton::Left, true) => WM_LBUTTONDOWN,
+            (MouseButton::Left, false) => WM_LBUTTONUP,
+            (MouseButton::Right, true) => WM_RBUTTONDOWN,
+            (MouseButton::Right, false) => WM_RBUTTONUP,
+            (MouseButton::Middle, true) => WM_MBUTTONDOWN,
+            (MouseButton::Middle, false) => WM_MBUTTONUP,
+        };
+        post_target_message(
+            target,
+            window,
+            message,
+            mouse_key_state(held, Some((button, down))),
+            lparam,
+            true,
+        )?;
+        Ok((point.x, point.y))
+    }
+
+    fn send_targeted_scroll(
+        target: CocTarget,
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+        held: &HeldInputs,
+    ) -> io::Result<()> {
+        let (window, _) = target_client_point(target, x, y)?;
+        let lparam = pack_window_coordinates(x, y)?;
+        for (amount, message) in [(dy, WM_MOUSEWHEEL), (dx, WM_MOUSEHWHEEL)] {
+            if amount == 0 {
+                continue;
+            }
+            let delta = amount
+                .checked_mul(WHEEL_DELTA)
+                .ok_or_else(|| invalid_input("scroll amount is too large"))?;
+            let wparam = mouse_key_state(held, None) | (usize::from(delta as u16) << 16);
+            post_target_message(target, window, message, wparam, lparam, true)?;
+        }
+        Ok(())
+    }
+
+    fn mouse_key_state(held: &HeldInputs, transition: Option<(MouseButton, bool)>) -> WPARAM {
+        let button_is_down = |button| {
+            transition
+                .filter(|(changed, _)| *changed == button)
+                .map(|(_, down)| down)
+                .unwrap_or_else(|| held.buttons.contains_key(&button))
+        };
+        let mut state = 0;
+        if button_is_down(MouseButton::Left) {
+            state |= MK_LBUTTON;
+        }
+        if button_is_down(MouseButton::Right) {
+            state |= MK_RBUTTON;
+        }
+        if button_is_down(MouseButton::Middle) {
+            state |= MK_MBUTTON;
+        }
+        if [0x10, 0xa0, 0xa1].iter().any(|key| held.keys.contains(key)) {
+            state |= MK_SHIFT;
+        }
+        if [0x11, 0xa2, 0xa3].iter().any(|key| held.keys.contains(key)) {
+            state |= MK_CONTROL;
+        }
+        state
+    }
+
+    fn send_targeted_key(
+        target: CocTarget,
+        virtual_key: u16,
+        down: bool,
+        held: &HashSet<u16>,
+    ) -> io::Result<()> {
+        let window = target_window(target, true)?;
+        let alt_down = [0x12, 0xa4, 0xa5].iter().any(|key| held.contains(key));
+        let system_key = alt_down || matches!(virtual_key, 0x12 | 0xa4 | 0xa5);
+        let message = match (system_key, down) {
+            (false, true) => WM_KEYDOWN,
+            (false, false) => WM_KEYUP,
+            (true, true) => WM_SYSKEYDOWN,
+            (true, false) => WM_SYSKEYUP,
+        };
+        let scan = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC_EX) };
+        let previous_state = !down || held.contains(&virtual_key);
+        let mut flags = (scan & 0xff) << 16;
+        if is_extended_key(virtual_key) || matches!(scan >> 8, 0xe0 | 0xe1) {
+            flags |= 1 << 24;
+        }
+        if alt_down {
+            flags |= 1 << 29;
+        }
+        if previous_state {
+            flags |= 1 << 30;
+        }
+        if !down {
+            flags |= 1 << 31;
+        }
+        post_target_message(
+            target,
+            window,
+            message,
+            usize::from(virtual_key),
+            (flags | 1) as LPARAM,
+            true,
+        )
+    }
+
+    fn release_targeted_inputs(target: CocTarget, held: &mut HeldInputs) -> io::Result<()> {
+        if held.keys.is_empty() && held.buttons.is_empty() {
+            return Ok(());
+        }
+        release_targeted_inputs_with(
+            || target_window(target, false),
+            held,
+            |window, key, keys| post_target_key_release(target, window, key, keys),
+            |window, button, point, held| {
+                let message = match button {
+                    MouseButton::Left => WM_LBUTTONUP,
+                    MouseButton::Right => WM_RBUTTONUP,
+                    MouseButton::Middle => WM_MBUTTONUP,
+                };
+                post_target_message(
+                    target,
+                    window,
+                    message,
+                    mouse_key_state(held, Some((button, false))),
+                    pack_window_coordinates(point.0, point.1)?,
+                    false,
+                )
+            },
+        )
+    }
+
+    fn release_targeted_inputs_with(
+        target: impl FnOnce() -> io::Result<HWND>,
+        held: &mut HeldInputs,
+        mut release_key: impl FnMut(HWND, u16, &HashSet<u16>) -> io::Result<()>,
+        mut release_button: impl FnMut(HWND, MouseButton, (i32, i32), &HeldInputs) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if held.keys.is_empty() && held.buttons.is_empty() {
+            return Ok(());
+        }
+        let window = target()?;
         let mut first_error = None;
-        for key in held.keys.iter().copied().collect::<Vec<_>>() {
-            match send(key_input(key, false)) {
+        for key in key_release_order(&held.keys) {
+            let result = release_key(window, key, &held.keys);
+            match result {
                 Ok(()) => {
                     held.keys.remove(&key);
                 }
@@ -1847,8 +2449,14 @@ mod win {
                 Err(_) => {}
             }
         }
-        for button in held.buttons.iter().copied().collect::<Vec<_>>() {
-            match send(mouse_button_input(button, false)) {
+        for (button, point) in held
+            .buttons
+            .iter()
+            .map(|(button, point)| (*button, *point))
+            .collect::<Vec<_>>()
+        {
+            let result = release_button(window, button, point, held);
+            match result {
                 Ok(()) => {
                     held.buttons.remove(&button);
                 }
@@ -1859,195 +2467,37 @@ mod win {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn send_key(
-        shared: &Shared,
+    fn post_target_key_release(
+        target: CocTarget,
+        window: HWND,
         virtual_key: u16,
-        down: bool,
-        require_coc_foreground: bool,
+        held: &HashSet<u16>,
     ) -> io::Result<()> {
-        send_inputs(
-            shared,
-            &[key_input(virtual_key, down)],
-            require_coc_foreground,
+        let alt_down = [0x12, 0xa4, 0xa5].iter().any(|key| held.contains(key));
+        let system_key = alt_down || matches!(virtual_key, 0x12 | 0xa4 | 0xa5);
+        let message = if system_key { WM_SYSKEYUP } else { WM_KEYUP };
+        let scan = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC_EX) };
+        let mut flags = ((scan & 0xff) << 16) | 1 | (1 << 30) | (1 << 31);
+        if is_extended_key(virtual_key) || matches!(scan >> 8, 0xe0 | 0xe1) {
+            flags |= 1 << 24;
+        }
+        if alt_down {
+            flags |= 1 << 29;
+        }
+        post_target_message(
+            target,
+            window,
+            message,
+            usize::from(virtual_key),
+            flags as LPARAM,
+            false,
         )
     }
 
-    fn key_input(virtual_key: u16, down: bool) -> INPUT {
-        let mut flags = if down { 0 } else { KEYEVENTF_KEYUP };
-        if is_extended_key(virtual_key) {
-            flags |= KEYEVENTF_EXTENDEDKEY;
-        }
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: virtual_key,
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: INJECTION_TAG,
-                },
-            },
-        }
-    }
-
-    fn is_extended_key(key: u16) -> bool {
-        matches!(
-            key,
-            0x21..=0x2e | 0x5b..=0x5d | 0x6f | 0x90..=0x92 | 0xa3 | 0xa5 | 0xad..=0xb3
-        )
-    }
-
-    fn send_mouse_move(
-        shared: &Shared,
-        x: i32,
-        y: i32,
-        require_coc_foreground: bool,
-    ) -> io::Result<()> {
-        let left = unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_XVIRTUALSCREEN)
-        };
-        let top = unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_YVIRTUALSCREEN)
-        };
-        let width = unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        };
-        let height = unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        };
-        if width <= 0 || height <= 0 {
-            return Err(io::Error::other(
-                "virtual desktop dimensions are unavailable",
-            ));
-        }
-        let normalized_x = normalize_coordinate(x, left, width);
-        let normalized_y = normalize_coordinate(y, top, height);
-        send_inputs(
-            shared,
-            &[INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dx: normalized_x,
-                        dy: normalized_y,
-                        mouseData: 0,
-                        dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-                        time: 0,
-                        dwExtraInfo: INJECTION_TAG,
-                    },
-                },
-            }],
-            require_coc_foreground,
-        )
-    }
-
-    fn normalize_coordinate(value: i32, origin: i32, extent: i32) -> i32 {
-        if extent <= 1 {
-            return 0;
-        }
-        (((i64::from(value) - i64::from(origin)).clamp(0, i64::from(extent - 1)) * 65_535)
-            / i64::from(extent - 1)) as i32
-    }
-
-    fn send_mouse_button(
-        shared: &Shared,
-        button: MouseButton,
-        down: bool,
-        require_coc_foreground: bool,
-    ) -> io::Result<()> {
-        send_inputs(
-            shared,
-            &[mouse_button_input(button, down)],
-            require_coc_foreground,
-        )
-    }
-
-    fn mouse_button_input(button: MouseButton, down: bool) -> INPUT {
-        let flags = match (button, down) {
-            (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
-            (MouseButton::Left, false) => MOUSEEVENTF_LEFTUP,
-            (MouseButton::Right, true) => MOUSEEVENTF_RIGHTDOWN,
-            (MouseButton::Right, false) => MOUSEEVENTF_RIGHTUP,
-            (MouseButton::Middle, true) => MOUSEEVENTF_MIDDLEDOWN,
-            (MouseButton::Middle, false) => MOUSEEVENTF_MIDDLEUP,
-        };
-        INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: INJECTION_TAG,
-                },
-            },
-        }
-    }
-
-    fn send_scroll(
-        shared: &Shared,
-        dx: i32,
-        dy: i32,
-        require_coc_foreground: bool,
-    ) -> io::Result<()> {
-        let mut inputs = Vec::with_capacity(2);
-        if dy != 0 {
-            inputs.push(scroll_input(dy, false)?);
-        }
-        if dx != 0 {
-            inputs.push(scroll_input(dx, true)?);
-        }
-        send_inputs(shared, &inputs, require_coc_foreground)
-    }
-
-    fn scroll_input(amount: i32, horizontal: bool) -> io::Result<INPUT> {
-        let wheel = amount
-            .checked_mul(WHEEL_DELTA)
-            .ok_or_else(|| invalid_input("scroll amount is too large"))?;
-        Ok(INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: wheel as u32,
-                    dwFlags: if horizontal {
-                        MOUSEEVENTF_HWHEEL
-                    } else {
-                        MOUSEEVENTF_WHEEL
-                    },
-                    time: 0,
-                    dwExtraInfo: INJECTION_TAG,
-                },
-            },
-        })
-    }
-
-    fn send_inputs(
-        shared: &Shared,
-        inputs: &[INPUT],
-        require_coc_foreground: bool,
-    ) -> io::Result<()> {
-        if inputs.is_empty() {
-            return Ok(());
-        }
-        if require_coc_foreground {
-            ensure_coc_foreground(true, shared.cached_coc_instance_is_foreground())?;
-        }
-        let sent = unsafe {
-            SendInput(
-                inputs.len() as u32,
-                inputs.as_ptr(),
-                std::mem::size_of::<INPUT>() as i32,
-            )
-        };
-        if sent != inputs.len() as u32 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+    fn key_release_order(keys: &HashSet<u16>) -> Vec<u16> {
+        let mut keys = keys.iter().copied().collect::<Vec<_>>();
+        keys.sort_by_key(|key| matches!(key, 0x12 | 0xa4 | 0xa5));
+        keys
     }
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -2057,11 +2507,16 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::{
-            HeldInputs, MouseButton, NativeEvent, PlaybackFailure, PlaybackPauseResult, ReplayWait,
-            is_extended_key, pause_after_release, playback_completion_event, release_inputs_with,
-            shift_replay_timing, signal_playback_resume, wait_for_replay_step,
+            ForegroundLossAction, HeldInputs, MouseButton, NativeEvent, PlaybackFailure,
+            PlaybackPauseResult, ReplayWait, finalized_playback_event, finish_guard_release,
+            foreground_loss_action, invalid_target_window, is_extended_key, join_playback_task,
+            key_release_order, pack_window_coordinates, pause_after_release,
+            playback_completion_event, release_guard_on_drop, release_targeted_inputs_with,
+            shift_replay_timing, signal_playback_resume, target_visibility_allowed,
+            wait_for_replay_step,
         };
-        use std::collections::HashSet;
+        use std::cell::{Cell, RefCell};
+        use std::collections::{HashMap, HashSet};
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -2080,19 +2535,239 @@ mod win {
         fn focus_loss_releases_every_held_key_and_mouse_button() {
             let mut held = HeldInputs {
                 keys: HashSet::from([0x41]),
-                buttons: HashSet::from([MouseButton::Left]),
+                buttons: HashMap::from([(MouseButton::Left, (10, 20))]),
             };
-            let mut released = 0;
+            let mut released_keys = Vec::new();
+            let mut released_buttons = Vec::new();
 
-            release_inputs_with(&mut held, |_| {
-                released += 1;
-                Ok(())
-            })
+            release_targeted_inputs_with(
+                || Ok(std::ptr::null_mut()),
+                &mut held,
+                |_, key, _| {
+                    released_keys.push(key);
+                    Ok(())
+                },
+                |_, button, _, _| {
+                    released_buttons.push(button);
+                    Ok(())
+                },
+            )
             .unwrap();
 
-            assert_eq!(released, 2);
+            assert_eq!(released_keys, vec![0x41]);
+            assert_eq!(released_buttons, vec![MouseButton::Left]);
             assert!(held.keys.is_empty());
             assert!(held.buttons.is_empty());
+        }
+
+        #[test]
+        fn hidden_window_is_allowed_for_release_but_not_dispatch() {
+            assert!(target_visibility_allowed(false, false, false));
+            assert!(!target_visibility_allowed(true, false, true));
+            assert!(!target_visibility_allowed(true, true, false));
+        }
+
+        #[test]
+        fn invalid_target_keeps_held_inputs_and_never_posts_releases() {
+            let mut held = HeldInputs {
+                keys: HashSet::from([0x41]),
+                buttons: HashMap::from([(MouseButton::Left, (10, 20))]),
+            };
+            let posted = Cell::new(false);
+
+            let result = release_targeted_inputs_with(
+                || Err(invalid_target_window()),
+                &mut held,
+                |_, _, _| {
+                    posted.set(true);
+                    Ok(())
+                },
+                |_, _, _, _| {
+                    posted.set(true);
+                    Ok(())
+                },
+            );
+
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+            assert!(!posted.get());
+            assert_eq!(held.keys, HashSet::from([0x41]));
+            assert_eq!(held.buttons, HashMap::from([(MouseButton::Left, (10, 20))]));
+        }
+
+        #[test]
+        fn final_release_succeeds_without_resolving_a_destroyed_target_when_nothing_is_held() {
+            let mut held = HeldInputs::default();
+            let target_checked = Cell::new(false);
+
+            release_targeted_inputs_with(
+                || {
+                    target_checked.set(true);
+                    Err(invalid_target_window())
+                },
+                &mut held,
+                |_, _, _| panic!("no key is held"),
+                |_, _, _, _| panic!("no mouse button is held"),
+            )
+            .unwrap();
+
+            assert!(!target_checked.get());
+        }
+
+        #[test]
+        fn release_failure_preserves_only_inputs_that_still_need_release() {
+            let mut held = HeldInputs {
+                keys: HashSet::from([0x41]),
+                buttons: HashMap::from([(MouseButton::Left, (10, 20))]),
+            };
+
+            let result = release_targeted_inputs_with(
+                || Ok(std::ptr::null_mut()),
+                &mut held,
+                |_, _, _| Ok(()),
+                |_, _, _, _| Err(std::io::Error::other("release failed")),
+            );
+
+            assert!(result.is_err());
+            assert!(held.keys.is_empty());
+            assert_eq!(held.buttons, HashMap::from([(MouseButton::Left, (10, 20))]));
+        }
+
+        #[test]
+        fn focus_loss_policy_only_selects_pause_or_safe_stop() {
+            assert_eq!(foreground_loss_action(true), ForegroundLossAction::Pause);
+            assert_eq!(foreground_loss_action(false), ForegroundLossAction::Stop);
+        }
+
+        #[test]
+        fn final_release_retries_remaining_inputs_once_and_disarms_drop_retry() {
+            let mut armed = true;
+            let mut attempts = 0;
+            let order = RefCell::new(Vec::new());
+            let mut held = HeldInputs {
+                keys: HashSet::from([0x41, 0x42]),
+                buttons: HashMap::new(),
+            };
+            let mut released_keys = Vec::new();
+
+            let event = finalized_playback_event(
+                8,
+                false,
+                false,
+                None,
+                || {
+                    finish_guard_release(&mut armed, || {
+                        attempts += 1;
+                        order.borrow_mut().push("release");
+                        release_targeted_inputs_with(
+                            || Ok(std::ptr::null_mut()),
+                            &mut held,
+                            |_, key, _| {
+                                released_keys.push(key);
+                                if key == 0x42 && attempts == 1 {
+                                    Err(std::io::Error::other("transient release failure"))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            |_, _, _, _| Ok(()),
+                        )
+                    })
+                },
+                |event| {
+                    assert_eq!(event, &NativeEvent::PlaybackEnded { playback_id: 8 });
+                    assert_eq!(*order.borrow(), vec!["release", "release"]);
+                    order.borrow_mut().push("publish");
+                },
+            );
+            release_guard_on_drop(armed, || {
+                attempts += 1;
+                Ok(())
+            });
+
+            assert_eq!(event, NativeEvent::PlaybackEnded { playback_id: 8 });
+            assert!(!armed);
+            assert_eq!(attempts, 2);
+            assert_eq!(released_keys.iter().filter(|key| **key == 0x41).count(), 1);
+            assert_eq!(released_keys.iter().filter(|key| **key == 0x42).count(), 2);
+            assert!(held.keys.is_empty());
+            assert_eq!(*order.borrow(), vec!["release", "release", "publish"]);
+        }
+
+        #[test]
+        fn persistent_final_release_failure_is_reported_after_two_attempts() {
+            let order = RefCell::new(Vec::new());
+            let mut armed = true;
+            let mut attempts = 0;
+            let mut held = HeldInputs {
+                keys: HashSet::from([0x41]),
+                buttons: HashMap::new(),
+            };
+            let event = finalized_playback_event(
+                9,
+                false,
+                false,
+                None,
+                || {
+                    finish_guard_release(&mut armed, || {
+                        attempts += 1;
+                        order.borrow_mut().push("release");
+                        release_targeted_inputs_with(
+                            || Err(invalid_target_window()),
+                            &mut held,
+                            |_, _, _| panic!("destroyed target must not receive a release"),
+                            |_, _, _, _| panic!("destroyed target must not receive a release"),
+                        )
+                    })
+                },
+                |event| {
+                    assert_eq!(
+                        event,
+                        &NativeEvent::PlaybackFailed {
+                            playback_id: 9,
+                            reason: PlaybackFailure::Release,
+                        }
+                    );
+                    order.borrow_mut().push("publish");
+                },
+            );
+            release_guard_on_drop(armed, || {
+                attempts += 1;
+                Ok(())
+            });
+
+            assert_eq!(*order.borrow(), vec!["release", "release", "publish"]);
+            assert_eq!(attempts, 2);
+            assert!(!armed);
+            assert_eq!(held.keys, HashSet::from([0x41]));
+            assert_eq!(
+                event,
+                NativeEvent::PlaybackFailed {
+                    playback_id: 9,
+                    reason: PlaybackFailure::Release,
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn joined_playback_task_returns_its_terminal_event() {
+            let expected = NativeEvent::PlaybackEnded { playback_id: 23 };
+            let returned = expected.clone();
+            let mut task = tokio::spawn(async move { returned });
+
+            assert_eq!(join_playback_task(&mut task).await.unwrap(), expected);
+        }
+
+        #[test]
+        fn targeted_release_keeps_alt_until_system_keys_are_released() {
+            let held = HashSet::from([0x12, 0x73]);
+            assert_eq!(key_release_order(&held), vec![0x73, 0x12]);
+        }
+
+        #[test]
+        fn targeted_mouse_coordinates_use_signed_windows_packing() {
+            let packed = pack_window_coordinates(320, 240).unwrap();
+            assert_eq!(packed, ((240_u32 << 16) | 320) as isize);
+            assert!(pack_window_coordinates(32_768, 0).is_err());
         }
 
         #[tokio::test]
@@ -2124,6 +2799,7 @@ mod win {
                 let result = pause_after_release(
                     &mut cancel,
                     &mut resume,
+                    || true,
                     move || {
                         worker_released.fetch_add(1, Ordering::SeqCst);
                         Ok(())
@@ -2172,6 +2848,7 @@ mod win {
                 let result = pause_after_release(
                     &mut cancel,
                     &mut resume,
+                    || true,
                     || Ok(()),
                     move || published_tx.send(()).unwrap(),
                 )
@@ -2193,23 +2870,67 @@ mod win {
         }
 
         #[tokio::test]
+        async fn paused_playback_ends_if_coc_target_disappears_without_injecting() {
+            let (_cancel_tx, mut cancel) = watch::channel(false);
+            let (_resume_tx, mut resume) = watch::channel(());
+            let (published_tx, published_rx) = oneshot::channel();
+            let target_available = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let worker_target_available = Arc::clone(&target_available);
+            let injected = Arc::new(AtomicUsize::new(0));
+            let worker_injected = Arc::clone(&injected);
+
+            let worker = tokio::spawn(async move {
+                let result = pause_after_release(
+                    &mut cancel,
+                    &mut resume,
+                    move || worker_target_available.load(Ordering::SeqCst),
+                    || Ok(()),
+                    move || published_tx.send(()).unwrap(),
+                )
+                .await;
+                if matches!(result, PlaybackPauseResult::Resumed(_)) {
+                    worker_injected.fetch_add(1, Ordering::SeqCst);
+                }
+                result
+            });
+
+            published_rx.await.unwrap();
+            target_available.store(false, Ordering::SeqCst);
+
+            assert!(matches!(
+                worker.await.unwrap(),
+                PlaybackPauseResult::TargetLost
+            ));
+            assert_eq!(injected.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
         async fn release_failure_never_publishes_the_paused_state() {
             let (_cancel_tx, mut cancel) = watch::channel(false);
             let (_resume_tx, mut resume) = watch::channel(());
             let mut held = HeldInputs {
                 keys: HashSet::from([0x41]),
-                buttons: HashSet::new(),
+                buttons: HashMap::new(),
             };
-            let mut release_attempts = 0;
+            let release_attempts = Cell::new(0);
             let mut published = false;
             let result = pause_after_release(
                 &mut cancel,
                 &mut resume,
+                || true,
                 || {
-                    release_inputs_with(&mut held, |_| {
-                        release_attempts += 1;
-                        Err(std::io::Error::other("release failed"))
-                    })
+                    release_targeted_inputs_with(
+                        || Ok(std::ptr::null_mut()),
+                        &mut held,
+                        |_, _, _| {
+                            release_attempts.set(release_attempts.get() + 1);
+                            Err(std::io::Error::other("release failed"))
+                        },
+                        |_, _, _, _| {
+                            release_attempts.set(release_attempts.get() + 1);
+                            Err(std::io::Error::other("release failed"))
+                        },
+                    )
                 },
                 || published = true,
             )
@@ -2217,11 +2938,11 @@ mod win {
 
             assert!(matches!(&result, PlaybackPauseResult::ReleaseFailed));
             assert!(!published);
-            assert_eq!(release_attempts, 1);
+            assert_eq!(release_attempts.get(), 1);
             assert_eq!(held.keys, HashSet::from([0x41]));
             let release_failed = matches!(&result, PlaybackPauseResult::ReleaseFailed);
             assert_eq!(
-                playback_completion_event(5, false, release_failed),
+                playback_completion_event(5, false, release_failed, None),
                 NativeEvent::PlaybackFailed {
                     playback_id: 5,
                     reason: PlaybackFailure::Release,
@@ -2249,6 +2970,16 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_title_read_distinguishes_empty_title_from_api_error() {
+        assert_eq!(decode_window_title(0, 0, &[0]).unwrap(), "");
+
+        let error = decode_window_title(0, 5, &[0]).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+
+        assert_eq!(decode_window_title(3, 0, &[67, 111, 67]).unwrap(), "CoC");
+    }
 
     #[test]
     fn foreground_guard_rejects_input_without_the_game_focus() {
@@ -2288,30 +3019,51 @@ mod tests {
     #[test]
     fn playback_completion_distinguishes_cancellation_from_injection_failures() {
         assert_eq!(
-            playback_completion_event(4, false, false),
+            playback_completion_event(4, false, false, None),
             NativeEvent::PlaybackEnded { playback_id: 4 }
         );
         assert_eq!(
-            playback_completion_event(4, true, false),
+            playback_completion_event(4, true, false, None),
             NativeEvent::PlaybackFailed {
                 playback_id: 4,
                 reason: PlaybackFailure::Input,
             }
         );
         assert_eq!(
-            playback_completion_event(4, false, true),
+            playback_completion_event(4, false, true, None),
             NativeEvent::PlaybackFailed {
                 playback_id: 4,
                 reason: PlaybackFailure::Release,
             }
         );
         assert_eq!(
-            playback_completion_event(4, true, true),
+            playback_completion_event(4, true, true, None),
             NativeEvent::PlaybackFailed {
                 playback_id: 4,
                 reason: PlaybackFailure::InputAndRelease,
             }
         );
+        assert_eq!(
+            playback_completion_event(4, false, false, Some(PlaybackStopReason::FocusLost)),
+            NativeEvent::PlaybackStopped {
+                playback_id: 4,
+                reason: PlaybackStopReason::FocusLost,
+            }
+        );
+        assert_eq!(
+            playback_completion_event(4, false, false, Some(PlaybackStopReason::TargetLost)),
+            NativeEvent::PlaybackStopped {
+                playback_id: 4,
+                reason: PlaybackStopReason::TargetLost,
+            }
+        );
+        assert!(matches!(
+            playback_completion_event(4, false, true, Some(PlaybackStopReason::FocusLost)),
+            NativeEvent::PlaybackFailed {
+                reason: PlaybackFailure::Release,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2494,6 +3246,38 @@ mod tests {
             json!({"t":0.125,"type":"mouse_click","data":{"x":-1920,"y":40,"button":"right","action":"down"}})
         );
         assert!(parse_steps(std::slice::from_ref(&value)).is_ok());
+    }
+
+    #[test]
+    fn replay_parser_preserves_click_and_scroll_screen_coordinates() {
+        let values = [
+            event_value(
+                0.0,
+                "mouse_click",
+                json!({"x":-1920,"y":40,"button":"left","action":"down"}),
+            ),
+            event_value(0.5, "scroll", json!({"x":2500,"y":-10,"dx":0,"dy":1})),
+        ];
+        let parsed = parse_steps(&values).unwrap();
+
+        assert!(matches!(
+            &parsed[0].event,
+            ReplayEvent::Click {
+                x: -1920,
+                y: 40,
+                button: MouseButton::Left,
+                down: true,
+            }
+        ));
+        assert!(matches!(
+            &parsed[1].event,
+            ReplayEvent::Scroll {
+                x: 2500,
+                y: -10,
+                dx: 0,
+                dy: 1,
+            }
+        ));
     }
 
     #[test]

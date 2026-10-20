@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -13,16 +13,12 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use thiserror::Error;
 
-use crate::types::{
-    MacroFile, MacroSummary, MigrationCounts, MigrationMacroPreview, MigrationPreview,
-    MigrationResult, Settings,
-};
+use crate::types::{MacroFile, MacroSummary, Settings};
 
 const MAX_MACRO_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_LEGACY_CSV_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PLACEHOLDER_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_PLACEHOLDER_MACRO_BYTES: u64 = 1024 * 1024;
 const MAX_STEPS: usize = 250_000;
-const OVERSIZED_FINGERPRINT_SAMPLE_BYTES: usize = 64 * 1024;
-const OVERSIZED_FINGERPRINT_MARKER: &[u8] = b"\0AUTO-COC oversized file fingerprint v1\0";
 const LEGACY_TYPES: [&str; 6] = [
     "mouse_move",
     "mouse_click",
@@ -31,7 +27,6 @@ const LEGACY_TYPES: [&str; 6] = [
     "key_up",
     "nop",
 ];
-const PROTECTED: [&str; 2] = ["Recharger COC", "Valider arrivée"];
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
@@ -42,8 +37,6 @@ pub enum StoreError {
     InvalidName,
     #[error("macro name already exists")]
     Conflict,
-    #[error("protected macro cannot be changed")]
-    Protected,
     #[error("cannot read macro")]
     Unreadable,
     #[error("operation could not be persisted")]
@@ -114,6 +107,7 @@ impl Store {
     fn open_inner(root: PathBuf) -> Result<Self, StoreError> {
         let macros_path = root.join("macros");
         fs::create_dir_all(&macros_path)?;
+        remove_untouched_placeholders(&root, &macros_path)?;
         let settings_path = root.join("settings.json");
         let mut state = if settings_path.exists() {
             read_settings(&settings_path)?
@@ -142,25 +136,6 @@ impl Store {
         if !settings_path.exists() {
             atomic_write_json(&settings_path, &state)?;
         }
-        for name in PROTECTED {
-            let path = macro_path(&macros_path, name)?;
-            if !path.exists() {
-                let macro_file = empty_macro(name);
-                let bytes = serde_json::to_vec_pretty(&macro_file).map_err(io::Error::other)?;
-                match create_no_clobber(&path, &bytes) {
-                    Ok(()) => {
-                        let mut provenance = read_placeholder_manifest(&root)?;
-                        provenance
-                            .files
-                            .insert(name.into(), file_fingerprint(&bytes));
-                        atomic_write_json(&root.join("system-placeholders.json"), &provenance)?;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-
         // A stale selection should not leave the app in a broken state.
         if let Some(selected) = state.selected_macro.as_deref()
             && !macro_path(&macros_path, selected).is_ok_and(|path| path.exists())
@@ -207,233 +182,6 @@ impl Store {
     }
     pub(crate) fn persist(&self) -> Result<(), StoreError> {
         self.persist_settings()
-    }
-
-    pub fn migration_was_imported(&self) -> Result<bool, StoreError> {
-        let dir = self.root.join("migration-manifests");
-        Ok(dir.is_dir() && fs::read_dir(dir)?.next().is_some())
-    }
-
-    pub fn preview_legacy(
-        &self,
-        selected: &Path,
-    ) -> Result<(PathBuf, MigrationPreview, bool), StoreError> {
-        Self::preview_legacy_at(&self.root, selected)
-    }
-
-    pub(crate) fn preview_legacy_at(
-        root: &Path,
-        selected: &Path,
-    ) -> Result<(PathBuf, MigrationPreview, bool), StoreError> {
-        let config = resolve_legacy_config_dir(selected).ok_or(StoreError::InvalidData)?;
-        let settings_found = config.join("data.csv").is_file();
-        let mut macros = Vec::new();
-        let source_macros = config.join("macros");
-        if source_macros.is_dir() {
-            for entry in fs::read_dir(&source_macros)? {
-                let entry = entry?;
-                if entry.path().extension().is_none_or(|ext| ext != "json") {
-                    continue;
-                }
-                let name = entry
-                    .path()
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("Macro")
-                    .to_owned();
-                macros.push(preview_macro(&entry.path(), name)?);
-            }
-        }
-        let legacy_file = config.join("macro.json");
-        if legacy_file.is_file() {
-            macros.push(preview_macro(&legacy_file, "macro".into())?);
-        }
-        macros.sort_by(|left, right| natural_cmp(&left.name, &right.name));
-        let available = settings_found || !macros.is_empty();
-        let fingerprint = legacy_fingerprint(&config)?;
-        let already_imported = root
-            .join("migration-manifests")
-            .join(format!("{fingerprint}.json"))
-            .exists();
-        Ok((
-            config,
-            MigrationPreview {
-                available,
-                settings_found,
-                macros,
-            },
-            already_imported,
-        ))
-    }
-
-    #[cfg(test)]
-    pub fn import_legacy(&mut self, selected: &Path) -> Result<MigrationResult, StoreError> {
-        self.import_legacy_with_token_installation(selected, || {})
-    }
-
-    pub(crate) fn import_legacy_with_token_installation(
-        &mut self,
-        selected: &Path,
-        before_token_install: impl FnOnce(),
-    ) -> Result<MigrationResult, StoreError> {
-        let (config, preview, already_imported) = self.preview_legacy(selected)?;
-        let fingerprint = legacy_fingerprint(&config)?;
-        let manifest_dir = self.root.join("migration-manifests");
-        fs::create_dir_all(&manifest_dir)?;
-        let manifest_path = manifest_dir.join(format!("{fingerprint}.json"));
-        if already_imported && manifest_path.exists() {
-            let result = serde_json::from_slice(&fs::read(manifest_path)?)
-                .map_err(|_| StoreError::InvalidData)?;
-            return Ok(result);
-        }
-
-        let csv_path = config.join("data.csv");
-        if csv_path.is_file() {
-            let legacy_csv = read_bounded_file(&csv_path, MAX_LEGACY_CSV_BYTES)?;
-            let backup_dir = self.root.join("migration-backups").join(format!(
-                "{}-{}",
-                chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                &fingerprint[..8]
-            ));
-            fs::create_dir_all(&backup_dir)?;
-            let backup_csv = redact_legacy_token(&legacy_csv)?;
-            atomic_write(&backup_dir.join("data.csv"), &backup_csv)?;
-        }
-
-        let legacy_settings = read_legacy_settings(&csv_path)?;
-        let mut imported = MigrationCounts::default();
-        if let Some(value) = legacy_settings.loop_value
-            && !self.state.present.contains("loop")
-        {
-            self.state.settings.loop_playback = value;
-            self.state.present.insert("loop".into());
-            imported.settings += 1;
-        }
-        if let Some(value) = legacy_settings.coc_path
-            && !self.state.present.contains("cocPath")
-        {
-            self.state.settings.coc_path = value;
-            self.state.present.insert("cocPath".into());
-            imported.settings += 1;
-        }
-        if let Some(token) = legacy_settings.telegram_token {
-            let needs_token_write = match load_token(&self.root) {
-                Ok(Some(_)) => false,
-                Ok(None) | Err(StoreError::InvalidData) => true,
-                Err(error) => return Err(error),
-            };
-            if needs_token_write {
-                self.state.settings.telegram.token_configured = false;
-                self.state.settings.telegram.paired = false;
-                self.state.settings.telegram.status = crate::types::TelegramStatus::Error;
-                self.state.settings.telegram.pairing_code = None;
-                self.state.settings.telegram.pairing_expires_at = None;
-                self.clear_telegram_owner();
-                self.persist_settings()?;
-
-                before_token_install();
-                save_token(&self.root, token.as_bytes())?;
-                self.state.settings.telegram.token_configured = true;
-                self.state.settings.telegram.status = crate::types::TelegramStatus::Disconnected;
-                imported.settings += 1;
-            }
-        }
-
-        let mut collisions = Vec::new();
-        let mut preserved = preview
-            .macros
-            .iter()
-            .filter(|item| !item.readable)
-            .map(|item| item.name.clone())
-            .collect::<Vec<_>>();
-        let mut errors = Vec::new();
-        let mut copy_candidates = Vec::new();
-        let source_macros = config.join("macros");
-        if source_macros.is_dir() {
-            for entry in fs::read_dir(source_macros)? {
-                let entry = entry?;
-                if entry.path().extension().is_some_and(|ext| ext == "json") {
-                    copy_candidates.push(entry.path());
-                }
-            }
-        }
-        let legacy_file = config.join("macro.json");
-        if legacy_file.is_file() {
-            copy_candidates.push(legacy_file);
-        }
-        let mut placeholders = read_placeholder_manifest(&self.root)?;
-        let mut placeholder_manifest_changed = false;
-        for source in copy_candidates {
-            let Some(stem) = source
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .map(str::to_owned)
-            else {
-                preserved.push("Fichier de macro au nom non pris en charge".into());
-                continue;
-            };
-            if validate_name(&stem).is_err() {
-                preserved.push(stem.chars().take(80).collect());
-                continue;
-            }
-            let source_bytes = match read_macro_bytes(&source) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    if !preserved.iter().any(|name| name == &stem) {
-                        preserved.push(stem);
-                    }
-                    continue;
-                }
-            };
-            let destination = macro_path(&self.macros_path, &stem)?;
-            if destination.exists() || self.has_case_collision(&stem)? {
-                if !is_protected(&stem)
-                    || !can_replace_placeholder(&stem, &destination, &placeholders)?
-                {
-                    collisions.push(stem);
-                    continue;
-                }
-                placeholders.files.remove(&stem);
-                placeholder_manifest_changed = true;
-            }
-            if destination.exists() {
-                atomic_write(&destination, &source_bytes)?;
-                imported.macros += 1;
-            } else {
-                match create_no_clobber(&destination, &source_bytes) {
-                    Ok(()) => imported.macros += 1,
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        collisions.push(stem)
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        if placeholder_manifest_changed {
-            atomic_write_json(&self.root.join("system-placeholders.json"), &placeholders)?;
-        }
-
-        if self.state.selected_macro.is_none()
-            && legacy_settings.last_macro.as_deref().is_some_and(|name| {
-                macro_path(&self.macros_path, name).is_ok_and(|path| path.exists())
-            })
-        {
-            self.state.selected_macro = legacy_settings.last_macro;
-            imported.settings += 1;
-        }
-        self.persist_settings()?;
-
-        if !preview.available {
-            errors.push("La source ne contient aucun fichier de données ou macro reconnu.".into());
-        }
-        let result = MigrationResult {
-            imported,
-            collisions,
-            preserved,
-            errors,
-        };
-        atomic_write_json(&manifest_path, &result)?;
-        Ok(result)
     }
 
     pub fn set_loop(&mut self, value: bool) -> Result<(), StoreError> {
@@ -552,7 +300,6 @@ impl Store {
                 continue;
             };
             let parsed = read_macro(&path);
-            let protected = is_protected(stem);
             match parsed {
                 Ok(macro_file) => {
                     let readable = macro_issue(&macro_file).is_none();
@@ -560,7 +307,6 @@ impl Store {
                         name: stem.into(),
                         event_count: macro_file.steps.len(),
                         duration_seconds: duration(&macro_file.steps),
-                        protected,
                         readable,
                         issue: macro_issue(&macro_file),
                     });
@@ -569,19 +315,12 @@ impl Store {
                     name: stem.into(),
                     event_count: 0,
                     duration_seconds: 0.0,
-                    protected,
                     readable: false,
                     issue: Some("Le fichier JSON ne peut pas être lu.".into()),
                 }),
             }
         }
-        items.sort_by(
-            |a, b| match (is_protected(&a.name), is_protected(&b.name)) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => natural_cmp(&a.name, &b.name),
-            },
-        );
+        items.sort_by(|a, b| natural_cmp(&a.name, &b.name));
         Ok(items)
     }
 
@@ -595,9 +334,6 @@ impl Store {
 
     pub fn create_macro(&mut self, name: &str) -> Result<(), StoreError> {
         validate_name(name)?;
-        if is_protected(name) {
-            return Err(StoreError::Protected);
-        }
         let path = macro_path(&self.macros_path, name)?;
         if path.exists() || self.has_case_collision(name)? {
             return Err(StoreError::Conflict);
@@ -611,9 +347,6 @@ impl Store {
 
     pub fn rename_macro(&mut self, name: &str, new_name: &str) -> Result<(), StoreError> {
         validate_name(new_name)?;
-        if is_protected(name) || is_protected(new_name) {
-            return Err(StoreError::Protected);
-        }
         let src = macro_path(&self.macros_path, name)?;
         if !src.exists() {
             return Err(StoreError::NotFound);
@@ -641,9 +374,6 @@ impl Store {
     }
 
     pub fn delete_macro(&mut self, name: &str) -> Result<(), StoreError> {
-        if is_protected(name) {
-            return Err(StoreError::Protected);
-        }
         let path = macro_path(&self.macros_path, name)?;
         if !path.exists() {
             return Err(StoreError::NotFound);
@@ -762,6 +492,7 @@ fn read_macro(path: &Path) -> Result<MacroFile, StoreError> {
     parse_macro_bytes(&bytes)
 }
 
+#[cfg(test)]
 fn read_macro_bytes(path: &Path) -> Result<Vec<u8>, StoreError> {
     let bytes = read_bounded_file(path, MAX_MACRO_BYTES)?;
     parse_macro_bytes(&bytes)?;
@@ -959,12 +690,6 @@ fn take_digits(iter: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
     out
 }
 
-fn is_protected(name: &str) -> bool {
-    PROTECTED
-        .iter()
-        .any(|protected| protected.eq_ignore_ascii_case(name.trim()))
-}
-
 fn atomic_write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     atomic_write(path, &bytes)
@@ -1090,293 +815,6 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
     fs::rename(source, target)
 }
 
-#[derive(Default)]
-struct LegacySettings {
-    loop_value: Option<bool>,
-    coc_path: Option<String>,
-    last_macro: Option<String>,
-    telegram_token: Option<String>,
-}
-
-fn resolve_legacy_config_dir(selected: &Path) -> Option<PathBuf> {
-    if !selected.is_dir() {
-        return None;
-    }
-    if has_legacy_content(selected) {
-        return Some(selected.to_path_buf());
-    }
-    let config = selected.join("config");
-    has_legacy_content(&config).then_some(config)
-}
-
-fn has_legacy_content(config: &Path) -> bool {
-    config.join("data.csv").is_file()
-        || config.join("macros").is_dir()
-        || config.join("macro.json").is_file()
-}
-
-fn preview_macro(path: &Path, name: String) -> Result<MigrationMacroPreview, StoreError> {
-    let bytes = match read_bounded_file(path, MAX_MACRO_BYTES) {
-        Ok(bytes) => bytes,
-        Err(StoreError::InvalidData) => {
-            return Ok(MigrationMacroPreview {
-                name,
-                event_count: 0,
-                readable: false,
-                issue: Some("Le fichier dépasse la taille autorisée.".into()),
-            });
-        }
-        Err(error) => return Err(error),
-    };
-    match serde_json::from_slice::<MacroFile>(&bytes) {
-        Ok(data) => Ok(MigrationMacroPreview {
-            name,
-            event_count: data.steps.len(),
-            readable: macro_issue(&data).is_none(),
-            issue: macro_issue(&data),
-        }),
-        Err(_) => Ok(MigrationMacroPreview {
-            name,
-            event_count: 0,
-            readable: false,
-            issue: Some("Le fichier JSON ne peut pas être lu.".into()),
-        }),
-    }
-}
-
-fn read_legacy_settings(path: &Path) -> Result<LegacySettings, StoreError> {
-    if !path.is_file() {
-        return Ok(LegacySettings::default());
-    }
-    let bytes = read_bounded_file(path, MAX_LEGACY_CSV_BYTES)?;
-    let text = String::from_utf8(bytes).map_err(|_| StoreError::InvalidData)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b';')
-        .has_headers(false)
-        .from_reader(text.trim_start_matches('\u{feff}').as_bytes());
-    let mut rows = reader.records();
-    let Some(first) = rows.next() else {
-        return Ok(LegacySettings::default());
-    };
-    let first = first.map_err(|_| StoreError::InvalidData)?;
-    let headers: Vec<_> = first
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .collect();
-    let name_index = headers.iter().position(|header| header == "parameter_name");
-    let value_index = headers
-        .iter()
-        .position(|header| header == "parameter_value");
-    let (name_index, value_index) = match (name_index, value_index) {
-        (Some(name), Some(value)) => (name, value),
-        _ => (0, 1),
-    };
-    let mut values = BTreeMap::new();
-    if name_index == 0
-        && value_index == 1
-        && first
-            .get(0)
-            .is_some_and(|value| !value.trim().eq_ignore_ascii_case("parameter_name"))
-    {
-        insert_csv_row(&mut values, &first, name_index, value_index);
-    }
-    for row in rows {
-        insert_csv_row(
-            &mut values,
-            &row.map_err(|_| StoreError::InvalidData)?,
-            name_index,
-            value_index,
-        );
-    }
-
-    Ok(LegacySettings {
-        loop_value: values.get("auto_loop").map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "y" | "on" | "t" | "vrai"
-            )
-        }),
-        coc_path: values
-            .get("coc_path")
-            .cloned()
-            .filter(|value| !value.is_empty()),
-        last_macro: values
-            .get("last_macro")
-            .cloned()
-            .filter(|value| !value.is_empty()),
-        telegram_token: values
-            .get("telegram_bot_token")
-            .cloned()
-            .filter(|value| !value.is_empty()),
-    })
-}
-
-fn redact_legacy_token(csv_bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
-    if csv_bytes.len() > 2 * 1024 * 1024 {
-        return Err(StoreError::InvalidData);
-    }
-    let text = std::str::from_utf8(csv_bytes).map_err(|_| StoreError::InvalidData)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b';')
-        .has_headers(false)
-        .from_reader(text.trim_start_matches('\u{feff}').as_bytes());
-    let mut rows = reader.records();
-    let Some(first) = rows.next() else {
-        return Ok(csv_bytes.to_vec());
-    };
-    let first = first.map_err(|_| StoreError::InvalidData)?;
-    let headers = first
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let named_columns = headers.iter().any(|header| header == "parameter_name")
-        && headers.iter().any(|header| header == "parameter_value");
-    let name_index = headers
-        .iter()
-        .position(|header| header == "parameter_name")
-        .unwrap_or(0);
-    let value_index = headers
-        .iter()
-        .position(|header| header == "parameter_value")
-        .unwrap_or(1);
-
-    let mut output = Vec::new();
-    {
-        let mut writer = csv::WriterBuilder::new()
-            .delimiter(b';')
-            .from_writer(&mut output);
-        if named_columns {
-            writer
-                .write_record(&first)
-                .map_err(|_| StoreError::InvalidData)?;
-        } else {
-            write_redacted_row(&mut writer, &first, name_index, value_index)?;
-        }
-        for row in rows {
-            let row = row.map_err(|_| StoreError::InvalidData)?;
-            write_redacted_row(&mut writer, &row, name_index, value_index)?;
-        }
-        writer.flush()?;
-    }
-    Ok(output)
-}
-
-fn write_redacted_row<W: Write>(
-    writer: &mut csv::Writer<W>,
-    row: &csv::StringRecord,
-    name_index: usize,
-    value_index: usize,
-) -> Result<(), StoreError> {
-    let mut fields = row.iter().map(str::to_owned).collect::<Vec<_>>();
-    if fields
-        .get(name_index)
-        .is_some_and(|name| name.trim().eq_ignore_ascii_case("telegram_bot_token"))
-        && let Some(value) = fields.get_mut(value_index)
-    {
-        *value = "[REDACTED]".into();
-    }
-    writer
-        .write_record(fields)
-        .map_err(|_| StoreError::InvalidData)
-}
-
-fn insert_csv_row(
-    values: &mut BTreeMap<String, String>,
-    row: &csv::StringRecord,
-    name_index: usize,
-    value_index: usize,
-) {
-    let Some(key) = row.get(name_index) else {
-        return;
-    };
-    let Some(value) = row.get(value_index) else {
-        return;
-    };
-    let key = key.trim().to_ascii_lowercase();
-    if !key.is_empty() && !key.eq_ignore_ascii_case("parameter_name") {
-        values.insert(key, value.trim().to_owned());
-    }
-}
-
-fn legacy_fingerprint(config: &Path) -> Result<String, StoreError> {
-    let mut files = Vec::new();
-    let csv = config.join("data.csv");
-    if csv.is_file() {
-        files.push(("data.csv".to_owned(), csv, MAX_LEGACY_CSV_BYTES));
-    }
-    let macros = config.join("macros");
-    if macros.is_dir() {
-        for entry in fs::read_dir(macros)? {
-            let path = entry?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-            {
-                let name = path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("macro.json");
-                files.push((format!("macros/{name}"), path, MAX_MACRO_BYTES));
-            }
-        }
-    }
-    let old_macro = config.join("macro.json");
-    if old_macro.is_file() {
-        files.push(("macro.json".into(), old_macro, MAX_MACRO_BYTES));
-    }
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut hasher = Sha256::new();
-    for (name, path, max_bytes) in files {
-        hasher.update(name.as_bytes());
-        let mut file = fs::File::open(path)?;
-        let length = file.metadata()?.len();
-        hasher.update(length.to_le_bytes());
-        update_fingerprint_contents(&mut file, length, max_bytes, &mut hasher)?;
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn update_fingerprint_contents(
-    file: &mut (impl Read + Seek),
-    length: u64,
-    max_bytes: u64,
-    hasher: &mut Sha256,
-) -> Result<(), StoreError> {
-    let mut buffer = [0; OVERSIZED_FINGERPRINT_SAMPLE_BYTES];
-    if length > max_bytes {
-        hasher.update(OVERSIZED_FINGERPRINT_MARKER);
-        let sample_len = (length / 2).min(buffer.len() as u64) as usize;
-        hasher.update((sample_len as u64).to_le_bytes());
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut buffer[..sample_len])?;
-        hasher.update(&buffer[..sample_len]);
-        hasher.update(b"\0omitted middle\0");
-        file.seek(SeekFrom::End(-(sample_len as i64)))?;
-        file.read_exact(&mut buffer[..sample_len])?;
-        hasher.update(&buffer[..sample_len]);
-    } else {
-        let mut remaining = length;
-        while remaining > 0 {
-            let chunk_len = usize::try_from(remaining.min(buffer.len() as u64))
-                .map_err(|_| StoreError::InvalidData)?;
-            let read = file.read(&mut buffer[..chunk_len])?;
-            if read == 0 {
-                return Err(StoreError::InvalidData);
-            }
-            hasher.update(&buffer[..read]);
-            remaining -= read as u64;
-        }
-        let mut extra = [0; 1];
-        if file.read(&mut extra)? != 0 {
-            return Err(StoreError::InvalidData);
-        }
-    }
-    if file.seek(SeekFrom::End(0))? != length {
-        return Err(StoreError::InvalidData);
-    }
-    Ok(())
-}
-
 fn file_fingerprint(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
 }
@@ -1386,23 +824,52 @@ fn read_placeholder_manifest(root: &Path) -> Result<PlaceholderManifest, StoreEr
     if !path.exists() {
         return Ok(PlaceholderManifest::default());
     }
-    serde_json::from_slice(&fs::read(path)?).map_err(|_| StoreError::InvalidData)
+    serde_json::from_slice(&read_bounded_file(&path, MAX_PLACEHOLDER_MANIFEST_BYTES)?)
+        .map_err(|_| StoreError::InvalidData)
 }
 
-fn can_replace_placeholder(
-    name: &str,
-    path: &Path,
-    provenance: &PlaceholderManifest,
-) -> Result<bool, StoreError> {
-    let Some(expected) = provenance.files.get(name) else {
-        return Ok(false);
+fn remove_untouched_placeholders(root: &Path, macros_path: &Path) -> Result<(), StoreError> {
+    let mut provenance = match read_placeholder_manifest(root) {
+        Ok(provenance) => provenance,
+        // A malformed manifest cannot prove that a macro is safe to delete.
+        Err(StoreError::InvalidData) => return Ok(()),
+        Err(error) => return Err(error),
     };
-    let bytes = fs::read(path)?;
-    if file_fingerprint(&bytes) != *expected {
-        return Ok(false);
+    if provenance.files.is_empty() {
+        return Ok(());
     }
-    let data: MacroFile = serde_json::from_slice(&bytes).map_err(|_| StoreError::InvalidData)?;
-    Ok(data.steps.is_empty() && macro_issue(&data).is_none())
+
+    let manifest_path = root.join("system-placeholders.json");
+    for name in ["Recharger COC", "Valider arrivée"] {
+        let Some(expected) = provenance.files.remove(name) else {
+            continue;
+        };
+        let path = macro_path(macros_path, name)?;
+        let bytes = match read_bounded_file(&path, MAX_PLACEHOLDER_MACRO_BYTES) {
+            Ok(bytes) => bytes,
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(StoreError::InvalidData) => continue,
+            Err(error) => return Err(error),
+        };
+        let is_untouched_placeholder = file_fingerprint(&bytes) == expected
+            && serde_json::from_slice::<MacroFile>(&bytes).is_ok_and(|data| {
+                data.name == name && data.steps.is_empty() && macro_issue(&data).is_none()
+            });
+        if is_untouched_placeholder {
+            fs::remove_file(path)?;
+        }
+    }
+
+    if provenance.files.is_empty() {
+        match fs::remove_file(manifest_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        atomic_write_json(&manifest_path, &provenance)?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1566,9 +1033,10 @@ mod tests {
     }
 
     #[test]
-    fn old_settings_load_guard_disabled_and_new_value_persists() {
+    fn new_install_defaults_guard_on_but_legacy_missing_field_stays_off() {
         let dir = tempdir().unwrap();
         let store = Store::open_at(dir.path()).unwrap();
+        assert!(store.settings().require_coc_foreground);
         let settings_path = store.settings_path.clone();
         let mut old_json = serde_json::to_value(&store.state).unwrap();
         old_json["settings"]
@@ -1579,10 +1047,12 @@ mod tests {
 
         let mut store = Store::open_at(dir.path()).unwrap();
         assert!(!store.settings().require_coc_foreground);
-        store.update_settings(None, None, Some(true)).unwrap();
-        assert!(store.settings().require_coc_foreground);
+        store.update_settings(None, None, Some(false)).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.path()).unwrap();
+        assert!(!store.settings().require_coc_foreground);
         assert!(
-            read_settings(&settings_path)
+            !read_settings(&settings_path)
                 .unwrap()
                 .settings
                 .require_coc_foreground
@@ -1649,36 +1119,34 @@ mod tests {
     }
 
     #[test]
-    fn creates_protected_macros_and_natural_sort_order() {
+    fn creates_only_user_macros_and_natural_sort_order() {
         let dir = tempdir().unwrap();
         let store = Store::open_at(dir.path()).unwrap();
+        assert!(store.summaries().unwrap().is_empty());
         let mut store = store;
         store.create_macro("Macro 10").unwrap();
         store.create_macro("Macro 2").unwrap();
+        store.create_macro("Valider arrivée").unwrap();
         let names: Vec<_> = store
             .summaries()
             .unwrap()
             .into_iter()
             .map(|m| m.name)
             .collect();
-        assert_eq!(&names[..2], ["Recharger COC", "Valider arrivée"]);
-        assert!(
-            names.iter().position(|n| n == "Macro 2") < names.iter().position(|n| n == "Macro 10")
-        );
+        assert_eq!(names, ["Macro 2", "Macro 10", "Valider arrivée"]);
     }
 
     #[test]
-    fn refuses_invalid_or_protected_macro_mutations() {
+    fn refuses_invalid_and_duplicate_macro_mutations() {
         let dir = tempdir().unwrap();
         let mut store = Store::open_at(dir.path()).unwrap();
         assert!(matches!(
             store.create_macro("../bad"),
             Err(StoreError::InvalidName)
         ));
-        assert!(matches!(
-            store.delete_macro("Recharger COC"),
-            Err(StoreError::Protected)
-        ));
+        store.create_macro("Recharger COC").unwrap();
+        store.rename_macro("Recharger COC", "Recharger").unwrap();
+        store.delete_macro("Recharger").unwrap();
         store.create_macro("Test").unwrap();
         assert!(matches!(
             store.create_macro("test"),
@@ -1745,11 +1213,8 @@ mod tests {
     }
 
     #[test]
-    fn macro_preview_and_readability_enforce_playback_duration_limit() {
+    fn macro_readability_enforces_playback_duration_limit() {
         let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let source_macros = old.path().join("config/macros");
-        fs::create_dir_all(&source_macros).unwrap();
         let store = Store::open_at(app.path()).unwrap();
         let fixture = |name: &str, steps: Vec<Value>| {
             serde_json::to_vec(&json!({
@@ -1775,54 +1240,43 @@ mod tests {
                 json!({"t": 43_200.1, "type": "nop", "data": {}}),
             ],
         );
-        let within_path = source_macros.join("WithinLimit.json");
-        let over_path = source_macros.join("OverLimit.json");
+        let within_path = store.macros_path.join("WithinLimit.json");
+        let over_path = store.macros_path.join("OverLimit.json");
         fs::write(&within_path, &within_limit).unwrap();
         fs::write(&over_path, &over_limit).unwrap();
 
-        let (_, preview, _) = store.preview_legacy(old.path()).unwrap();
+        let summaries = store.summaries().unwrap();
         assert!(
-            preview
-                .macros
+            summaries
                 .iter()
                 .find(|item| item.name == "WithinLimit")
                 .unwrap()
                 .readable
         );
-        let over_preview = preview
-            .macros
+        let over_summary = summaries
             .iter()
             .find(|item| item.name == "OverLimit")
             .unwrap();
-        assert!(!over_preview.readable);
-        assert!(over_preview.issue.as_deref().unwrap().contains("24 heures"));
+        assert!(!over_summary.readable);
+        let over_file: MacroFile = serde_json::from_slice(&over_limit).unwrap();
+        assert!(macro_issue(&over_file).unwrap().contains("24 heures"));
         assert_eq!(fs::read(&within_path).unwrap(), within_limit);
         assert_eq!(fs::read(&over_path).unwrap(), over_limit);
-
-        let local_path = store.macros_path.join("OverLimit.json");
-        fs::write(&local_path, &over_limit).unwrap();
-        let summary = store
-            .summaries()
-            .unwrap()
-            .into_iter()
-            .find(|item| item.name == "OverLimit")
-            .unwrap();
-        assert!(!summary.readable);
-        assert_eq!(fs::read(local_path).unwrap(), over_limit);
     }
 
     #[test]
     fn sparse_oversized_macro_is_rejected_before_reading_its_contents() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("Oversized.json");
+        let store = Store::open_at(dir.path()).unwrap();
+        let path = store.macros_path.join("Oversized.json");
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_MACRO_BYTES + 1).unwrap();
 
-        let preview = preview_macro(&path, "Oversized".into()).unwrap();
-        assert!(!preview.readable);
+        let summary = store.summaries().unwrap().remove(0);
+        assert!(!summary.readable);
         assert_eq!(
-            preview.issue.as_deref(),
-            Some("Le fichier dépasse la taille autorisée.")
+            summary.issue.as_deref(),
+            Some("Le fichier JSON ne peut pas être lu.")
         );
         assert!(matches!(
             read_macro_bytes(&path),
@@ -1835,173 +1289,55 @@ mod tests {
     }
 
     #[test]
-    fn sparse_oversized_legacy_csv_is_rejected_before_backup_creation() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        fs::create_dir_all(&config).unwrap();
-        let csv_path = config.join("data.csv");
-        let file = fs::File::create(&csv_path).unwrap();
-        file.set_len(MAX_LEGACY_CSV_BYTES + 1).unwrap();
-        let mut store = Store::open_at(app.path()).unwrap();
-
-        assert!(matches!(
-            store.import_legacy(old.path()),
-            Err(StoreError::InvalidData)
-        ));
-        assert!(!app.path().join("migration-backups").exists());
-        assert!(matches!(
-            read_legacy_settings(&csv_path),
-            Err(StoreError::InvalidData)
-        ));
-    }
-
-    #[test]
-    fn streaming_legacy_fingerprint_matches_the_previous_content_hash() {
+    fn oversized_placeholder_manifest_does_not_block_startup_or_get_deleted() {
         let dir = tempdir().unwrap();
-        let config = dir.path().join("config");
-        let macros = config.join("macros");
-        fs::create_dir_all(&macros).unwrap();
-        fs::write(config.join("data.csv"), b"settings\0content").unwrap();
-        fs::write(macros.join("Macro 2.json"), b"macro two").unwrap();
-        fs::write(config.join("macro.json"), b"legacy macro").unwrap();
-
-        let mut files = vec![
-            ("data.csv".to_owned(), config.join("data.csv")),
-            (
-                "macros/Macro 2.json".to_owned(),
-                macros.join("Macro 2.json"),
-            ),
-            ("macro.json".to_owned(), config.join("macro.json")),
-        ];
-        files.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut expected = Sha256::new();
-        for (name, path) in files {
-            let content = fs::read(path).unwrap();
-            expected.update(name.as_bytes());
-            expected.update((content.len() as u64).to_le_bytes());
-            expected.update(content);
-        }
-
-        assert_eq!(
-            legacy_fingerprint(&config).unwrap(),
-            format!("{:x}", expected.finalize())
-        );
-    }
-
-    #[test]
-    fn oversized_fingerprint_reads_only_bounded_samples() {
-        struct CountingReader {
-            position: u64,
-            length: u64,
-            bytes_read: u64,
-            grow_after_samples: bool,
-        }
-
-        impl Read for CountingReader {
-            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-                let remaining = self.length.saturating_sub(self.position);
-                let read = buffer
-                    .len()
-                    .min(remaining.min(buffer.len() as u64) as usize);
-                buffer[..read].fill(0x5a);
-                self.position += read as u64;
-                self.bytes_read += read as u64;
-                if self.grow_after_samples
-                    && self.bytes_read >= (OVERSIZED_FINGERPRINT_SAMPLE_BYTES * 2) as u64
-                {
-                    self.length += 1;
-                    self.grow_after_samples = false;
-                }
-                Ok(read)
-            }
-        }
-
-        impl Seek for CountingReader {
-            fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-                let next = match position {
-                    SeekFrom::Start(position) => position as i128,
-                    SeekFrom::Current(offset) => self.position as i128 + offset as i128,
-                    SeekFrom::End(offset) => self.length as i128 + offset as i128,
-                };
-                if next < 0 || next > u64::MAX as i128 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid seek"));
-                }
-                self.position = next as u64;
-                Ok(self.position)
-            }
-        }
-
-        let length = 1_u64 << 40;
-        let mut reader = CountingReader {
-            position: 0,
-            length,
-            bytes_read: 0,
-            grow_after_samples: false,
-        };
-        let mut first_hash = Sha256::new();
-        update_fingerprint_contents(&mut reader, length, MAX_MACRO_BYTES, &mut first_hash).unwrap();
-        let first_hash = first_hash.finalize();
-        assert_eq!(
-            reader.bytes_read,
-            (OVERSIZED_FINGERPRINT_SAMPLE_BYTES * 2) as u64
-        );
-
-        reader.position = 0;
-        reader.bytes_read = 0;
-        let mut second_hash = Sha256::new();
-        update_fingerprint_contents(&mut reader, length, MAX_MACRO_BYTES, &mut second_hash)
-            .unwrap();
-        assert_eq!(first_hash, second_hash.finalize());
-        assert_eq!(
-            reader.bytes_read,
-            (OVERSIZED_FINGERPRINT_SAMPLE_BYTES * 2) as u64
-        );
-
-        reader.position = 0;
-        reader.bytes_read = 0;
-        reader.grow_after_samples = true;
-        let mut changed_hash = Sha256::new();
-        assert!(matches!(
-            update_fingerprint_contents(&mut reader, length, MAX_MACRO_BYTES, &mut changed_hash),
-            Err(StoreError::InvalidData)
-        ));
-    }
-
-    #[test]
-    fn preview_legacy_marks_sparse_oversized_macro_unreadable() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let source_macros = old.path().join("config/macros");
-        fs::create_dir_all(&source_macros).unwrap();
-        let path = source_macros.join("Oversized.json");
-        fs::File::create(&path)
+        let manifest = dir.path().join("system-placeholders.json");
+        fs::File::create(&manifest)
             .unwrap()
-            .set_len(MAX_MACRO_BYTES + 1)
+            .set_len(MAX_PLACEHOLDER_MANIFEST_BYTES + 1)
             .unwrap();
-        let store = Store::open_at(app.path()).unwrap();
 
-        let (_, preview, _) = store.preview_legacy(old.path()).unwrap();
-        let macro_preview = preview
-            .macros
-            .iter()
-            .find(|item| item.name == "Oversized")
-            .unwrap();
-        assert!(!macro_preview.readable);
+        let store = Store::open_at(dir.path()).unwrap();
+
+        assert!(store.settings().require_coc_foreground);
         assert_eq!(
-            macro_preview.issue.as_deref(),
-            Some("Le fichier dépasse la taille autorisée.")
+            fs::metadata(manifest).unwrap().len(),
+            MAX_PLACEHOLDER_MANIFEST_BYTES + 1
         );
     }
 
     #[test]
-    fn macro_preview_rejects_coordinates_outside_i32_without_rewriting_source() {
+    fn oversized_placeholder_macro_is_preserved_on_startup() {
+        let dir = tempdir().unwrap();
+        let macros = dir.path().join("macros");
+        fs::create_dir_all(&macros).unwrap();
+        let placeholder = macros.join("Recharger COC.json");
+        fs::File::create(&placeholder)
+            .unwrap()
+            .set_len(MAX_PLACEHOLDER_MACRO_BYTES + 1)
+            .unwrap();
+        atomic_write_json(
+            &dir.path().join("system-placeholders.json"),
+            &PlaceholderManifest {
+                files: BTreeMap::from([("Recharger COC".into(), "not-a-match".into())]),
+            },
+        )
+        .unwrap();
+
+        Store::open_at(dir.path()).unwrap();
+
+        assert!(placeholder.exists());
+        assert_eq!(
+            fs::metadata(placeholder).unwrap().len(),
+            MAX_PLACEHOLDER_MACRO_BYTES + 1
+        );
+    }
+
+    #[test]
+    fn macro_readability_rejects_coordinates_outside_i32_without_rewriting_source() {
         let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let source_macros = old.path().join("config/macros");
-        fs::create_dir_all(&source_macros).unwrap();
         let store = Store::open_at(app.path()).unwrap();
-        let source = source_macros.join("OutOfRange.json");
+        let path = store.macros_path.join("OutOfRange.json");
         let original = serde_json::to_vec(&json!({
             "name": "OutOfRange",
             "updated_at": "2025-01-01T00:00:00Z",
@@ -2013,25 +1349,8 @@ mod tests {
             }]
         }))
         .unwrap();
-        fs::write(&source, &original).unwrap();
+        fs::write(&path, &original).unwrap();
 
-        let (_, preview, _) = store.preview_legacy(old.path()).unwrap();
-        let item = preview
-            .macros
-            .iter()
-            .find(|item| item.name == "OutOfRange")
-            .unwrap();
-        assert!(!item.readable);
-        assert!(
-            item.issue
-                .as_deref()
-                .unwrap()
-                .contains("position de souris")
-        );
-        assert_eq!(fs::read(&source).unwrap(), original);
-
-        let local = store.macros_path.join("OutOfRange.json");
-        fs::write(&local, &original).unwrap();
         assert!(
             !store
                 .summaries()
@@ -2045,7 +1364,7 @@ mod tests {
             store.get_macro("OutOfRange"),
             Err(StoreError::Unreadable)
         ));
-        assert_eq!(fs::read(local).unwrap(), original);
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 
     #[test]
@@ -2085,127 +1404,52 @@ mod tests {
     }
 
     #[test]
-    fn import_replaces_only_untouched_protected_placeholder_and_is_idempotent() {
+    fn startup_removes_only_proven_empty_system_placeholders() {
         let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let old_config = old.path().join("config");
-        let old_macros = old_config.join("macros");
-        fs::create_dir_all(&old_macros).unwrap();
-        fs::write(
-            old_config.join("data.csv"),
-            "parameter_name;parameter_value\nauto_loop;true\n",
-        )
-        .unwrap();
-        let historical = json!({
-            "name":"Recharger COC", "updated_at":"2025-01-01T00:00:00Z", "sha1":"legacy",
-            "steps":[{"t":0.0,"type":"nop","data":{}}]
+        let macros_path = app.path().join("macros");
+        fs::create_dir_all(&macros_path).unwrap();
+
+        let mut placeholders = PlaceholderManifest::default();
+        for name in ["Recharger COC", "Valider arrivée"] {
+            let bytes = serde_json::to_vec_pretty(&empty_macro(name)).unwrap();
+            fs::write(macros_path.join(format!("{name}.json")), &bytes).unwrap();
+            placeholders
+                .files
+                .insert(name.into(), file_fingerprint(&bytes));
+        }
+
+        let edited = json!({
+            "name":"Recharger COC",
+            "updated_at":"2025-01-01T00:00:00Z",
+            "sha1":"legacy",
+            "steps":[{"t":0.0,"type":"key_down","data":{"key":"x"}}]
         });
-        let historical_bytes = serde_json::to_vec_pretty(&historical).unwrap();
-        fs::write(old_macros.join("Recharger COC.json"), &historical_bytes).unwrap();
+        let edited_bytes = serde_json::to_vec(&edited).unwrap();
+        fs::write(macros_path.join("Recharger COC.json"), &edited_bytes).unwrap();
+        let unproven = json!({
+            "name":"Custom",
+            "updated_at":"2025-01-01T00:00:00Z",
+            "sha1":"legacy",
+            "steps":[{"t":0.0,"type":"key_down","data":{"key":"y"}}]
+        });
+        let unproven_bytes = serde_json::to_vec(&unproven).unwrap();
+        fs::write(macros_path.join("Custom.json"), &unproven_bytes).unwrap();
+        atomic_write_json(&app.path().join("system-placeholders.json"), &placeholders).unwrap();
 
-        let mut store = Store::open_at(app.path()).unwrap();
-        let result = store.import_legacy(old.path()).unwrap();
-        assert_eq!(result.imported.macros, 1);
-        assert!(result.collisions.is_empty());
+        let store = Store::open_at(app.path()).unwrap();
+
+        assert!(!macros_path.join("Valider arrivée.json").exists());
         assert_eq!(
-            fs::read(app.path().join("macros/Recharger COC.json")).unwrap(),
-            historical_bytes
+            fs::read(macros_path.join("Recharger COC.json")).unwrap(),
+            edited_bytes
         );
-        assert!(store.settings().loop_playback);
-
-        let before = fs::read(app.path().join("macros/Recharger COC.json")).unwrap();
-        let repeated = store.import_legacy(old.path()).unwrap();
-        let after = fs::read(app.path().join("macros/Recharger COC.json")).unwrap();
-        assert_eq!(repeated.imported.macros, 1);
-        assert_eq!(before, after);
         assert_eq!(
-            fs::read(old_macros.join("Recharger COC.json")).unwrap(),
-            historical_bytes
+            fs::read(macros_path.join("Custom.json")).unwrap(),
+            unproven_bytes
         );
-        assert!(
-            app.path()
-                .join("migration-backups")
-                .read_dir()
-                .unwrap()
-                .next()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn migration_refuses_nonempty_protected_user_macro() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let old_macros = old.path().join("config/macros");
-        fs::create_dir_all(&old_macros).unwrap();
-        let custom = json!({"name":"Valider arrivée","steps":[{"t":0.0,"type":"key_down","data":{"key":"enter"}}]});
-        fs::write(
-            old_macros.join("Valider arrivée.json"),
-            serde_json::to_vec(&custom).unwrap(),
-        )
-        .unwrap();
-        let mut store = Store::open_at(app.path()).unwrap();
-        let user_file = json!({"name":"Valider arrivée","steps":[{"t":0.0,"type":"key_down","data":{"key":"x"}}]});
-        let user_bytes = serde_json::to_vec(&user_file).unwrap();
-        fs::write(app.path().join("macros/Valider arrivée.json"), &user_bytes).unwrap();
-
-        let result = store.import_legacy(old.path()).unwrap();
-        assert!(result.collisions.contains(&"Valider arrivée".to_owned()));
-        assert_eq!(
-            fs::read(app.path().join("macros/Valider arrivée.json")).unwrap(),
-            user_bytes
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn migration_backup_redacts_the_token_and_keeps_source_for_recovery() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        fs::create_dir_all(&config).unwrap();
-        let token = "synthetic-migration-token";
-        let source_csv =
-            format!("parameter_value;parameter_name\n{token};telegram_bot_token\n1;auto_loop\n");
-        let source_path = config.join("data.csv");
-        fs::write(&source_path, &source_csv).unwrap();
-
-        let mut store = Store::open_at(app.path()).unwrap();
-        store.import_legacy(old.path()).unwrap();
-
-        let backup_dir = fs::read_dir(app.path().join("migration-backups"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let backup_csv = fs::read(backup_dir.join("data.csv")).unwrap();
-        assert!(
-            !backup_csv
-                .windows(token.len())
-                .any(|window| window == token.as_bytes())
-        );
-        let mut backup_reader = csv::ReaderBuilder::new()
-            .delimiter(b';')
-            .from_reader(backup_csv.as_slice());
-        assert_eq!(
-            backup_reader.headers().unwrap().iter().collect::<Vec<_>>(),
-            ["parameter_value", "parameter_name"]
-        );
-        let rows = backup_reader
-            .records()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(&rows[0][0], "[REDACTED]");
-        assert_eq!(&rows[0][1], "telegram_bot_token");
-        assert_eq!(&rows[1][0], "1");
-        assert_eq!(&rows[1][1], "auto_loop");
-        assert!(fs::read_to_string(&source_path).unwrap().contains(token));
-        assert!(
-            load_token(app.path())
-                .unwrap()
-                .is_some_and(|stored| stored == token)
-        );
+        assert!(!app.path().join("system-placeholders.json").exists());
+        let summaries = store.summaries().unwrap();
+        assert_eq!(summaries.len(), 2);
     }
 
     #[cfg(windows)]
@@ -2214,7 +1458,7 @@ mod tests {
         let app = tempdir().unwrap();
         let store = Store::open_at(app.path()).unwrap();
         assert!(!store.settings().telegram.token_configured);
-        let token = "synthetic-interrupted-migration-token";
+        let token = "synthetic-interrupted-telegram-token";
 
         save_token(app.path(), token.as_bytes()).unwrap();
         let reopened = Store::open_at(app.path()).unwrap();
@@ -2230,81 +1474,6 @@ mod tests {
             !settings
                 .windows(token.len())
                 .any(|window| window == token.as_bytes())
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn startup_preserves_an_invalid_protected_token_until_explicit_migration_replaces_it() {
-        let app = tempdir().unwrap();
-        Store::open_at(app.path()).unwrap();
-        let token_path = app.path().join("telegram-token.bin");
-        let invalid_ciphertext = b"synthetic-invalid-protected-token";
-        fs::write(&token_path, invalid_ciphertext).unwrap();
-
-        let mut store = Store::open_at(app.path()).unwrap();
-        assert!(!store.settings().telegram.token_configured);
-        assert_eq!(
-            store.settings().telegram.status,
-            crate::types::TelegramStatus::Error
-        );
-        assert_eq!(fs::read(&token_path).unwrap(), invalid_ciphertext);
-
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        fs::create_dir_all(&config).unwrap();
-        let replacement = "synthetic-imported-replacement-token";
-        fs::write(
-            config.join("data.csv"),
-            format!("parameter_name;parameter_value\ntelegram_bot_token;{replacement}\n"),
-        )
-        .unwrap();
-        store.import_legacy(old.path()).unwrap();
-
-        assert!(store.settings().telegram.token_configured);
-        assert_eq!(
-            load_token(app.path()).unwrap().as_deref(),
-            Some(replacement)
-        );
-        assert_ne!(fs::read(token_path).unwrap(), invalid_ciphertext);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn migration_keeps_pairing_when_a_protected_token_is_already_valid() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        fs::create_dir_all(&config).unwrap();
-        let existing_token = "synthetic-existing-migration-token";
-        let source_token = "synthetic-unselected-source-token";
-        fs::write(
-            config.join("data.csv"),
-            format!("parameter_name;parameter_value\ntelegram_bot_token;{source_token}\n"),
-        )
-        .unwrap();
-
-        let mut store = Store::open_at(app.path()).unwrap();
-        save_token(app.path(), existing_token.as_bytes()).unwrap();
-        store.settings_mut().telegram.token_configured = true;
-        store.settings_mut().telegram.paired = true;
-        store.settings_mut().telegram.status = crate::types::TelegramStatus::Connected;
-        store.set_telegram_owner(100, 200);
-        store.persist().unwrap();
-
-        let mut before_install_called = false;
-        let result = store
-            .import_legacy_with_token_installation(old.path(), || before_install_called = true)
-            .unwrap();
-
-        assert_eq!(result.imported.settings, 0);
-        assert!(!before_install_called);
-        assert!(store.settings().telegram.token_configured);
-        assert!(store.settings().telegram.paired);
-        assert_eq!(store.telegram_owner(), Some((100, 200)));
-        assert_eq!(
-            load_token(app.path()).unwrap().as_deref(),
-            Some(existing_token)
         );
     }
 
@@ -2352,19 +1521,5 @@ mod tests {
             crate::types::TelegramStatus::Error
         );
         assert!(!token_path.exists());
-    }
-
-    #[test]
-    fn csv_header_order_is_respected_and_legacy_chat_does_not_pair() {
-        let app = tempdir().unwrap();
-        let old = tempdir().unwrap();
-        let config = old.path().join("config");
-        fs::create_dir_all(&config).unwrap();
-        fs::write(config.join("data.csv"), "parameter_value;parameter_name\nC:\\Games\\CoC.exe;coc_path\n1;auto_loop\n123;telegram_chat_id\n").unwrap();
-        let mut store = Store::open_at(app.path()).unwrap();
-        store.import_legacy(old.path()).unwrap();
-        assert!(store.settings().loop_playback);
-        assert_eq!(store.settings().coc_path, "C:\\Games\\CoC.exe");
-        assert!(!store.settings().telegram.paired);
     }
 }

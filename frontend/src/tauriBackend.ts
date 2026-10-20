@@ -6,9 +6,6 @@ import {
   type Diagnostics,
   type HelpDocument,
   type MacroDetail,
-  type MigrationImportResult,
-  type MigrationSelectionResult,
-  type MigrationState,
   type PairingPreparation,
   type ShutdownPreparation,
   type Snapshot,
@@ -216,28 +213,6 @@ export class TauriBackendClient implements BackendClient {
 
   quitApplication(): Promise<void> {
     return this.invoke("quit_application");
-  }
-
-  getMigration(signal?: AbortSignal): Promise<MigrationState> {
-    return this.invoke("get_migration", undefined, signal);
-  }
-
-  async selectMigrationSource(): Promise<MigrationSelectionResult | null> {
-    try {
-      const selection = await this.invoke<MigrationSelectionResult | null>("select_migration_source");
-      if (selection) this.publish(selection.snapshot, false);
-      return selection;
-    } catch (error) {
-      const failure = backendError(error);
-      if (failure.code === "migration_cancelled") return null;
-      throw failure;
-    }
-  }
-
-  async importMigration(): Promise<MigrationImportResult> {
-    const result = await this.invoke<MigrationImportResult>("import_migration");
-    this.publish(result.snapshot, false);
-    return result;
   }
 
   prepareShutdown(): Promise<ShutdownPreparation> {

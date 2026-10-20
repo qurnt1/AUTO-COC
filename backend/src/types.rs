@@ -35,7 +35,13 @@ impl Default for Help {
                 },
                 HelpSection {
                     title: "Garde du premier plan".into(),
-                    body: "Quand cette option est activée, les actions démarrées dans l’atelier attendent jusqu’à 30 secondes que la fenêtre Clash of Clans reconnue passe au premier plan. Les raccourcis globaux et Telegram ne sont pas mis en attente. Si le focus est perdu pendant un enregistrement, AUTO-COC l’arrête et sauvegarde les événements capturés; en cas d’échec, la sauvegarde reste disponible pour réessayer. Pendant une lecture, AUTO-COC relâche d’abord les touches et boutons maintenus, puis met la macro en pause; si la libération échoue, la lecture s’arrête avec une erreur. Pour reprendre, choisissez « Reprendre » dans l’application, puis retournez dans le jeu; la lecture reprend au même point quand la fenêtre reconnue revient au premier plan. « Annuler la reprise » conserve la pause. Le bouton Arrêter, les raccourcis configurés de bascule/arrêt, Telegram STOP et la fermeture complète de l’application arrêtent la lecture. La garde s’appuie sur la fenêtre Windows reconnue et le processus hôte crosvm; un crash du jeu Android peut rester invisible si la fenêtre crosvm conserve son titre et son processus.".into(),
+                    body: concat!(
+                        "Quand la pause automatique est activée, une action lancée depuis l’atelier peut attendre jusqu’à 30 secondes que Clash of Clans passe au premier plan. Les raccourcis et Telegram ne patientent pas. Le replay exige toujours CoC au premier plan et envoie ses actions uniquement à sa fenêtre, même si l’option est désactivée. Google Play Games peut ignorer ces actions ciblées.\n\n",
+                        "Si CoC perd le premier plan pendant un replay, AUTO-COC relâche les touches et boutons maintenus. L’option activée met ensuite le replay en pause; désactivée, elle l’arrête. Si la libération échoue, le replay s’arrête avec une erreur. Pour reprendre au même point, choisissez « Reprendre », puis retournez dans le jeu. « Annuler la reprise » garde le replay en pause. Vous pouvez l’arrêter depuis l’atelier, avec le raccourci Arrêter, Telegram STOP ou en fermant l’application.\n\n",
+                        "Avec la pause activée, une perte de focus pendant la capture arrête l’enregistrement et sauvegarde les actions déjà capturées. Si la sauvegarde échoue, utilisez Arrêter pour réessayer.\n\n",
+                        "Les positions de souris sont enregistrées à l’écran et contrôlées par rapport à la fenêtre CoC. Si vous déplacez la fenêtre, une action peut viser ailleurs; une position hors de la zone de jeu arrête le replay. Réenregistrez la macro après avoir déplacé la fenêtre. Un crash interne du jeu peut ne pas être détecté si la fenêtre Google Play Games reste ouverte avec le même titre."
+                    )
+                    .into(),
                 },
                 HelpSection {
                     title: "Raccourcis par défaut".into(),
@@ -47,7 +53,7 @@ impl Default for Help {
                 },
                 HelpSection {
                     title: "Données".into(),
-                    body: "Les macros sont stockées dans le dossier local AUTO-COC de votre profil Windows. Les macros héritées sont copiées sans supprimer les fichiers d’origine.".into(),
+                    body: "Les macros sont stockées dans le dossier local AUTO-COC de votre profil Windows.".into(),
                 },
             ],
         }
@@ -120,7 +126,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             loop_playback: false,
-            require_coc_foreground: false,
+            require_coc_foreground: true,
             coc_path: String::new(),
             shortcuts: ShortcutSettings::default(),
             telegram: TelegramSettings::default(),
@@ -188,7 +194,6 @@ pub struct MacroSummary {
     pub name: String,
     pub event_count: usize,
     pub duration_seconds: f64,
-    pub protected: bool,
     pub readable: bool,
     pub issue: Option<String>,
 }
@@ -203,74 +208,8 @@ pub struct Snapshot {
     pub macros: Vec<MacroSummary>,
     pub settings: Settings,
     pub session: SessionStatus,
-    pub migration: MigrationStatus,
     pub onboarding_complete: bool,
     pub last_error: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationStatus {
-    pub source_selected: bool,
-    pub available: bool,
-    pub already_imported: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationMacroPreview {
-    pub name: String,
-    pub event_count: usize,
-    pub readable: bool,
-    pub issue: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationPreview {
-    pub available: bool,
-    pub settings_found: bool,
-    pub macros: Vec<MigrationMacroPreview>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationCounts {
-    pub settings: usize,
-    pub macros: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationResult {
-    pub imported: MigrationCounts,
-    pub collisions: Vec<String>,
-    pub preserved: Vec<String>,
-    pub errors: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationStatusResponse {
-    pub status: MigrationStatus,
-    pub preview: Option<MigrationPreview>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationSelection {
-    pub snapshot: Snapshot,
-    pub preview: MigrationPreview,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationImport {
-    pub snapshot: Snapshot,
-    pub imported: MigrationCounts,
-    pub collisions: Vec<String>,
-    pub preserved: Vec<String>,
-    pub errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -293,19 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migration_result_does_not_expose_internal_source_fingerprint() {
-        let result = MigrationResult {
-            imported: MigrationCounts::default(),
-            collisions: Vec::new(),
-            preserved: Vec::new(),
-            errors: Vec::new(),
-        };
-        let json = serde_json::to_value(result).unwrap();
-        assert!(json.get("fingerprint").is_none());
-    }
-
-    #[test]
-    fn legacy_settings_default_to_not_requiring_coc_foreground() {
+    fn new_settings_enable_the_guard_but_legacy_settings_without_it_do_not() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "loop": false,
             "cocPath": "",
@@ -321,6 +248,7 @@ mod tests {
         .unwrap();
 
         assert!(!settings.require_coc_foreground);
+        assert!(Settings::default().require_coc_foreground);
     }
 
     #[test]
@@ -332,22 +260,42 @@ mod tests {
             .unwrap();
 
         for phrase in [
-            "30 secondes",
-            "sauvegarde les événements capturés",
-            "relâche d’abord",
-            "puis met la macro en pause",
-            "si la libération échoue",
+            "depuis l’atelier peut attendre jusqu’à 30 secondes",
+            "Les raccourcis et Telegram ne patientent pas",
+            "Le replay exige toujours CoC au premier plan",
+            "uniquement à sa fenêtre",
+            "Google Play Games peut ignorer",
+            "Si CoC perd le premier plan pendant un replay",
+            "met ensuite le replay en pause",
+            "désactivée, elle l’arrête",
+            "la libération échoue",
             "Reprendre",
             "au même point",
             "Annuler la reprise",
-            "conserve la pause",
             "Telegram STOP",
-            "fermeture complète",
-            "peut rester invisible",
-            "crosvm conserve son titre et son processus",
+            "fermant l’application",
+            "une perte de focus pendant la capture arrête l’enregistrement",
+            "sauvegarde les actions déjà capturées",
+            "Les positions de souris sont enregistrées à l’écran",
+            "hors de la zone de jeu arrête le replay",
+            "Un crash interne du jeu peut ne pas être détecté",
+            "la fenêtre Google Play Games reste ouverte avec le même titre",
         ] {
             assert!(section.body.contains(phrase), "help is missing: {phrase}");
         }
+    }
+
+    #[test]
+    fn help_does_not_claim_to_import_or_copy_legacy_macros() {
+        let section = Help::default()
+            .sections
+            .into_iter()
+            .find(|section| section.title == "Données")
+            .unwrap();
+
+        assert!(section.body.contains("dossier local AUTO-COC"));
+        assert!(!section.body.contains("héritées"));
+        assert!(!section.body.contains("copiées"));
     }
 }
 

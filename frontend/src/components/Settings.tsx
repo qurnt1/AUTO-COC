@@ -29,21 +29,34 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
   const [capturing, setCapturing] = useState<ShortcutName | null>(null);
   const [shortcutError, setShortcutError] = useState("");
   const [token, setToken] = useState("");
-  const [telegramMessage, setTelegramMessage] = useState("");
+  const [tokenMessage, setTokenMessage] = useState("");
+  const [verificationMessage, setVerificationMessage] = useState("");
+  const [copyMessage, setCopyMessage] = useState("");
   const [pairing, setPairing] = useState<PairingCode | null>(snapshot.settings.telegram.pairingCode && snapshot.settings.telegram.pairingExpiresAt ? { code: snapshot.settings.telegram.pairingCode, expiresAt: snapshot.settings.telegram.pairingExpiresAt } : null);
+  const [now, setNow] = useState(Date.now());
   const [screenshotUrl, setScreenshotUrl] = useState("");
   const [shutdown, setShutdown] = useState<ShutdownPreparation | null>(null);
   const [showTokenRemoval, setShowTokenRemoval] = useState(false);
   const [shutdownError, setShutdownError] = useState("");
+  const pairingExpiresAt = pairing?.expiresAt;
 
   useEffect(() => setPath(snapshot.settings.cocPath), [snapshot.settings.cocPath]);
   const { toggle, play, stop } = snapshot.settings.shortcuts;
   useEffect(() => setShortcuts({ toggle, play, stop }), [toggle, play, stop]);
   useEffect(() => {
+    if (snapshot.settings.telegram.paired) {
+      setPairing(null);
+      return;
+    }
     if (snapshot.settings.telegram.pairingCode && snapshot.settings.telegram.pairingExpiresAt) {
       setPairing({ code: snapshot.settings.telegram.pairingCode, expiresAt: snapshot.settings.telegram.pairingExpiresAt });
-    } else if (!snapshot.settings.telegram.paired) setPairing(null);
+    } else setPairing(null);
   }, [snapshot.settings.telegram.pairingCode, snapshot.settings.telegram.pairingExpiresAt, snapshot.settings.telegram.paired]);
+  useEffect(() => {
+    if (!pairingExpiresAt) return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [pairingExpiresAt]);
   useEffect(() => {
     if (!screenshotUrl) return;
     return () => URL.revokeObjectURL(screenshotUrl);
@@ -70,6 +83,8 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
   }, [capturing, online, snapshot.status.kind, busy]);
 
   const telegram = snapshot.settings.telegram;
+  const telegramTokenVerified = telegram.status === "connected" || telegram.status === "waiting_pairing" || telegram.paired;
+  const pairingExpired = pairing !== null && Date.parse(pairing.expiresAt) <= now;
   const shortcutsEditable = online && snapshot.status.kind === "idle" && busy === null;
   const changedShortcuts = (Object.keys(shortcuts) as ShortcutName[]).some((key) => shortcuts[key] !== snapshot.settings.shortcuts[key]);
   const duplicated = new Set(Object.values(shortcuts).map((value) => value.toLocaleLowerCase("fr"))).size !== Object.values(shortcuts).length;
@@ -83,23 +98,41 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
 
   async function saveToken() {
     if (!token.trim()) return;
-    const saved = await run("telegram-token", () => api.saveTelegramToken(token.trim()), "Token Telegram enregistré dans le stockage sécurisé.");
+    setTokenMessage("");
+    setVerificationMessage("");
+    const saved = await run("telegram-token", () => api.saveTelegramToken(token.trim()));
     if (saved) setToken("");
-    setTelegramMessage(saved ? "Le token est enregistré. Il n’est plus conservé dans ce champ." : "Le token n’a pas été enregistré.");
+    setTokenMessage(saved ? "Token enregistré. Vérifiez-le à l’étape suivante; le champ a été effacé." : "Le token n’a pas été enregistré.");
+  }
+
+  async function verifyTelegramToken() {
+    setVerificationMessage("");
+    const result = await run("telegram-test", () => api.testTelegram());
+    if (!result) {
+      setVerificationMessage("La vérification a échoué. Vérifiez la connexion puis réessayez.");
+    } else if (result.settings.telegram.status === "error") {
+      setVerificationMessage("Telegram n’a pas reconnu ce token. Vérifiez-le auprès de BotFather.");
+    } else {
+      setVerificationMessage("Token vérifié. Aucun message Telegram n’a été envoyé.");
+    }
   }
 
   async function startPairing() {
+    setCopyMessage("");
     const result = await run("telegram-pairing", () => api.startTelegramPairing(), "Code d’appairage créé.");
-    if (result) setPairing(result);
+    if (result) {
+      setPairing(result);
+    }
   }
 
   async function copyPairingCode() {
     if (!pairing) return;
+    setCopyMessage("");
     try {
       await navigator.clipboard.writeText(`/start ${pairing.code}`);
-      setTelegramMessage("Commande copiée. Envoyez-la dans une conversation privée avec le bot.");
+      setCopyMessage("Commande copiée. Envoyez-la dans la conversation privée avec votre bot.");
     } catch {
-      setTelegramMessage("Copie impossible dans l’application. Sélectionnez la commande et copiez-la.");
+      setCopyMessage("Copie impossible. Sélectionnez la commande affichée et copiez-la manuellement.");
     }
   }
 
@@ -147,9 +180,9 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
         <section className="settings-content">
           {tab === "general" && (
             <>
-              <div className="settings-section-head"><span className="section-kicker">Votre environnement</span><h2>Général</h2><p>Le chemin est utilisé uniquement pour lancer l’application que vous configurez ici.</p></div>
+              <div className="settings-section-head"><span className="section-kicker">Votre environnement</span><h2>Général</h2><p>Configurez un chemin local ou copiez l’URI Google Play Games affichée sous le champ.</p></div>
               <form className="setting-row path-setting" onSubmit={(event) => { event.preventDefault(); void run("path", () => api.updateSettings({ cocPath: path.trim() }), "Chemin enregistré."); }}>
-                <div className="setting-row-copy"><strong>Chemin de Clash of Clans</strong><span>Chemin local vers l’application ou son raccourci.</span><label className="path-input"><Icon name="folder" size={16} /><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Ex. C:\\…\\Clash of Clans.lnk" aria-label="Chemin de Clash of Clans" /></label></div>
+                <div className="setting-row-copy"><strong>Cible de lancement de Clash of Clans</strong><span>Chemin absolu vers l’application ou son raccourci.</span><label className="path-input"><Icon name="folder" size={16} /><input value={path} onChange={(event) => setPath(event.target.value)} placeholder={"Ex. C:\\…\\Clash of Clans.lnk"} aria-label="Cible de lancement de Clash of Clans" /></label><div className="path-uri-note"><span>URI Google Play Games. Faites Tab puis Ctrl+C, ou sélectionnez le texte à la souris.</span><textarea className="path-uri-copy" aria-label="URI Google Play Games à copier" readOnly rows={3} value="googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1" onFocus={(event) => event.currentTarget.select()} /></div></div>
                 <button className="button quiet" type="submit" disabled={!online || busy !== null || path.trim() === snapshot.settings.cocPath}>{busy === "path" ? "Enregistrement…" : "Enregistrer"}</button>
               </form>
               <div className="setting-row">
@@ -157,8 +190,8 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
                 <label className="switch-control"><span className="sr-only">Activer la boucle</span><input type="checkbox" checked={snapshot.settings.loop} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("loop-setting", () => api.updateSettings({ loop: event.target.checked }), event.target.checked ? "Boucle activée." : "Boucle désactivée.")} /><i aria-hidden="true" /></label>
               </div>
               <div className="setting-row">
-                <div className="setting-row-copy"><strong>Pause de sécurité si Clash of Clans perd le premier plan</strong><span>Au démarrage depuis l’atelier, l’attente de détection de Clash of Clans au premier plan dure au maximum 30 secondes. Si le jeu perd le premier plan pendant un enregistrement, celui-ci s’arrête et sauvegarde les actions déjà capturées. Pendant une lecture, AUTO-COC libère les touches et boutons maintenus, puis met la macro en pause. Cliquez sur « Reprendre » dans l’atelier, puis revenez dans Clash of Clans; la lecture reprend quand le jeu est de nouveau au premier plan. « Annuler la reprise » laisse la macro en pause. Un crash Android peut rester invisible si la fenêtre hôte crosvm reste ouverte avec le même titre.</span></div>
-                <label className="switch-control"><span className="sr-only">Activer la pause de sécurité Clash of Clans</span><input type="checkbox" checked={snapshot.settings.requireCocForeground} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("coc-foreground-setting", () => api.updateSettings({ requireCocForeground: event.target.checked }), event.target.checked ? "Pause de sécurité activée." : "Pause de sécurité désactivée.")} /><i aria-hidden="true" /></label>
+                <div className="setting-row-copy"><strong>Pause automatique si Clash of Clans perd le premier plan</strong><span>Le replay démarre seulement si CoC est au premier plan. Activée, l’option attend jusqu’à 30 s que le jeu soit actif, puis met le replay en pause si le focus est perdu. Désactivée, CoC doit déjà être actif et une perte de focus arrête le replay. Les entrées restent ciblées sur la fenêtre du jeu.</span></div>
+                <label className="switch-control"><span className="sr-only">Activer la pause automatique Clash of Clans</span><input type="checkbox" checked={snapshot.settings.requireCocForeground} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("coc-foreground-setting", () => api.updateSettings({ requireCocForeground: event.target.checked }), event.target.checked ? "Pause automatique activée." : "Pause automatique désactivée.")} /><i aria-hidden="true" /></label>
               </div>
               <div className="setting-row coc-launch-row">
                 <div className="setting-row-copy"><strong>Lancer Clash of Clans</strong><span>{snapshot.settings.cocPath ? "Utilise le chemin enregistré ci-dessus." : "Ajoutez d’abord le chemin de l’application."}</span></div>
@@ -191,25 +224,41 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
           {tab === "telegram" && (
             <>
               <div className="settings-section-head"><span className="section-kicker">Connexion facultative</span><h2>Telegram</h2><p>Contrôlez les macros à distance après avoir relié votre propre bot.</p></div>
-              <div className="telegram-state-row">
-                <div className="setting-row-copy"><strong>État du bot</strong><span>{telegram.paired ? "Le chat Telegram est associé à cette installation." : telegram.tokenConfigured ? "Le token est enregistré, mais aucun chat n’est associé." : "Ajoutez le token de votre bot pour commencer."}</span></div>
-                <span className={`status-chip ${telegramTone(telegram.status)}`}><i aria-hidden="true" />{statusCopy[telegram.status] ?? "État inconnu"}</span>
-              </div>
-              <div className="telegram-token-block">
-                <label className="field-label" htmlFor="telegram-token">Token du bot</label>
-                <div className="token-entry"><input id="telegram-token" type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={telegram.tokenConfigured ? "Token enregistré · saisir pour remplacer" : "Coller le token fourni par BotFather"} /><button className="button quiet" type="button" disabled={!online || !token.trim() || busy !== null} onClick={() => void saveToken()}>{busy === "telegram-token" ? "Enregistrement…" : "Enregistrer"}</button></div>
-                <span className="field-note"><Icon name="shield" size={14} />Le token est stocké dans le coffre Windows par AUTO-COC. Il ne revient jamais dans cette page.</span>
-                {telegram.tokenConfigured && <button className="text-button danger-text remove-token" type="button" disabled={!online || busy !== null} onClick={() => setShowTokenRemoval(true)}><Icon name="trash" size={14} />Retirer le token enregistré</button>}
-              </div>
-              <div className="telegram-pairing-block">
-                <div className="setting-row-copy"><strong>Associer une conversation</strong><span>Le code ne fonctionne que pour une courte durée et dans une conversation privée avec votre bot.</span></div>
-                {pairing ? (
-                  <div className="pairing-code-block"><span className="section-kicker">Commande à envoyer au bot</span><div className="pairing-code-line"><code>/start {pairing.code}</code><button className="icon-button subtle" type="button" aria-label="Copier la commande d’appairage" onClick={() => void copyPairingCode()}><Icon name="keyboard" size={16} /></button></div><span className="field-note">Le code expire le {new Date(pairing.expiresAt).toLocaleString("fr-FR")}.</span><button className="text-button" type="button" disabled={!online || busy !== null} onClick={() => void run("telegram-cancel-pairing", () => api.cancelTelegramPairing(), "Code d’appairage annulé.").then((result) => { if (result) setPairing(null); })}>Annuler le code</button></div>
-                ) : (
-                  <button className="button quiet" type="button" disabled={!online || !telegram.tokenConfigured || telegram.paired || busy !== null} onClick={() => void startPairing()}>{busy === "telegram-pairing" ? "Création du code…" : "Créer un code d’appairage"}</button>
-                )}
-              </div>
-              <div className="settings-footer telegram-test-footer"><span>{telegramMessage || "Le test met à jour l’état du bot affiché ci-dessus."}</span><button className="button primary" type="button" disabled={!online || !telegram.tokenConfigured || busy !== null} onClick={() => void run("telegram-test", () => api.testTelegram(), "Vérification Telegram terminée.")}>{busy === "telegram-test" ? "Vérification…" : "Tester la connexion"}</button></div>
+              <ol className="telegram-steps" aria-label="Étapes pour connecter Telegram">
+                <li className="telegram-step">
+                  <div className="telegram-step-heading"><span className="telegram-step-number">01</span><div><h3>Créer votre bot</h3><p>Dans Telegram, ouvrez @BotFather, envoyez <code>/newbot</code> puis copiez le token fourni.</p></div><span className={`telegram-step-state ${telegram.tokenConfigured ? "done" : ""}`}>{telegram.tokenConfigured ? "Token enregistré" : "À faire"}</span></div>
+                  <div className="telegram-step-content">
+                    <label className="field-label" htmlFor="telegram-token">Token du bot</label>
+                    <div className="token-entry"><input id="telegram-token" type="password" autoComplete="new-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenMessage(""); }} placeholder={telegram.tokenConfigured ? "Token enregistré · saisir pour remplacer" : "Coller le token de BotFather"} /><button className="button quiet" type="button" disabled={!online || !token.trim() || busy !== null} onClick={() => void saveToken()}>{busy === "telegram-token" ? "Enregistrement…" : "Enregistrer le token"}</button></div>
+                    <p className="telegram-feedback" role="status">{tokenMessage}</p>
+                    <span className="field-note"><Icon name="shield" size={14} />Stocké dans le coffre Windows. Le token ne sera pas réaffiché.</span>
+                    {telegram.tokenConfigured && <button className="text-button danger-text remove-token" type="button" disabled={!online || busy !== null} onClick={() => setShowTokenRemoval(true)}><Icon name="trash" size={14} />Retirer le token enregistré</button>}
+                  </div>
+                </li>
+                <li className="telegram-step">
+                  <div className="telegram-step-heading"><span className="telegram-step-number">02</span><div><h3>Vérifier le token</h3><p>Vérifiez que le bot répond. Cette action n’envoie aucun message.</p></div><span className={`telegram-step-state ${telegramTokenVerified ? "done" : ""}`}>{!telegram.tokenConfigured ? "Après l’étape 1" : telegramTokenVerified ? "Vérifié" : "À vérifier"}</span></div>
+                  <div className="telegram-step-content telegram-verify-row">
+                    <span className="muted-copy">{telegramTokenVerified ? "Le bot répond à l’API Telegram." : "Enregistrez le token pour pouvoir le vérifier."}</span>
+                    <button className="button quiet" type="button" disabled={!online || !telegram.tokenConfigured || busy !== null} onClick={() => void verifyTelegramToken()}>{busy === "telegram-test" ? "Vérification…" : "Vérifier le token"}</button>
+                    <p className="telegram-feedback verification-feedback" role="status">{verificationMessage}</p>
+                  </div>
+                </li>
+                <li className="telegram-step">
+                  <div className="telegram-step-heading"><span className="telegram-step-number">03</span><div><h3>Associer votre conversation</h3><p>Reprenez le nom <code>@username</code> donné par BotFather, recherchez-le dans Telegram et ouvrez une conversation privée avec ce bot. Envoyez ensuite <code>/start CODE</code> ci-dessous.</p></div><span className={`telegram-step-state ${telegram.paired ? "done" : pairing && !pairingExpired ? "pending" : ""}`}>{telegram.paired ? "Conversation associée" : pairing && !pairingExpired ? "Code en attente" : "À faire"}</span></div>
+                  <div className="telegram-step-content">
+                    {telegram.paired ? <p className="telegram-paired-copy">Cette conversation peut maintenant contrôler AUTO-COC.</p> : pairing && !pairingExpired ? (
+                      <div className="pairing-code-block"><span className="section-kicker">Dans la conversation privée avec votre bot, envoyez</span><div className="pairing-code-line"><code>/start {pairing.code}</code><button className="text-button copy-pairing-button" type="button" onClick={() => void copyPairingCode()}><Icon name="copy" size={15} />Copier la commande</button></div><p className="telegram-feedback copy-feedback" role="status">{copyMessage}</p><span className="field-note">Ce code expire le {new Date(pairing.expiresAt).toLocaleString("fr-FR")}.</span><button className="text-button" type="button" disabled={!online || busy !== null} onClick={() => void run("telegram-cancel-pairing", () => api.cancelTelegramPairing(), "Code d’appairage annulé.").then((result) => { if (result) setPairing(null); })}>Annuler le code</button></div>
+                    ) : (
+                      <div className="telegram-pairing-action">
+                        {!telegramTokenVerified && <p className="form-hint">{telegram.tokenConfigured ? "Vérifiez le token à l’étape 2 pour créer le code." : "Enregistrez puis vérifiez le token pour créer le code."}</p>}
+                        {pairingExpired && <p className="form-hint" role="status">Le code a expiré. Générez-en un nouveau pour reprendre l’association.</p>}
+                        <button className="button quiet" type="button" disabled={!online || !telegramTokenVerified || telegram.paired || busy !== null} onClick={() => void startPairing()}>{busy === "telegram-pairing" ? "Création du code…" : pairingExpired ? "Générer un nouveau code" : "Générer un code"}</button>
+                      </div>
+                    )}
+                  </div>
+                </li>
+              </ol>
+              <div className="telegram-status-summary"><span className={`status-chip ${telegramTone(telegram.status)}`}><i aria-hidden="true" />{telegram.paired ? "Conversation associée" : telegramTokenVerified ? "Bot vérifié" : telegram.tokenConfigured ? statusCopy[telegram.status] : "Non configuré"}</span><span>Les trois étapes sont facultatives pour utiliser les macros sur ce PC.</span></div>
             </>
           )}
 
@@ -238,7 +287,7 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
           )}
         </section>
       </div>
-      {showTokenRemoval && <Dialog title="Retirer le token Telegram ?" description="Le bot sera déconnecté de cette installation. Vous pourrez ajouter un nouveau token plus tard." onClose={() => setShowTokenRemoval(false)}><div className="dialog-actions"><button className="button quiet" type="button" onClick={() => setShowTokenRemoval(false)}>Garder le token</button><button className="button danger" type="button" disabled={!online || busy !== null} onClick={() => { void run("telegram-remove", () => api.clearTelegramToken(), "Token Telegram retiré.").then((result) => { if (result) { setShowTokenRemoval(false); setTelegramMessage("Token retiré du stockage sécurisé."); } }); }}>Retirer le token</button></div></Dialog>}
+      {showTokenRemoval && <Dialog title="Retirer le token Telegram ?" description="Le bot sera déconnecté de cette installation. Vous pourrez ajouter un nouveau token plus tard." onClose={() => setShowTokenRemoval(false)}><div className="dialog-actions"><button className="button quiet" type="button" onClick={() => setShowTokenRemoval(false)}>Garder le token</button><button className="button danger" type="button" disabled={!online || busy !== null} onClick={() => { void run("telegram-remove", () => api.clearTelegramToken()).then((result) => { if (result) { setShowTokenRemoval(false); setTokenMessage("Token retiré du stockage sécurisé."); setVerificationMessage(""); } }); }}>Retirer le token</button></div></Dialog>}
       {shutdown && <Dialog title="Confirmer l’arrêt du PC" description={snapshot.status.kind === "idle" ? `L’ordinateur sera arrêté. La demande expire le ${new Date(shutdown.expiresAt).toLocaleString("fr-FR")}. Fermez d’abord les autres applications et vérifiez que vous êtes devant ce PC.` : "Une activité est en cours. Arrêtez-la depuis l’atelier avant de confirmer l’arrêt du PC."} onClose={() => setShutdown(null)}><div className="dialog-actions"><button className="button quiet" type="button" onClick={() => setShutdown(null)}>Annuler</button><button className="button danger" type="button" disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onClick={() => void confirmShutdown()}>{busy === "shutdown-confirm" ? "Confirmation…" : "Arrêter l’ordinateur"}</button></div>{shutdownError && <p className="form-error" role="alert">{shutdownError}</p>}</Dialog>}
     </main>
   );

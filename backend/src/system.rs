@@ -1,25 +1,49 @@
 use std::{io, path::Path};
 
+const GOOGLE_PLAY_GAMES_COC_URI: &str =
+    "googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1";
+
 pub fn launch_configured_path(path: &str) -> io::Result<()> {
-    if path.is_empty() || path.len() > 2048 || path.contains('\0') {
+    launch_target(validate_configured_target(path)?)
+}
+
+pub fn reload_configured_path(path: &str) -> io::Result<()> {
+    let target = validate_configured_target(path)?;
+    reload_coc_with(
+        crate::native_input::coc_windows,
+        |window| crate::native_input::close_coc_window(*window),
+        crate::native_input::wait_for_coc_windows,
+        || launch_target(target),
+    )
+}
+
+fn validate_configured_target(target: &str) -> io::Result<&str> {
+    if target.is_empty() || target.len() > 2048 || target.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "invalid configured path",
+            "invalid configured target",
         ));
     }
-    let path = Path::new(path);
+    if target == GOOGLE_PLAY_GAMES_COC_URI {
+        return Ok(target);
+    }
+    let path = Path::new(target);
     if !path.is_absolute() || !path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "configured path not found",
         ));
     }
+    Ok(target)
+}
+
+fn launch_target(target: &str) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
+        use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
         let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
-        let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let target: Vec<u16> = OsStr::new(target).encode_wide().chain(Some(0)).collect();
         let result = unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
@@ -37,12 +61,28 @@ pub fn launch_configured_path(path: &str) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let _ = path;
+        let _ = target;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows launch API unavailable",
         ))
     }
+}
+
+fn reload_coc_with<T>(
+    find_windows: impl FnOnce() -> io::Result<Vec<T>>,
+    mut close_window: impl FnMut(&T) -> io::Result<()>,
+    wait_until_closed: impl FnOnce() -> io::Result<()>,
+    launch: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let windows = find_windows()?;
+    if !windows.is_empty() {
+        for window in &windows {
+            close_window(window)?;
+        }
+        wait_until_closed()?;
+    }
+    launch()
 }
 
 pub fn open_known_folder(path: &Path) -> io::Result<()> {
@@ -266,7 +306,164 @@ pub fn request_shutdown() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{cell::RefCell, io::Cursor};
+
+    #[test]
+    fn accepts_only_the_exact_google_play_games_coc_uri() {
+        assert_eq!(
+            validate_configured_target(GOOGLE_PLAY_GAMES_COC_URI).unwrap(),
+            GOOGLE_PLAY_GAMES_COC_URI
+        );
+
+        for variant in [
+            "GooglePlayGames://launch/?id=com.supercell.clashofclans&lid=1&pid=1",
+            "googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=2",
+            "googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1/",
+            "googleplaygames://launch/?id=com.supercell.clashofclans&pid=1&lid=1",
+            "googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1&extra=1",
+            "https://googleplaygames/launch/?id=com.supercell.clashofclans&lid=1&pid=1",
+            "file:///googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1",
+            "steam://launch/?id=com.supercell.clashofclans&lid=1&pid=1",
+        ] {
+            assert!(
+                validate_configured_target(variant).is_err(),
+                "accepted {variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_file_target_must_be_absolute_and_exist() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("Clash of Clans.lnk");
+        std::fs::write(&target, b"shortcut").unwrap();
+        let target = target.to_str().unwrap();
+
+        assert_eq!(validate_configured_target(target).unwrap(), target);
+        assert!(validate_configured_target("Clash of Clans.lnk").is_err());
+    }
+
+    #[test]
+    fn reload_closes_all_detected_windows_waits_then_launches() {
+        let calls = RefCell::new(Vec::new());
+        reload_coc_with(
+            || {
+                calls.borrow_mut().push("find");
+                Ok(vec!["first", "second"])
+            },
+            |window| {
+                calls.borrow_mut().push(*window);
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("wait");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("launch");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            *calls.borrow(),
+            ["find", "first", "second", "wait", "launch"]
+        );
+    }
+
+    #[test]
+    fn reload_launches_directly_when_no_coc_window_is_found() {
+        let calls = RefCell::new(Vec::new());
+        reload_coc_with(
+            || {
+                calls.borrow_mut().push("find");
+                Ok::<_, io::Error>(Vec::<()>::new())
+            },
+            |_| {
+                calls.borrow_mut().push("close");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("wait");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("launch");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), ["find", "launch"]);
+    }
+
+    #[test]
+    fn reload_does_not_launch_when_window_detection_fails() {
+        let calls = RefCell::new(Vec::new());
+        let result = reload_coc_with(
+            || {
+                calls.borrow_mut().push("find");
+                Err::<Vec<()>, _>(io::Error::other("window identity unavailable"))
+            },
+            |_| {
+                calls.borrow_mut().push("close");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("wait");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("launch");
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(*calls.borrow(), ["find"]);
+    }
+
+    #[test]
+    fn reload_does_not_launch_when_close_or_wait_fails() {
+        let calls = RefCell::new(Vec::new());
+        let close_result = reload_coc_with(
+            || Ok(vec![()]),
+            |_| {
+                calls.borrow_mut().push("close");
+                Err(io::Error::other("close failed"))
+            },
+            || {
+                calls.borrow_mut().push("wait");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("launch");
+                Ok(())
+            },
+        );
+        assert!(close_result.is_err());
+        assert_eq!(*calls.borrow(), ["close"]);
+
+        calls.borrow_mut().clear();
+        let wait_result = reload_coc_with(
+            || Ok(vec![()]),
+            |_| {
+                calls.borrow_mut().push("close");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("wait");
+                Err(io::Error::new(io::ErrorKind::TimedOut, "still open"))
+            },
+            || {
+                calls.borrow_mut().push("launch");
+                Ok(())
+            },
+        );
+        assert!(wait_result.is_err());
+        assert_eq!(*calls.borrow(), ["close", "wait"]);
+    }
 
     #[test]
     fn encodes_rgb_pixels_as_a_valid_png() {

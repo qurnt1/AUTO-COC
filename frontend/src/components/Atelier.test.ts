@@ -8,7 +8,7 @@ const baseSnapshot: Snapshot = {
   revision: 2,
   status: { kind: "idle" },
   selectedMacro: "Récolte",
-  macros: [{ name: "Récolte", eventCount: 1, durationSeconds: 0.5, protected: false, readable: true, issue: null }],
+  macros: [{ name: "Récolte", eventCount: 1, durationSeconds: 0.5, readable: true, issue: null }],
   settings: {
     loop: false,
     cocPath: "",
@@ -23,7 +23,6 @@ const baseSnapshot: Snapshot = {
     },
   },
   session: { elapsedSeconds: 0, cycles: 0 },
-  migration: { sourceSelected: false, available: false, alreadyImported: false },
   onboardingComplete: true,
   lastError: null,
 };
@@ -102,5 +101,80 @@ describe("foreground wait in the workshop", () => {
     expect(html).toContain(">Reprendre</button>");
     expect(html).toContain(">Arrêter la lecture</button>");
     expect(html).not.toContain(">Lire la macro</button>");
+  });
+});
+
+describe("first-use guide and macro selection", () => {
+  it("explains the highlighted selection without an ambiguous marker", () => {
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot: baseSnapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain("La ligne en surbrillance est celle qui est sélectionnée.");
+    expect(html).toContain('aria-selected="true"');
+    expect(html).not.toContain("macro-item-marker");
+    expect(html).not.toContain("selected-chevron");
+    expect(html).not.toContain("Nouvelle macro");
+  });
+
+  it("hides the selection hint when the library has no visible macros", () => {
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot: { ...baseSnapshot, selectedMacro: null, macros: [] },
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).not.toContain("library-selection-hint");
+  });
+
+  it("offers the next useful action based on the selected macro", () => {
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot: baseSnapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: true,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain("Première utilisation · étape 3 sur 3");
+    expect(html).toContain("La séquence est prête. Clash of Clans doit être la fenêtre active pour la lire.");
+    expect(html).toContain(">Aller au bouton Lire</button>");
+    expect(html).toContain('id="play-macro-button"');
+    expect(html).toContain(">Lire la macro</button>");
+    expect(html.match(/>Lire la macro<\/button>/g)).toHaveLength(1);
+    expect(html).toContain(">Terminer le guide</button>");
+    expect(html).toContain("Pour lire, Clash of Clans doit être la fenêtre active.");
+  });
+
+  it("labels the select-stage action as browsing and leaves selection to the user", () => {
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot: { ...baseSnapshot, selectedMacro: null },
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: true,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain(">Parcourir la liste des macros</button>");
+    expect(html).toContain('id="macro-R%C3%A9colte"');
+    expect(html).toContain('role="option" aria-selected="false"');
   });
 });

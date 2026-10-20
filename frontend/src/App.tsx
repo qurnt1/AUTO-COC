@@ -7,6 +7,7 @@ import { Help } from "./components/Help";
 import { ActionErrorFeedback } from "./components/ActionErrorFeedback";
 import { Icon } from "./components/Icon";
 import { Settings } from "./components/Settings";
+import appIcon from "./assets/app-icon.png";
 
 type View = "atelier" | "settings" | "help";
 type ConnectionState = "connecting" | "connected" | "disconnected";
@@ -266,12 +267,12 @@ function DesktopApp() {
     <div className="app-frame">
       <a className="skip-link" href="#main-content">Aller au contenu</a>
       <header className="mobile-topbar">
-        <button className="brand-lockup" type="button" onClick={() => navigate("atelier")} aria-label="AUTO-COC, ouvrir l’atelier"><BrandMark /><span>AUTO-COC</span></button>
+        <button className="brand-lockup" type="button" onClick={() => navigate("atelier")} aria-label="AUTO-COC, ouvrir l’atelier"><AppLogo /><span>AUTO-COC</span></button>
         <button ref={mobileMenuButton} className="icon-button subtle" type="button" aria-label={mobileNavOpen ? "Fermer le menu" : "Ouvrir le menu"} aria-expanded={mobileNavOpen} aria-controls="primary-navigation" onClick={() => setMobileNavOpen((open) => !open)}><Icon name={mobileNavOpen ? "close" : "grid"} /></button>
       </header>
       {mobileNavOpen && <button className="nav-backdrop" type="button" aria-label="Fermer le menu" onClick={() => setMobileNavOpen(false)} />}
       <aside ref={mobileDrawer} className={`sidebar ${mobileNavOpen ? "mobile-open" : ""}`} id="primary-navigation" role={mobileNavOpen ? "dialog" : undefined} aria-label={mobileNavOpen ? "Menu principal" : undefined} aria-modal={mobileNavOpen ? true : undefined}>
-        <button className="brand-lockup desktop-brand" type="button" onClick={() => navigate("atelier")} aria-label="AUTO-COC, ouvrir l’atelier"><BrandMark /><span>AUTO-COC</span></button>
+        <button className="brand-lockup desktop-brand" type="button" onClick={() => navigate("atelier")} aria-label="AUTO-COC, ouvrir l’atelier"><AppLogo /><span>AUTO-COC</span></button>
         <span className="sidebar-caption">Votre atelier</span>
         <nav className="primary-nav" aria-label="Navigation principale">
           <NavButton view="atelier" current={view} onNavigate={navigate} icon="grid">Atelier</NavButton>
@@ -282,7 +283,7 @@ function DesktopApp() {
         <div className="sidebar-library-label"><span>Bibliothèque</span><span className="library-count">{snapshot?.macros.length ?? "—"}</span></div>
         {snapshot && snapshot.macros.length > 0 ? (
           <nav className="sidebar-macros" aria-label="Accès aux macros">
-            {snapshot.macros.slice(0, 5).map((macro) => <button key={macro.name} type="button" className={`sidebar-macro ${macro.name === snapshot.selectedMacro ? "selected" : ""}`} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}><span aria-hidden="true" />{macro.name}{macro.protected && <Icon name="lock" size={11} />}</button>)}
+            {snapshot.macros.slice(0, 5).map((macro) => <button key={macro.name} type="button" className={`sidebar-macro ${macro.name === snapshot.selectedMacro ? "selected" : ""}`} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}><span aria-hidden="true" />{macro.name}</button>)}
             {snapshot.macros.length > 5 && <button className="sidebar-more" type="button" onClick={() => navigate("atelier")}>Voir les {snapshot.macros.length - 5} autres</button>}
           </nav>
         ) : <p className="sidebar-empty">Vos macros apparaîtront ici.</p>}
@@ -323,6 +324,6 @@ function NavButton({ view, current, onNavigate, icon, children }: {
   return <button className={`primary-nav-item ${current === view ? "active" : ""}`} type="button" aria-current={current === view ? "page" : undefined} onClick={() => onNavigate(view)}><Icon name={icon} size={17} />{children}{current === view && <span className="nav-indicator" />}</button>;
 }
 
-function BrandMark() {
-  return <span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M5 7.5 16 3l11 4.5v13L16 29 5 20.5z"/><path d="M10 10.5 16 8l6 2.5v8L16 23l-6-4.5z"/><path d="m16 12 3 2v3.5l-3 2-3-2V14z"/></svg></span>;
+function AppLogo() {
+  return <img className="brand-mark" src={appIcon} alt="" aria-hidden="true" />;
 }

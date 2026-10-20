@@ -2,10 +2,7 @@
 # (Comme demandé)
 config/data.csv
 
-# Données générées par l'utilisateur (Macros)
-# Il est recommandé d'ignorer les macros créées par l'utilisateur.
-# Si vous avez des macros par défaut (ex: "Recharger COC"),
-# vous pouvez les forcer avec: !config/macros/Recharger COC.json
+# Données utilisateur (macros)
 config/macros/
 config/macro.json
 

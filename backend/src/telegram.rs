@@ -297,7 +297,6 @@ pub fn callback_command(data: &str) -> Option<&str> {
         "DUMMY_COC_STATUS",
         "SELECT_MACRO_LIST",
         "CANCEL_SELECTION",
-        "VALIDATE_ARRIVAL",
     ];
     if data.len() <= 64 && data.starts_with("SELECT_MACRO:") && data.len() > 13 {
         Some(data)
@@ -679,15 +678,11 @@ async fn execute_command(
             Err(ControllerError::TelegramUnauthorized) => return,
             Err(_) => send_text(client, chat_id, "CoC n’a pas pu être lancé. Vérifiez son chemin dans les paramètres.").await,
         },
-        "RELOAD_COC" | "VALIDATE_ARRIVAL" => {
-            let name = if command == "RELOAD_COC" { "Recharger COC" } else { "Valider arrivée" };
-            match controller.play_named_macro_for_telegram(name, token, owner).await {
-                Ok(_) => send_text(client, chat_id, &format!("Lecture de « {name} » démarrée.")).await,
+        "RELOAD_COC" => {
+            match controller.reload_coc_for_telegram(token, owner).await {
+                Ok(_) => send_text(client, chat_id, "Relancement de Clash of Clans demandé.").await,
                 Err(ControllerError::TelegramUnauthorized) => return,
-                Err(error) => {
-                    let message = named_macro_playback_error(name, &error);
-                    send_text(client, chat_id, &message).await;
-                }
+                Err(_) => send_text(client, chat_id, "Clash of Clans n’a pas pu être relancé. Vérifiez son chemin dans les paramètres.").await,
             }
         }
         "SELECT_MACRO_LIST" => match controller.telegram_macro_names().await {
@@ -718,16 +713,6 @@ async fn send_text(client: &TelegramClient, chat_id: i64, text: &str) {
     let _ = client.send_message(chat_id, text, None).await;
 }
 
-fn named_macro_playback_error(name: &str, error: &ControllerError) -> String {
-    match error {
-        ControllerError::CocNotForeground => {
-            "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro.".into()
-        }
-        ControllerError::EmptyMacro => format!("La macro « {name} » est vide."),
-        _ => format!("La macro « {name} » n’a pas pu démarrer."),
-    }
-}
-
 fn controls_keyboard(coc_launched: bool) -> Value {
     let coc = if coc_launched {
         ("CoC lancé", "DUMMY_COC_STATUS")
@@ -752,7 +737,6 @@ fn menu_keyboard(loop_enabled: bool) -> Value {
         [{"text":"📴 Éteindre PC","callback_data":"SHUTDOWN_ASK"}],
         [{"text":"Choisir macro","callback_data":"SELECT_MACRO_LIST"}],
         [{"text":"🔃 Recharger COC","callback_data":"RELOAD_COC"}],
-        [{"text":"Valider arrivée 👌","callback_data":"VALIDATE_ARRIVAL"}],
         [{"text":loop_text,"callback_data":"TOGGLE_LOOP"}]
     ]})
 }
@@ -864,6 +848,9 @@ mod tests {
         assert_eq!(pairing_code_from_start("/start 123456 extra"), None);
         assert_eq!(text_command(" Arrêter "), Some("STOP"));
         assert_eq!(text_command("untrusted"), None);
+        assert_eq!(text_command("relancer"), Some("RELOAD_COC"));
+        assert_eq!(callback_command("RELOAD_COC"), Some("RELOAD_COC"));
+        assert_eq!(callback_command("VALIDATE_ARRIVAL"), None);
         assert_eq!(
             callback_command("SELECT_MACRO:Macro 2"),
             Some("SELECT_MACRO:Macro 2")
@@ -871,12 +858,11 @@ mod tests {
     }
 
     #[test]
-    fn named_macro_playback_reports_foreground_guard_to_telegram() {
-        for name in ["Recharger COC", "Valider arrivée"] {
-            assert_eq!(
-                named_macro_playback_error(name, &ControllerError::CocNotForeground),
-                "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro."
-            );
-        }
+    fn telegram_menu_has_native_reload_and_no_arrival_action() {
+        let menu = menu_keyboard(false).to_string();
+        assert!(menu.contains("Recharger COC"));
+        assert!(menu.contains("RELOAD_COC"));
+        assert!(!menu.contains("Valider arrivée"));
+        assert!(!menu.contains("VALIDATE_ARRIVAL"));
     }
 }
