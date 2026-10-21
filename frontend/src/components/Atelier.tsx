@@ -245,7 +245,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
           {query && <button type="button" className="clear-search" aria-label="Effacer la recherche" onClick={() => setQuery("")}><Icon name="close" size={14} /></button>}
         </label>
         <div className="library-meta"><span>{snapshot.macros.length} {snapshot.macros.length > 1 ? "macros" : "macro"}</span></div>
-        {filtered.length > 0 && <p className="library-selection-hint">Sélectionnez une macro pour afficher sa séquence. La ligne en surbrillance est celle qui est sélectionnée.</p>}
+        {filtered.length > 0 && <p className="library-selection-hint">La coche marque la macro sélectionnée, affichée à droite.</p>}
         <div className="macro-list" role="listbox" aria-label="Macros">
           {filtered.map((macro, index) => {
             const current = macro.name === selected?.name;
@@ -279,7 +279,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
             <div className="library-empty">
               <Icon name={query ? "search" : "activity"} size={19} />
               <p>{query ? "Aucune macro trouvée" : "Votre bibliothèque est vide"}</p>
-              <span>{query ? "Essayez un autre nom." : "Créez une macro pour commencer."}</span>
+              <span>{query ? "Essayez un autre nom." : showOnboarding ? "Votre première macro apparaîtra ici." : "Créez une macro pour commencer."}</span>
             </div>
           )}
         </div>
@@ -292,7 +292,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
             <span className="section-kicker">L’atelier commence ici</span>
             <h1 tabIndex={-1}>{snapshot.macros.length ? "Choisissez une macro" : "Créez votre première macro"}</h1>
             <p>{snapshot.macros.length ? "Sélectionnez une macro dans la bibliothèque pour voir sa séquence et la lancer." : "Enregistrez une suite d’actions, puis rejouez-la quand vous en avez besoin."}</p>
-            {!snapshot.macros.length && <div className="empty-tip"><Icon name="plus" size={16} />Utilisez le bouton + dans la bibliothèque pour commencer.</div>}
+            {!snapshot.macros.length && !showOnboarding && <div className="empty-tip"><Icon name="plus" size={16} />Utilisez le bouton + dans la bibliothèque pour commencer.</div>}
             {snapshot.macros.length > 0 && <div className="empty-tip"><Icon name="keyboard" size={16} />Parcourez la liste avec les flèches du clavier, puis Entrée pour choisir.</div>}
           </div>
         ) : (

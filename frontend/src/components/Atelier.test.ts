@@ -148,7 +148,7 @@ describe("first-use guide and macro selection", () => {
       onCompleteOnboarding: () => {},
     }));
 
-    expect(html).toContain("La ligne en surbrillance est celle qui est sélectionnée.");
+    expect(html).toContain("La coche marque la macro sélectionnée, affichée à droite.");
     expect(html).toContain('aria-selected="true"');
     expect(html).not.toContain("macro-item-marker");
     expect(html).not.toContain("selected-chevron");
@@ -190,6 +190,24 @@ describe("first-use guide and macro selection", () => {
     expect(html.match(/>Lire la macro<\/button>/g)).toHaveLength(1);
     expect(html).toContain(">Terminer le guide</button>");
     expect(html).toContain("Pour lire, Clash of Clans doit être la fenêtre active.");
+  });
+
+  it("keeps both creation actions without repeating instructions during onboarding", () => {
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot: { ...baseSnapshot, selectedMacro: null, macros: [], onboardingComplete: false },
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: true,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain(">Créer une macro</button>");
+    expect(html).toContain('aria-label="Créer une macro"');
+    expect(html).toContain("Votre première macro apparaîtra ici.");
+    expect(html).not.toContain("Utilisez le bouton + dans la bibliothèque pour commencer.");
   });
 
   it("labels the select-stage action as browsing and leaves selection to the user", () => {

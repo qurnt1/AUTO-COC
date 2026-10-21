@@ -93,15 +93,28 @@ function Wait-ForElement {
         [Parameter(Mandatory = $true)][System.Windows.Automation.ControlType]$ControlType,
         [Parameter(Mandatory = $true)][int]$Seconds,
         [switch]$RequireEnabled,
-        [switch]$IncludeOffscreen
+        [switch]$IncludeOffscreen,
+        [ValidateRange(0, 5000)][int]$StableForMilliseconds = 0
     )
 
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $stableTimer = [System.Diagnostics.Stopwatch]::new()
     while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
         $element = Find-VisibleElement -Root $Root -Name $Name -ControlType $ControlType `
             -RequireEnabled:$RequireEnabled -IncludeOffscreen:$IncludeOffscreen
         if ($null -ne $element) {
-            return $element
+            if ($StableForMilliseconds -eq 0) {
+                return $element
+            }
+            if (-not $stableTimer.IsRunning) {
+                $stableTimer.Start()
+            }
+            if ($stableTimer.ElapsedMilliseconds -ge $StableForMilliseconds) {
+                return $element
+            }
+        }
+        else {
+            $stableTimer.Reset()
         }
         Start-Sleep -Milliseconds 250
     }
@@ -221,12 +234,11 @@ function Get-NameDiagnostics {
 $window = $null
 try {
     $accentedE = [char]0x00E9
-    $accentedA = [char]0x00E0
     $accentedCircumflexE = [char]0x00EA
     $curlyApostrophe = [char]0x2019
     $createLabel = "Cr$($accentedE)er une macro"
     $createSubmitLabel = "Cr$($accentedE)er la macro"
-    $readyLabel = 'Pr' + $accentedCircumflexE + 't ' + $accentedA + ' lancer'
+    $readyStateLabel = [string][char]0x00C9 + 'tat d' + $curlyApostrophe + 'AUTO-COC : Pr' + $accentedCircumflexE + 't'
     $eventCountLabel = '0 ' + $accentedE + 'v' + $accentedE + 'nements'
     $renamedMacroEventCountLabel = $RenamedMacroName + ' ' + $eventCountLabel
     $stopRecordingLabel = 'Arr' + $accentedCircumflexE + 'ter l' + $curlyApostrophe + 'enregistrement'
@@ -319,8 +331,9 @@ try {
         -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
         -RequireEnabled -IncludeOffscreen
     Invoke-Element -Element $stopRecording
-    $null = Wait-ForElement -Root $window -Name $readyLabel `
-        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
+    $null = Wait-ForElement -Root $window -Name $readyStateLabel `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
+        -StableForMilliseconds 1000
     $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
         -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
     $macroAfterRecording = Read-MacroFile -Path $MacroFilePath

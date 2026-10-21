@@ -285,7 +285,13 @@ function DesktopApp() {
         <div className="sidebar-library-label"><span>Bibliothèque</span><span className="library-count">{snapshot?.macros.length ?? "—"}</span></div>
         {snapshot && snapshot.macros.length > 0 ? (
           <nav className="sidebar-macros" aria-label="Accès aux macros">
-            {snapshot.macros.slice(0, 5).map((macro) => <button key={macro.name} type="button" className={`sidebar-macro ${macro.name === snapshot.selectedMacro ? "selected" : ""}`} aria-pressed={macro.name === snapshot.selectedMacro} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}><span aria-hidden="true" />{macro.name}</button>)}
+            {snapshot.macros.slice(0, 5).map((macro) => {
+              const selected = macro.name === snapshot.selectedMacro;
+              return <button key={macro.name} type="button" className={`sidebar-macro ${selected ? "selected" : ""}`} aria-pressed={selected} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}>
+                <span className="sidebar-macro-name">{macro.name}</span>
+                {selected && <Icon className="sidebar-macro-check" name="check" size={16} />}
+              </button>;
+            })}
             {snapshot.macros.length > 5 && <button className="sidebar-more" type="button" onClick={() => navigate("atelier")}>Voir les {snapshot.macros.length - 5} autres</button>}
           </nav>
         ) : <p className="sidebar-empty">Vos macros apparaîtront ici.</p>}

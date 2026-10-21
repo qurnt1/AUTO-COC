@@ -10,6 +10,8 @@ use crate::controller::{Controller, ControllerError};
 pub enum TelegramError {
     #[error("Telegram request failed")]
     Request,
+    #[error("Telegram refused the token")]
+    Unauthorized,
     #[error("Telegram rejected the request")]
     Rejected,
     #[error("Telegram response was invalid")]
@@ -136,13 +138,16 @@ impl TelegramClient {
             .send()
             .await
             .map_err(|_| TelegramError::Request)?;
-        if !response.status().is_success() {
-            return Err(TelegramError::Rejected);
+        if let Some(error) = telegram_error_for_http_status(response.status()) {
+            return Err(error);
         }
         let envelope: TelegramEnvelope<T> = response
             .json()
             .await
             .map_err(|_| TelegramError::InvalidResponse)?;
+        if envelope.error_code == Some(401) {
+            return Err(TelegramError::Unauthorized);
+        }
         if !envelope.ok {
             return Err(TelegramError::Rejected);
         }
@@ -154,10 +159,22 @@ impl TelegramClient {
     }
 }
 
+fn telegram_error_for_http_status(status: reqwest::StatusCode) -> Option<TelegramError> {
+    if status.as_u16() == 401 {
+        Some(TelegramError::Unauthorized)
+    } else if status.is_success() {
+        None
+    } else {
+        Some(TelegramError::Rejected)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct TelegramEnvelope<T> {
     ok: bool,
     result: Option<T>,
+    #[serde(default)]
+    error_code: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -339,8 +356,8 @@ pub async fn run_polling(controller: Arc<Controller>, mut shutdown: watch::Recei
         };
         let client = match TelegramClient::new(token.clone()) {
             Ok(client) => client,
-            Err(_) => {
-                let _ = controller.set_telegram_connection(&token, false).await;
+            Err(error) => {
+                let _ = controller.set_telegram_error(&token, error).await;
                 if wait_or_shutdown(&mut shutdown, Duration::from_secs(5)).await {
                     break;
                 }
@@ -353,8 +370,8 @@ pub async fn run_polling(controller: Arc<Controller>, mut shutdown: watch::Recei
         };
         let bot = match bot_result {
             Ok(bot) => bot,
-            Err(_) => {
-                let _ = controller.set_telegram_connection(&token, false).await;
+            Err(error) => {
+                let _ = controller.set_telegram_error(&token, error).await;
                 if wait_or_shutdown(&mut shutdown, Duration::from_secs(5)).await {
                     break;
                 }
@@ -371,8 +388,8 @@ pub async fn run_polling(controller: Arc<Controller>, mut shutdown: watch::Recei
             };
             match drop_result {
                 Ok(offset) => offset,
-                Err(_) => {
-                    let _ = controller.set_telegram_connection(&token, false).await;
+                Err(error) => {
+                    let _ = controller.set_telegram_error(&token, error).await;
                     if wait_or_shutdown(&mut shutdown, Duration::from_secs(5)).await {
                         break;
                     }
@@ -387,7 +404,7 @@ pub async fn run_polling(controller: Arc<Controller>, mut shutdown: watch::Recei
         }
         active_token = Some(token.clone());
         active_offset = offset;
-        let _ = controller.set_telegram_connection(&token, true).await;
+        let _ = controller.set_telegram_connected(&token).await;
 
         loop {
             if *shutdown.borrow() {
@@ -405,8 +422,8 @@ pub async fn run_polling(controller: Arc<Controller>, mut shutdown: watch::Recei
             };
             let updates = match updates {
                 Ok(updates) => updates,
-                Err(_) => {
-                    let _ = controller.set_telegram_connection(&token, false).await;
+                Err(error) => {
+                    let _ = controller.set_telegram_error(&token, error).await;
                     break;
                 }
             };
@@ -784,6 +801,19 @@ fn macro_selection_keyboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unauthorized_responses_are_distinct_from_other_api_failures() {
+        assert!(matches!(
+            telegram_error_for_http_status(reqwest::StatusCode::UNAUTHORIZED),
+            Some(TelegramError::Unauthorized)
+        ));
+        assert!(matches!(
+            telegram_error_for_http_status(reqwest::StatusCode::BAD_GATEWAY),
+            Some(TelegramError::Rejected)
+        ));
+        assert!(telegram_error_for_http_status(reqwest::StatusCode::OK).is_none());
+    }
 
     fn message(chat_id: i64, user_id: i64, chat_type: &str) -> TelegramMessage {
         TelegramMessage {

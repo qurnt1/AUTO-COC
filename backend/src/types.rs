@@ -44,10 +44,6 @@ impl Default for Help {
                     .into(),
                 },
                 HelpSection {
-                    title: "Raccourcis par défaut".into(),
-                    body: "F1 bascule la lecture et l’arrêt, Ctrl+Shift+1 démarre une lecture, Ctrl+Shift+0 arrête une lecture ou un enregistrement. Les raccourcis personnalisés sont enregistrés seulement si Windows accepte les trois touches.".into(),
-                },
-                HelpSection {
                     title: "Quitter AUTO-COC".into(),
                     body: "Utilisez Réglages > Outils de cet ordinateur > Quitter AUTO-COC ou fermez complètement la fenêtre de l’application pour arrêter ses services locaux. Arrêtez d’abord tout enregistrement ou replay en cours.".into(),
                 },
@@ -85,6 +81,8 @@ pub enum TelegramStatus {
     Disconnected,
     WaitingPairing,
     Connected,
+    TokenRejected,
+    NetworkError,
     Error,
 }
 
@@ -296,6 +294,16 @@ mod tests {
         assert!(section.body.contains("dossier local AUTO-COC"));
         assert!(!section.body.contains("héritées"));
         assert!(!section.body.contains("copiées"));
+    }
+
+    #[test]
+    fn help_does_not_show_static_shortcuts() {
+        assert!(
+            Help::default()
+                .sections
+                .iter()
+                .all(|section| section.title != "Raccourcis par défaut")
+        );
     }
 }
 

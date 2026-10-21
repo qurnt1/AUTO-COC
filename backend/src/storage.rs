@@ -116,17 +116,27 @@ impl Store {
         };
 
         let was_configured = state.settings.telegram.token_configured;
-        let (token_configured, status) = match load_token(&root) {
-            Ok(Some(_)) => (true, crate::types::TelegramStatus::Disconnected),
-            Ok(None) if was_configured => (false, crate::types::TelegramStatus::Error),
-            Ok(None) => (false, crate::types::TelegramStatus::NotConfigured),
-            Err(StoreError::InvalidData | StoreError::Io(_)) => {
-                (false, crate::types::TelegramStatus::Error)
-            }
+        let (token_configured, status, clear_telegram_identity) = match load_token(&root) {
+            Ok(Some(_)) => (true, crate::types::TelegramStatus::Disconnected, false),
+            Ok(None) if was_configured => (false, crate::types::TelegramStatus::Error, true),
+            Ok(None) => (false, crate::types::TelegramStatus::NotConfigured, true),
+            Err(StoreError::InvalidData) => (false, crate::types::TelegramStatus::Error, true),
+            Err(StoreError::Io(_)) => (was_configured, crate::types::TelegramStatus::Error, false),
             Err(error) => return Err(error),
         };
+        let stale_telegram_pairing = state.settings.telegram.pairing_code.is_some()
+            || state.settings.telegram.pairing_expires_at.is_some()
+            || (clear_telegram_identity
+                && (state.settings.telegram.paired || state.telegram_owner.is_some()));
+        state.settings.telegram.pairing_code = None;
+        state.settings.telegram.pairing_expires_at = None;
+        if clear_telegram_identity {
+            state.settings.telegram.paired = false;
+            state.telegram_owner = None;
+        }
         if state.settings.telegram.token_configured != token_configured
             || state.settings.telegram.status != status
+            || stale_telegram_pairing
         {
             state.settings.telegram.token_configured = token_configured;
             state.settings.telegram.status = status;
@@ -631,8 +641,8 @@ fn duration(steps: &[Value]) -> f64 {
 }
 
 fn macro_hash(steps: &[Value]) -> Result<String, StoreError> {
-    // The legacy Python writer used sorted JSON keys with spaces. Keep the SHA-1 as metadata;
-    // compatibility is preserved by leaving imported files untouched until their first save.
+    // The previous Python writer hashed sorted JSON keys with spaces. Existing files keep this
+    // metadata until their next save.
     let canonical = serde_json::to_vec(steps).map_err(|_| StoreError::InvalidData)?;
     Ok(sha1_hex(&canonical))
 }
@@ -1479,13 +1489,50 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn startup_clears_stale_pairing_but_keeps_owner_with_a_protected_token() {
+        let app = tempdir().unwrap();
+        Store::open_at(app.path()).unwrap();
+        let settings_path = app.path().join("settings.json");
+        let mut persisted = read_settings(&settings_path).unwrap();
+        persisted.settings.telegram.token_configured = true;
+        persisted.settings.telegram.paired = true;
+        persisted.settings.telegram.status = crate::types::TelegramStatus::Connected;
+        persisted.settings.telegram.pairing_code = Some("123456".into());
+        persisted.settings.telegram.pairing_expires_at = Some("2026-10-21T00:00:00Z".into());
+        persisted.telegram_owner = Some(TelegramOwner {
+            chat_id: 111,
+            user_id: 222,
+        });
+        atomic_write_json(&settings_path, &persisted).unwrap();
+        save_token(app.path(), b"synthetic-valid-telegram-token").unwrap();
+
+        let reopened = Store::open_at(app.path()).unwrap();
+
+        assert!(reopened.settings().telegram.token_configured);
+        assert!(reopened.settings().telegram.paired);
+        assert_eq!(reopened.telegram_owner(), Some((111, 222)));
+        assert_eq!(reopened.settings().telegram.pairing_code, None);
+        assert_eq!(reopened.settings().telegram.pairing_expires_at, None);
+        let persisted = read_settings(&settings_path).unwrap();
+        assert_eq!(persisted.settings.telegram.pairing_code, None);
+        assert_eq!(persisted.settings.telegram.pairing_expires_at, None);
+    }
+
+    #[test]
     fn startup_clears_configured_flag_for_corrupt_protected_token() {
         let app = tempdir().unwrap();
         Store::open_at(app.path()).unwrap();
         let settings_path = app.path().join("settings.json");
         let mut persisted = read_settings(&settings_path).unwrap();
         persisted.settings.telegram.token_configured = true;
+        persisted.settings.telegram.paired = true;
         persisted.settings.telegram.status = crate::types::TelegramStatus::Connected;
+        persisted.settings.telegram.pairing_code = Some("123456".into());
+        persisted.settings.telegram.pairing_expires_at = Some("2026-10-21T00:00:00Z".into());
+        persisted.telegram_owner = Some(TelegramOwner {
+            chat_id: 111,
+            user_id: 222,
+        });
         atomic_write_json(&settings_path, &persisted).unwrap();
 
         let token_path = app.path().join("telegram-token.bin");
@@ -1498,10 +1545,54 @@ mod tests {
             reopened.settings().telegram.status,
             crate::types::TelegramStatus::Error
         );
+        assert!(!reopened.settings().telegram.paired);
+        assert_eq!(reopened.settings().telegram.pairing_code, None);
+        assert_eq!(reopened.settings().telegram.pairing_expires_at, None);
+        assert_eq!(reopened.telegram_owner(), None);
         assert_eq!(fs::read(token_path).unwrap(), invalid_ciphertext);
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn startup_preserves_pairing_when_protected_token_cannot_be_read() {
+        let app = tempdir().unwrap();
+        Store::open_at(app.path()).unwrap();
+        let settings_path = app.path().join("settings.json");
+        let mut persisted = read_settings(&settings_path).unwrap();
+        persisted.settings.telegram.token_configured = true;
+        persisted.settings.telegram.paired = true;
+        persisted.settings.telegram.status = crate::types::TelegramStatus::Connected;
+        persisted.settings.telegram.pairing_code = Some("123456".into());
+        persisted.settings.telegram.pairing_expires_at = Some("2026-10-21T00:00:00Z".into());
+        persisted.telegram_owner = Some(TelegramOwner {
+            chat_id: 111,
+            user_id: 222,
+        });
+        atomic_write_json(&settings_path, &persisted).unwrap();
+        let token_path = app.path().join("telegram-token.bin");
+        fs::create_dir(&token_path).unwrap();
+
+        let reopened = Store::open_at(app.path()).unwrap();
+
+        assert!(reopened.settings().telegram.token_configured);
+        assert!(reopened.settings().telegram.paired);
+        assert_eq!(
+            reopened.settings().telegram.status,
+            crate::types::TelegramStatus::Error
+        );
+        assert_eq!(reopened.telegram_owner(), Some((111, 222)));
+        assert_eq!(reopened.settings().telegram.pairing_code, None);
+        assert_eq!(reopened.settings().telegram.pairing_expires_at, None);
+        let persisted = read_settings(&settings_path).unwrap();
+        assert!(persisted.settings.telegram.paired);
+        assert_eq!(
+            persisted
+                .telegram_owner
+                .map(|owner| (owner.chat_id, owner.user_id)),
+            Some((111, 222))
+        );
+        assert!(token_path.is_dir());
+    }
+
     #[test]
     fn startup_clears_configured_flag_when_protected_token_is_missing() {
         let app = tempdir().unwrap();
@@ -1509,7 +1600,12 @@ mod tests {
         let settings_path = app.path().join("settings.json");
         let mut persisted = read_settings(&settings_path).unwrap();
         persisted.settings.telegram.token_configured = true;
+        persisted.settings.telegram.paired = true;
         persisted.settings.telegram.status = crate::types::TelegramStatus::Connected;
+        persisted.telegram_owner = Some(TelegramOwner {
+            chat_id: 111,
+            user_id: 222,
+        });
         atomic_write_json(&settings_path, &persisted).unwrap();
         let token_path = app.path().join("telegram-token.bin");
 
@@ -1520,6 +1616,8 @@ mod tests {
             reopened.settings().telegram.status,
             crate::types::TelegramStatus::Error
         );
+        assert!(!reopened.settings().telegram.paired);
+        assert_eq!(reopened.telegram_owner(), None);
         assert!(!token_path.exists());
     }
 }

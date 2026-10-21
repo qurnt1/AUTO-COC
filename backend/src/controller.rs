@@ -1308,21 +1308,16 @@ impl Controller {
         .await
     }
 
-    pub async fn set_telegram_connection(
-        &self,
-        token: &str,
-        connected: bool,
-    ) -> Result<(), ControllerError> {
+    pub(crate) async fn set_telegram_connected(&self, token: &str) -> Result<(), ControllerError> {
         let mut machine = self.machine.lock().await;
         if !machine.store.settings().telegram.token_configured
             || !crate::storage::token_matches(machine.store.root(), token.as_bytes())
         {
             return Ok(());
         }
-        let status = match (connected, machine.store.settings().telegram.paired) {
-            (false, _) => TelegramStatus::Error,
-            (true, true) => TelegramStatus::Connected,
-            (true, false) => TelegramStatus::WaitingPairing,
+        let status = match machine.store.settings().telegram.paired {
+            true => TelegramStatus::Connected,
+            false => TelegramStatus::WaitingPairing,
         };
         if machine.store.settings().telegram.status == status {
             return Ok(());
@@ -1331,6 +1326,35 @@ impl Controller {
         machine.store.persist()?;
         self.changed(&mut machine).await?;
         Ok(())
+    }
+
+    async fn set_telegram_status(
+        &self,
+        token: &str,
+        status: TelegramStatus,
+    ) -> Result<(), ControllerError> {
+        let mut machine = self.machine.lock().await;
+        if !machine.store.settings().telegram.token_configured
+            || !crate::storage::token_matches(machine.store.root(), token.as_bytes())
+        {
+            return Ok(());
+        }
+        if machine.store.settings().telegram.status == status {
+            return Ok(());
+        }
+        machine.store.settings_mut().telegram.status = status;
+        machine.store.persist()?;
+        self.changed(&mut machine).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn set_telegram_error(
+        &self,
+        token: &str,
+        error: crate::telegram::TelegramError,
+    ) -> Result<(), ControllerError> {
+        self.set_telegram_status(token, telegram_verification_failure(error))
+            .await
     }
 
     pub async fn stop_playback(&self) -> Result<Snapshot, ControllerError> {
@@ -1548,16 +1572,14 @@ impl Controller {
             .telegram_token()
             .await?
             .ok_or(ControllerError::TelegramNotConfigured)?;
-        let valid = match crate::telegram::TelegramClient::new(token.clone()) {
-            Ok(client) => client.get_me().await.is_ok(),
-            Err(_) => false,
-        };
-        self.set_telegram_connection(&token, valid).await?;
-        if valid {
-            Ok(self.snapshot().await?)
-        } else {
-            Err(ControllerError::TelegramUnavailable)
+        match crate::telegram::TelegramClient::new(token.clone()) {
+            Err(error) => self.set_telegram_error(&token, error).await?,
+            Ok(client) => match client.get_me().await {
+                Ok(_) => self.set_telegram_connected(&token).await?,
+                Err(error) => self.set_telegram_error(&token, error).await?,
+            },
         }
+        self.snapshot().await
     }
 
     pub async fn prepare_shutdown(&self) -> Result<(String, String), ControllerError> {
@@ -2261,6 +2283,15 @@ fn map_shortcut_error(error: std::io::Error) -> ControllerError {
     }
 }
 
+fn telegram_verification_failure(error: crate::telegram::TelegramError) -> TelegramStatus {
+    match error {
+        crate::telegram::TelegramError::Unauthorized => TelegramStatus::TokenRejected,
+        crate::telegram::TelegramError::Request => TelegramStatus::NetworkError,
+        crate::telegram::TelegramError::Rejected
+        | crate::telegram::TelegramError::InvalidResponse => TelegramStatus::Error,
+    }
+}
+
 fn random_code() -> String {
     use rand::Rng;
     format!("{:06}", rand::rng().random_range(0..1_000_000))
@@ -2305,6 +2336,26 @@ mod tests {
         assert_eq!(
             native_event_error_message(&ControllerError::InvalidState, false),
             Some("Une action clavier n’a pas pu être exécutée.")
+        );
+    }
+
+    #[test]
+    fn telegram_verification_separates_rejected_tokens_from_request_and_response_errors() {
+        assert_eq!(
+            telegram_verification_failure(crate::telegram::TelegramError::Unauthorized),
+            TelegramStatus::TokenRejected
+        );
+        assert_eq!(
+            telegram_verification_failure(crate::telegram::TelegramError::Request),
+            TelegramStatus::NetworkError
+        );
+        assert_eq!(
+            telegram_verification_failure(crate::telegram::TelegramError::Rejected),
+            TelegramStatus::Error
+        );
+        assert_eq!(
+            telegram_verification_failure(crate::telegram::TelegramError::InvalidResponse),
+            TelegramStatus::Error
         );
     }
 

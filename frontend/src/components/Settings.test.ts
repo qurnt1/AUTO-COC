@@ -104,6 +104,9 @@ describe("Settings", () => {
     expect(html).toContain("Créer votre bot");
     expect(html).toContain("@BotFather");
     expect(html).toContain('id="telegram-bot-username"');
+    expect(html).toContain("Nom d’utilisateur du bot (facultatif)");
+    expect(html).toContain("envoyez /newbot. Choisissez un nom visible");
+    expect(html).toContain("Vous n’avez pas besoin de le saisir ici");
     expect(html).toContain('placeholder="Ex. @mon_bot"');
     expect(html).toContain("Copier /newbot");
     expect(html).toContain('id="telegram-token" type="password"');
@@ -135,6 +138,7 @@ describe("Settings", () => {
     const verified = renderSettings(true, "telegram", verifiedTelegram);
 
     expect(verified).toContain("Générer une commande d’appairage");
+    expect(verified).toContain("Revérifier le token");
     expect(verified).not.toContain("/start");
 
     const waitingTelegram = {
@@ -219,5 +223,33 @@ describe("Settings", () => {
     };
 
     expect(renderSettings(true, "telegram", pairedTelegram)).toContain("Conversation associée");
+  });
+
+  it("does not report a paired bot as verified after Telegram rejects its token", () => {
+    const rejectedTelegram = {
+      ...snapshot.settings.telegram,
+      tokenConfigured: true,
+      paired: true,
+      status: "token_rejected" as const,
+    };
+    const html = renderSettings(true, "telegram", rejectedTelegram);
+
+    expect(html).toContain("Token refusé");
+    expect(html).toContain("Vérification requise");
+    const pairingStepStateClass = html.match(/<span class="([^"]*telegram-step-state[^"]*)">Vérification requise<\/span>/)?.[1];
+    expect(pairingStepStateClass).not.toContain("done");
+    expect(html).not.toContain("Bot vérifié");
+    expect(html).toContain("Vérifier le token");
+  });
+
+  it.each(["error", "token_rejected", "network_error"] as const)("marks Telegram as needing attention for %s", (status) => {
+    const telegram = {
+      ...snapshot.settings.telegram,
+      tokenConfigured: true,
+      status,
+    };
+    const html = renderSettings(true, "general", telegram);
+
+    expect(html).toContain('Telegram<i aria-hidden="true"></i>');
   });
 });

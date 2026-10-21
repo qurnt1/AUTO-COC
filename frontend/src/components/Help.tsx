@@ -6,10 +6,20 @@ import { getOnboardingStage } from "../onboardingStage";
 import type { SettingsTab } from "./Settings";
 
 const quickGuides: { title: string; body: string; action: string; destination: "atelier" | "settings"; settingsTab?: SettingsTab }[] = [
-  { title: "Créer une macro", body: "Nommez-la, enregistrez plus de 3 s, puis arrêtez. Les 3 dernières secondes sont retirées.", action: "Ouvrir l’atelier", destination: "atelier" as const },
-  { title: "Lire une macro", body: "Choisissez une séquence prête. Clash of Clans doit être au premier plan.", action: "Ouvrir l’atelier", destination: "atelier" as const },
-  { title: "Piloter avec Telegram", body: "Associez votre bot dans les réglages pour commander les macros à distance.", action: "Ouvrir Telegram", destination: "settings" as const, settingsTab: "telegram" as const },
+  { title: "Créer une macro", body: "Nommez-la, enregistrez plus de 3 s, puis arrêtez. Les 3 dernières secondes sont retirées.", action: "Ouvrir l’atelier", destination: "atelier" },
+  { title: "Lire une macro", body: "Choisissez une séquence prête. Clash of Clans doit être au premier plan.", action: "Ouvrir l’atelier", destination: "atelier" },
+  { title: "Piloter avec Telegram", body: "Créez le bot avec @BotFather (/newbot). Dans Réglages > Telegram, entrez le token (l’identifiant du bot est facultatif), vérifiez-le, puis générez la commande d’appairage et envoyez-la au bot.", action: "Configurer Telegram", destination: "settings", settingsTab: "telegram" },
 ];
+
+// Keep the API help aligned with the live shortcuts shown above it.
+// eslint-disable-next-line react-refresh/only-export-components -- exported for focused help-content tests.
+export function visibleHelpSections(sections: HelpDocument["sections"]): HelpDocument["sections"] {
+  return sections.filter(({ title, body }) => {
+    const content = `${title}\n${body}`;
+    return !/raccourcis? par défaut|\bF1\b|Ctrl\+Shift\+[01]/i.test(content)
+      && !/\b(?:migrations?|migrer|imports?|importer|importations?|legacy)\b|ancienne\s+(?:installation|version)/i.test(content);
+  });
+}
 
 export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboarding, onCompleteOnboarding }: {
   api: BackendClient;
@@ -55,6 +65,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
 
   const keys = snapshot?.settings.shortcuts;
   const onboardingStage = snapshot ? getOnboardingStage(snapshot) : "create";
+  const detailedGuides = help ? visibleHelpSections(help.sections) : [];
 
   return (
     <main className="help-page">
@@ -84,13 +95,12 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
             </> : <p className="muted-copy">La connexion est nécessaire pour afficher vos raccourcis configurés.</p>}
           </section>
 
-          <section className="help-section local-help-section" aria-labelledby="local-help-title">
+          {(helpError || detailedGuides.length > 0) && <section className="help-section local-help-section" aria-labelledby="local-help-title">
             <div className="section-heading-row"><div><span className="section-kicker">Au besoin</span><h2 id="local-help-title">Guides détaillés</h2></div><Icon className="local-help-icon" name="folder" size={19} />
             </div>
             {helpError && <div className="inline-alert error"><Icon name="help" size={17} /><div><strong>L’aide détaillée est indisponible</strong><span>{helpError}</span></div><button className="text-button" type="button" disabled={!online} onClick={() => { setHelp(null); setHelpError(""); setHelpRetry((value) => value + 1); }}>Réessayer</button></div>}
-            {help && help.sections.length > 0 && <div className="local-help-list">{help.sections.map((section) => <details key={section.title}><summary>{section.title}<Icon name="chevron" size={15} /></summary><p>{section.body}</p></details>)}</div>}
-            {help && !help.sections.length && <p className="muted-copy">Aucun guide complémentaire n’est disponible.</p>}
-          </section>
+            {detailedGuides.length > 0 && <div className="local-help-list">{detailedGuides.map((section) => <details key={section.title}><summary>{section.title}<Icon name="chevron" size={15} /></summary><p>{section.body}</p></details>)}</div>}
+          </section>}
         </div>
 
         <aside className="help-side-column">

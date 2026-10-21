@@ -26,7 +26,7 @@ export type AppStatus =
   | { kind: "playing"; macroName: string; elapsedSeconds: number }
   | { kind: "paused"; macroName: string; elapsedSeconds: number };
 
-export type TelegramStatus = "not_configured" | "disconnected" | "waiting_pairing" | "connected" | "error";
+export type TelegramStatus = "not_configured" | "disconnected" | "waiting_pairing" | "connected" | "token_rejected" | "network_error" | "error";
 
 export type Snapshot = {
   revision: number;

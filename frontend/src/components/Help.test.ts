@@ -1,8 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { ActionRunner, BackendClient, Snapshot } from "../api";
-import { Help } from "./Help";
+import type { ActionRunner, BackendClient, HelpDocument, Snapshot } from "../api";
+import { Help, visibleHelpSections } from "./Help";
 
 function renderHelp(snapshot: Snapshot | null = null) {
   return renderToStaticMarkup(createElement(Help, {
@@ -25,10 +25,14 @@ describe("help page", () => {
     expect(html).toContain("Créer une macro");
     expect(html).toContain("Lire une macro");
     expect(html).toContain("Piloter avec Telegram");
+    expect(html).toContain("Créez le bot avec @BotFather (/newbot)");
+    expect(html).toContain("l’identifiant du bot est facultatif");
+    expect(html).toContain("générez la commande d’appairage et envoyez-la au bot");
     expect(html.match(/Ouvrir l’atelier<svg/g)).toHaveLength(2);
-    expect(html).toContain("Ouvrir Telegram<svg");
+    expect(html).toContain("Configurer Telegram<svg");
     expect(html).toContain('aria-label="Ouvrir l’atelier : Créer une macro"');
     expect(html).toContain('aria-label="Ouvrir l’atelier : Lire une macro"');
+    expect(html).toContain('aria-label="Configurer Telegram : Piloter avec Telegram"');
     expect(html).toContain("enregistrez plus de 3 s");
     expect(html).toContain("Les 3 dernières secondes sont retirées.");
     expect(html).toContain("Clash of Clans doit être au premier plan.");
@@ -40,6 +44,35 @@ describe("help page", () => {
     const html = renderHelp();
 
     expect(html).not.toMatch(/migration|importer vos données|ancienne installation/i);
+  });
+
+  it("keeps live shortcut guidance and removes stale import and migration help", () => {
+    const sections: HelpDocument["sections"] = [
+      { title: "Créer une macro", body: "Enregistrez une séquence dans l’atelier." },
+      { title: "Raccourcis par défaut", body: "F1 démarre la lecture." },
+      { title: "Importer vos données", body: "Récupérez une ancienne installation." },
+      { title: "Migration", body: "Transférez vos macros." },
+      { title: "Importer", body: "Importation depuis une ancienne version." },
+      { title: "Imports", body: "Cette action reprend votre bibliothèque." },
+      { title: "Migrations", body: "Les macros seront transférées." },
+      { title: "Données", body: "Les macros sont conservées sur ce PC." },
+    ];
+
+    expect(visibleHelpSections(sections)).toEqual([sections[0], sections[7]]);
+  });
+
+  it("shows the saved shortcuts rather than hard-coded defaults", () => {
+    const html = renderHelp({
+      onboardingComplete: true,
+      selectedMacro: null,
+      macros: [],
+      settings: { shortcuts: { toggle: "F8", play: "Ctrl+Alt+P", stop: "F10" } },
+    } as unknown as Snapshot);
+
+    expect(html).toContain("F8");
+    expect(html).toContain("Ctrl+Alt+P");
+    expect(html).toContain("F10");
+    expect(html).not.toContain("Ctrl+Shift+1");
   });
 
   it("shows one active onboarding instruction with compact progress and working actions", () => {
