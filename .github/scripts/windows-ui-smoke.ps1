@@ -344,7 +344,7 @@ try {
         throw 'The isolated macro file should contain no events after the recording without injected input.'
     }
     $play = Wait-ForElement -Root $window -Name 'Lire la macro' `
-        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -IncludeOffscreen
     if ($play.Current.IsEnabled) {
         throw 'The empty recording unexpectedly enabled macro playback.'
     }
