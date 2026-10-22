@@ -408,6 +408,7 @@ impl Controller {
             NativeEvent::PlaybackFailed {
                 playback_id,
                 reason,
+                detail,
             } => {
                 let mut machine = self.machine.lock().await;
                 let acknowledge = self.acknowledge_playback_terminal(playback_id).await;
@@ -416,6 +417,7 @@ impl Controller {
                     &NativeEvent::PlaybackFailed {
                         playback_id,
                         reason,
+                        detail,
                     },
                 ) {
                     self.changed(&mut machine).await?;
@@ -613,7 +615,7 @@ impl Controller {
 
         match pending {
             PendingOperation::Recording { macro_name } => {
-                if let Err(error) = native.start_recording(true).await {
+                if let Err(error) = native.start_recording().await {
                     if error.kind() == std::io::ErrorKind::PermissionDenied {
                         return;
                     }
@@ -931,13 +933,13 @@ impl Controller {
         let native = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?;
-        let foreground = !require_coc_foreground || native.coc_is_foreground();
+        let foreground = native.coc_is_foreground();
         if require_coc_foreground && !foreground {
             arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
             return self.changed(&mut machine).await;
         }
-        ensure_start_foreground(require_coc_foreground, foreground)?;
-        if let Err(error) = native.start_recording(require_coc_foreground).await {
+        ensure_start_foreground(true, foreground)?;
+        if let Err(error) = native.start_recording().await {
             if require_coc_foreground && error.kind() == std::io::ErrorKind::PermissionDenied {
                 arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
                 return self.changed(&mut machine).await;
@@ -2066,14 +2068,20 @@ fn active_playback_id(operation: &Operation) -> Option<u64> {
     }
 }
 
-fn playback_failure_message(reason: PlaybackFailure) -> &'static str {
+fn playback_failure_message(reason: PlaybackFailure, detail: Option<&str>) -> String {
     match reason {
-        PlaybackFailure::Input => "La lecture a été interrompue par une erreur de saisie Windows.",
+        PlaybackFailure::Input => detail.map_or_else(
+            || "La lecture a été interrompue par une erreur de saisie Windows.".into(),
+            |detail| format!("La lecture a échoué. {detail}."),
+        ),
         PlaybackFailure::Release => {
-            "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris."
+            "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris.".into()
         }
         PlaybackFailure::InputAndRelease => {
-            "La lecture a échoué et AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris."
+            detail.map_or_else(
+                || "La lecture a échoué et AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris.".into(),
+                |detail| format!("La lecture a échoué. {detail}. AUTO-COC n’a pas pu relâcher une touche ou un bouton; vérifiez le clavier et la souris."),
+            )
         }
     }
 }
@@ -2095,7 +2103,8 @@ fn apply_playback_terminal(machine: &mut Machine, event: &NativeEvent) -> bool {
         NativeEvent::PlaybackFailed {
             playback_id,
             reason,
-        } => (*playback_id, Some(*reason), None),
+            detail,
+        } => (*playback_id, Some((*reason, detail.as_deref())), None),
         NativeEvent::PlaybackStopped {
             playback_id,
             reason,
@@ -2107,8 +2116,8 @@ fn apply_playback_terminal(machine: &mut Machine, event: &NativeEvent) -> bool {
     }
     machine.operation = Operation::Idle;
     machine.foreground_loss_handled = false;
-    if let Some(reason) = failure {
-        machine.last_error = Some(playback_failure_message(reason).into());
+    if let Some((reason, detail)) = failure {
+        machine.last_error = Some(playback_failure_message(reason, detail));
     }
     if let Some(reason) = stop_reason {
         machine.last_error = Some(playback_stop_message(reason).into());
@@ -2954,6 +2963,7 @@ mod tests {
             .handle_native_event(NativeEvent::PlaybackFailed {
                 playback_id: 42,
                 reason: PlaybackFailure::Release,
+                detail: None,
             })
             .await
             .unwrap();
@@ -3186,6 +3196,7 @@ mod tests {
             .handle_native_event(NativeEvent::PlaybackFailed {
                 playback_id: 7,
                 reason: PlaybackFailure::Release,
+                detail: None,
             })
             .await
             .unwrap();
@@ -3197,6 +3208,33 @@ mod tests {
             Some(
                 "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris."
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn playback_input_failure_detail_is_visible_in_snapshot() {
+        let dir = tempdir().unwrap();
+        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
+        controller.machine.lock().await.operation = Operation::Playing {
+            macro_name: "Test".into(),
+            started: Instant::now(),
+            playback_id: 8,
+        };
+
+        controller
+            .handle_native_event(NativeEvent::PlaybackFailed {
+                playback_id: 8,
+                reason: PlaybackFailure::Input,
+                detail: Some("Étape 3 (clic de souris) : test".into()),
+            })
+            .await
+            .unwrap();
+        let snapshot = controller.snapshot().await.unwrap();
+
+        assert!(matches!(snapshot.status, AppStatus::Idle));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("La lecture a échoué. Étape 3 (clic de souris) : test.")
         );
     }
 
@@ -3232,6 +3270,7 @@ mod tests {
                 Ok(Some(NativeEvent::PlaybackFailed {
                     playback_id: 71,
                     reason: PlaybackFailure::Release,
+                    detail: None,
                 })),
             );
 
@@ -3378,6 +3417,7 @@ mod tests {
             .handle_native_event(NativeEvent::PlaybackFailed {
                 playback_id: 7,
                 reason: PlaybackFailure::Input,
+                detail: None,
             })
             .await
             .unwrap();

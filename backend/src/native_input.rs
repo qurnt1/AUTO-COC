@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     io,
     time::{Duration, Instant},
 };
@@ -13,6 +13,20 @@ const PREPARATION: Duration = Duration::from_secs(3);
 const TAIL_TRIM_SECONDS: f64 = 3.0;
 const MAX_CAPTURE_EVENTS: usize = 250_000;
 const MAX_PLAYBACK_SECONDS: f64 = 86_400.0;
+const OUTSIDE_COC_CLIENT_AREA: &str =
+    "recorded mouse position is outside the Clash of Clans client area";
+
+fn is_outside_coc_client_area(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::InvalidInput && error.to_string() == OUTSIDE_COC_CLIENT_AREA
+}
+
+fn ignore_outside_mouse_move(error: io::Error) -> io::Result<()> {
+    if is_outside_coc_client_area(&error) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
 
 pub(crate) fn try_accumulate_playback_duration(total: &mut f64, delta: f64) -> bool {
     if !delta.is_finite() || delta < 0.0 {
@@ -46,6 +60,7 @@ pub enum NativeEvent {
     PlaybackFailed {
         playback_id: u64,
         reason: PlaybackFailure,
+        detail: Option<String>,
     },
     PlaybackStopped {
         playback_id: u64,
@@ -88,7 +103,15 @@ fn playback_completion_event(
     input_failed: bool,
     release_failed: bool,
     stop_reason: Option<PlaybackStopReason>,
+    input_detail: Option<String>,
 ) -> NativeEvent {
+    let input_detail = if input_failed {
+        Some(input_detail.unwrap_or_else(|| {
+            "le moteur de lecture n’a pas transmis le détail de l’étape en échec".into()
+        }))
+    } else {
+        input_detail
+    };
     if release_failed {
         NativeEvent::PlaybackFailed {
             playback_id,
@@ -97,11 +120,13 @@ fn playback_completion_event(
             } else {
                 PlaybackFailure::Release
             },
+            detail: input_detail,
         }
     } else if input_failed {
         NativeEvent::PlaybackFailed {
             playback_id,
             reason: PlaybackFailure::Input,
+            detail: input_detail,
         }
     } else if let Some(reason) = stop_reason {
         NativeEvent::PlaybackStopped {
@@ -118,6 +143,7 @@ fn finalized_playback_event(
     input_failed: bool,
     release_failed: bool,
     stop_reason: Option<PlaybackStopReason>,
+    input_detail: Option<String>,
     release: impl FnOnce() -> io::Result<()>,
     publish: impl FnOnce(&NativeEvent),
 ) -> NativeEvent {
@@ -127,6 +153,7 @@ fn finalized_playback_event(
         input_failed,
         release_failed || final_release_failed,
         stop_reason,
+        input_detail,
     );
     publish(&event);
     event
@@ -202,14 +229,13 @@ impl NativeInput {
         }
     }
 
-    pub async fn start_recording(&self, require_coc_foreground: bool) -> io::Result<()> {
+    pub async fn start_recording(&self) -> io::Result<()> {
         #[cfg(windows)]
         {
-            self.inner.start_recording(require_coc_foreground)
+            self.inner.start_recording()
         }
         #[cfg(not(windows))]
         {
-            let _ = require_coc_foreground;
             Err(unsupported())
         }
     }
@@ -671,10 +697,9 @@ fn should_play_recording_beep(beeped: &mut bool, event_accepted: bool) -> bool {
 }
 
 fn finish_recording(steps: Vec<Value>, overflowed: bool) -> RecordingCapture {
-    RecordingCapture {
-        steps: trim_tail(steps, TAIL_TRIM_SECONDS),
-        overflowed,
-    }
+    let mut steps = trim_tail(steps, TAIL_TRIM_SECONDS);
+    let overflowed = overflowed || balance_recorded_inputs(&mut steps, MAX_CAPTURE_EVENTS);
+    RecordingCapture { steps, overflowed }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -684,21 +709,79 @@ enum MouseButton {
     Middle,
 }
 
+fn balance_recorded_inputs(steps: &mut Vec<Value>, max_steps: usize) -> bool {
+    let mut discarded_events = false;
+
+    loop {
+        let mut held_keys = BTreeSet::new();
+        let mut held_buttons = BTreeMap::new();
+        for step in steps.iter() {
+            let Some(kind) = step.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(data) = step.get("data") else {
+                continue;
+            };
+            match kind {
+                "key_down" => {
+                    if let Some(key) = data.get("key").and_then(Value::as_str) {
+                        held_keys.insert(key.to_owned());
+                    }
+                }
+                "key_up" => {
+                    if let Some(key) = data.get("key").and_then(Value::as_str) {
+                        held_keys.remove(key);
+                    }
+                }
+                "mouse_click" => {
+                    let (Some(button), Some(action)) = (
+                        data.get("button").and_then(Value::as_str),
+                        data.get("action").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    if action == "down" {
+                        held_buttons.insert(button.to_owned(), data.clone());
+                    } else if action == "up" {
+                        held_buttons.remove(button);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let release_count = held_keys.len() + held_buttons.len();
+        if steps.len() + release_count > max_steps {
+            if steps.pop().is_some() {
+                discarded_events = true;
+                continue;
+            }
+            return discarded_events;
+        }
+
+        for key in held_keys {
+            steps.push(event_value(0.0, "key_up", json!({"key": key})));
+        }
+        for mut data in held_buttons.into_values() {
+            data["action"] = json!("up");
+            steps.push(event_value(0.0, "mouse_click", data));
+        }
+        return discarded_events;
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ReplayEvent {
     Move {
-        x: i32,
-        y: i32,
+        point: RecordedMousePoint,
     },
     Click {
-        x: i32,
-        y: i32,
+        point: RecordedMousePoint,
         button: MouseButton,
         down: bool,
     },
     Scroll {
-        x: i32,
-        y: i32,
+        point: RecordedMousePoint,
         dx: i32,
         dy: i32,
     },
@@ -707,6 +790,57 @@ enum ReplayEvent {
         down: bool,
     },
     Nop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordedMousePoint {
+    x: i32,
+    y: i32,
+    window_origin: Option<(i32, i32)>,
+}
+
+impl RecordedMousePoint {
+    fn client_position(self) -> io::Result<Option<(i32, i32)>> {
+        let Some((origin_x, origin_y)) = self.window_origin else {
+            return Ok(None);
+        };
+        let x = self
+            .x
+            .checked_sub(origin_x)
+            .ok_or_else(|| invalid_input("recorded mouse x coordinate is out of range"))?;
+        let y = self
+            .y
+            .checked_sub(origin_y)
+            .ok_or_else(|| invalid_input("recorded mouse y coordinate is out of range"))?;
+        Ok(Some((x, y)))
+    }
+}
+
+impl ReplayEvent {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Move { .. } => "déplacement de souris",
+            Self::Click { .. } => "clic de souris",
+            Self::Scroll { .. } => "défilement de souris",
+            Self::Key { .. } => "touche clavier",
+            Self::Nop => "événement vide",
+        }
+    }
+}
+
+fn playback_input_detail(step: usize, event: &str, error: io::Error) -> String {
+    let cause = match error.to_string().as_str() {
+        "recorded mouse position is outside the Clash of Clans client area" => {
+            "la position souris enregistrée est hors de la zone de jeu CoC; réenregistrez la macro avec Clash of Clans au premier plan"
+                .to_owned()
+        }
+        "the captured Clash of Clans window is no longer available" => {
+            "la fenêtre Clash of Clans utilisée lors du démarrage du replay n’est plus disponible"
+                .to_owned()
+        }
+        _ => error.to_string(),
+    };
+    format!("Étape {step} ({event}) : {cause}")
 }
 
 #[derive(Debug, Clone)]
@@ -743,8 +877,7 @@ fn parse_steps(steps: &[Value]) -> io::Result<Vec<ReplayStep>> {
             .ok_or_else(|| invalid_input("macro event data is invalid"))?;
         let event = match kind {
             "mouse_move" => ReplayEvent::Move {
-                x: read_i32(data.get("x"))?,
-                y: read_i32(data.get("y"))?,
+                point: read_mouse_point(data)?,
             },
             "mouse_click" => {
                 let button = match data.get("button").and_then(Value::as_str) {
@@ -753,25 +886,23 @@ fn parse_steps(steps: &[Value]) -> io::Result<Vec<ReplayStep>> {
                     Some("middle") => MouseButton::Middle,
                     _ => return Err(invalid_input("macro mouse button is invalid")),
                 };
-                let x = read_i32(data.get("x"))?;
-                let y = read_i32(data.get("y"))?;
+                let point = read_mouse_point(data)?;
                 let down = match data.get("action").and_then(Value::as_str) {
                     Some("down") => true,
                     Some("up") => false,
                     _ => return Err(invalid_input("macro mouse action is invalid")),
                 };
-                ReplayEvent::Click { x, y, button, down }
-            }
-            "scroll" => {
-                let x = read_i32(data.get("x"))?;
-                let y = read_i32(data.get("y"))?;
-                ReplayEvent::Scroll {
-                    x,
-                    y,
-                    dx: read_i32(data.get("dx"))?,
-                    dy: read_i32(data.get("dy"))?,
+                ReplayEvent::Click {
+                    point,
+                    button,
+                    down,
                 }
             }
+            "scroll" => ReplayEvent::Scroll {
+                point: read_mouse_point(data)?,
+                dx: read_i32(data.get("dx"))?,
+                dy: read_i32(data.get("dy"))?,
+            },
             "key_down" | "key_up" => {
                 let key = data
                     .get("key")
@@ -801,6 +932,21 @@ fn read_i32(value: Option<&Value>) -> io::Result<i32> {
         .ok_or_else(|| invalid_input("macro coordinate or delta is invalid"))
 }
 
+fn read_mouse_point(data: &serde_json::Map<String, Value>) -> io::Result<RecordedMousePoint> {
+    let window_origin = match data.get("windowOrigin") {
+        None => None,
+        Some(Value::Object(origin)) => {
+            Some((read_i32(origin.get("x"))?, read_i32(origin.get("y"))?))
+        }
+        Some(_) => return Err(invalid_input("macro window origin is invalid")),
+    };
+    Ok(RecordedMousePoint {
+        x: read_i32(data.get("x"))?,
+        y: read_i32(data.get("y"))?,
+        window_origin,
+    })
+}
+
 #[cfg(windows)]
 mod win {
     use super::*;
@@ -825,7 +971,7 @@ mod win {
         Foundation::{
             CloseHandle, FILETIME, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WPARAM,
         },
-        Graphics::Gdi::ScreenToClient,
+        Graphics::Gdi::{ClientToScreen, ScreenToClient},
         System::{
             Diagnostics::Debug::Beep,
             LibraryLoader::GetModuleHandleW,
@@ -872,13 +1018,14 @@ mod win {
         captures_at: Instant,
         last_event_at: Option<Instant>,
         steps: Vec<Value>,
+        held_keys: HashSet<String>,
+        held_buttons: HashMap<MouseButton, RecordedMousePoint>,
         overflowed: bool,
         beeped: bool,
     }
 
     struct Shared {
         recording: Mutex<Option<Recording>>,
-        recording_guard: AtomicBool,
         coc_identity_valid: AtomicBool,
         coc_window: AtomicIsize,
         coc_process_id: AtomicU32,
@@ -901,14 +1048,21 @@ mod win {
             if target.is_null() || process_id == 0 {
                 return false;
             }
-            let foreground = unsafe { GetForegroundWindow() };
-            if foreground != target || unsafe { IsWindowVisible(target) } == 0 {
+            let mut target_process_id = 0;
+            if unsafe { GetWindowThreadProcessId(target, &mut target_process_id) } == 0
+                || target_process_id != process_id
+            {
                 self.coc_identity_valid.store(false, Ordering::Release);
                 return false;
             }
-            let mut foreground_process = 0;
-            unsafe { GetWindowThreadProcessId(foreground, &mut foreground_process) };
-            if foreground_process != process_id {
+            if unsafe { GetForegroundWindow() } != target || unsafe { IsWindowVisible(target) } == 0
+            {
+                return false;
+            }
+            if !window_title(target)
+                .ok()
+                .is_some_and(|title| title.to_ascii_lowercase().contains("clash of clans"))
+            {
                 self.coc_identity_valid.store(false, Ordering::Release);
                 return false;
             }
@@ -1188,7 +1342,6 @@ mod win {
         ) -> io::Result<Self> {
             let shared = Arc::new(Shared {
                 recording: Mutex::new(None),
-                recording_guard: AtomicBool::new(false),
                 coc_identity_valid: AtomicBool::new(false),
                 coc_window: AtomicIsize::new(0),
                 coc_process_id: AtomicU32::new(0),
@@ -1253,7 +1406,7 @@ mod win {
             self.shared.cached_coc_identity_is_foreground()
         }
 
-        pub fn start_recording(&self, require_coc_foreground: bool) -> io::Result<()> {
+        pub fn start_recording(&self) -> io::Result<()> {
             let mut recording = lock(&self.shared.recording);
             if recording.is_some() {
                 return Err(io::Error::new(
@@ -1261,16 +1414,13 @@ mod win {
                     "recording is already active",
                 ));
             }
-            if require_coc_foreground {
-                ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
-            }
-            self.shared
-                .recording_guard
-                .store(require_coc_foreground, Ordering::Release);
+            ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
             *recording = Some(Recording {
                 captures_at: Instant::now() + PREPARATION,
                 last_event_at: None,
                 steps: Vec::new(),
+                held_keys: HashSet::new(),
+                held_buttons: HashMap::new(),
                 overflowed: false,
                 beeped: false,
             });
@@ -1285,7 +1435,6 @@ mod win {
                     "recording is not active",
                 ));
             };
-            self.shared.recording_guard.store(false, Ordering::Release);
             Ok(finish_recording(recording.steps, recording.overflowed))
         }
 
@@ -1652,12 +1801,7 @@ mod win {
                                 note_injected_key(shared, event.vkCode as u16, down);
                             }
                         } else {
-                            let name = key_name(event.vkCode as u16);
-                            record(
-                                shared,
-                                if down { "key_down" } else { "key_up" },
-                                json!({"key":name}),
-                            );
+                            record_key_event(shared, &key_name(event.vkCode as u16), down);
                         }
                     }
                 });
@@ -1671,66 +1815,108 @@ mod win {
             let event = unsafe { &*(data as *const MSLLHOOKSTRUCT) };
             let msg = message as u32;
             if event.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) == 0 {
-                let x = event.pt.x;
-                let y = event.pt.y;
-                let captured = match msg {
-                    WM_MOUSEMOVE => Some(("mouse_move", json!({"x":x,"y":y}))),
-                    WM_LBUTTONDOWN => Some((
-                        "mouse_click",
-                        json!({"x":x,"y":y,"button":"left","action":"down"}),
-                    )),
-                    WM_LBUTTONUP => Some((
-                        "mouse_click",
-                        json!({"x":x,"y":y,"button":"left","action":"up"}),
-                    )),
-                    WM_RBUTTONDOWN => Some((
-                        "mouse_click",
-                        json!({"x":x,"y":y,"button":"right","action":"down"}),
-                    )),
-                    WM_RBUTTONUP => Some((
-                        "mouse_click",
-                        json!({"x":x,"y":y,"button":"right","action":"up"}),
-                    )),
-                    WM_MBUTTONDOWN => Some((
-                        "mouse_click",
-                        json!({"x":x,"y":y,"button":"middle","action":"down"}),
-                    )),
-                    WM_MBUTTONUP => Some((
-                        "mouse_click",
-                        json!({"x":x,"y":y,"button":"middle","action":"up"}),
-                    )),
-                    WM_MOUSEWHEEL => Some((
-                        "scroll",
-                        json!({"x":x,"y":y,"dx":0,"dy":wheel_steps(event.mouseData)}),
-                    )),
-                    WM_MOUSEHWHEEL => Some((
-                        "scroll",
-                        json!({"x":x,"y":y,"dx":wheel_steps(event.mouseData),"dy":0}),
-                    )),
-                    _ => None,
-                };
-                if let Some((kind, payload)) = captured {
-                    record_event(kind, payload);
-                }
+                HOOK_SHARED.with(|slot| {
+                    if let Some(shared) = slot.borrow().as_ref() {
+                        record_mouse_hook_event(shared, msg, event);
+                    }
+                });
             }
         }
         unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) }
+    }
+
+    fn record_mouse_hook_event(shared: &Shared, msg: u32, event: &MSLLHOOKSTRUCT) {
+        let x = event.pt.x;
+        let y = event.pt.y;
+        let button_event = match msg {
+            WM_LBUTTONDOWN => Some((MouseButton::Left, true)),
+            WM_LBUTTONUP => Some((MouseButton::Left, false)),
+            WM_RBUTTONDOWN => Some((MouseButton::Right, true)),
+            WM_RBUTTONUP => Some((MouseButton::Right, false)),
+            WM_MBUTTONDOWN => Some((MouseButton::Middle, true)),
+            WM_MBUTTONUP => Some((MouseButton::Middle, false)),
+            _ => None,
+        };
+        if let Some((button, down)) = button_event {
+            let foreground = shared.cached_coc_is_foreground();
+            let point = foreground
+                .then(|| recording_mouse_point(shared, x, y))
+                .flatten();
+            record_mouse_button_event(shared, button, down, point);
+            return;
+        }
+
+        let Some((kind, mut payload)) = (match msg {
+            WM_MOUSEMOVE => Some(("mouse_move", json!({"x":x,"y":y}))),
+            WM_MOUSEWHEEL => Some((
+                "scroll",
+                json!({"x":x,"y":y,"dx":0,"dy":wheel_steps(event.mouseData)}),
+            )),
+            WM_MOUSEHWHEEL => Some((
+                "scroll",
+                json!({"x":x,"y":y,"dx":wheel_steps(event.mouseData),"dy":0}),
+            )),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some(point) = recording_mouse_point(shared, x, y) else {
+            return;
+        };
+        let Some((origin_x, origin_y)) = point.window_origin else {
+            return;
+        };
+        payload["windowOrigin"] = json!({"x":origin_x,"y":origin_y});
+        record(shared, kind, payload);
+    }
+
+    fn recording_mouse_point(
+        shared: &Shared,
+        screen_x: i32,
+        screen_y: i32,
+    ) -> Option<RecordedMousePoint> {
+        let window = shared.coc_window.load(Ordering::Acquire) as HWND;
+        if window.is_null() {
+            return None;
+        }
+        let mut client_point = POINT {
+            x: screen_x,
+            y: screen_y,
+        };
+        if unsafe { ScreenToClient(window, &mut client_point) } == 0 {
+            return None;
+        }
+        let mut client = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetClientRect(window, &mut client) } == 0
+            || client_point.x < client.left
+            || client_point.y < client.top
+            || client_point.x >= client.right
+            || client_point.y >= client.bottom
+        {
+            return None;
+        }
+        let mut origin = POINT { x: 0, y: 0 };
+        if unsafe { ClientToScreen(window, &mut origin) } == 0 {
+            return None;
+        }
+        Some(RecordedMousePoint {
+            x: screen_x,
+            y: screen_y,
+            window_origin: Some((origin.x, origin.y)),
+        })
     }
 
     fn wheel_steps(data: u32) -> i32 {
         ((data >> 16) as u16 as i16 as i32) / WHEEL_DELTA
     }
 
-    fn record_event(kind: &str, payload: Value) {
-        HOOK_SHARED.with(|current| {
-            if let Some(shared) = current.borrow().as_ref() {
-                record(shared, kind, payload);
-            }
-        });
-    }
-
     fn record(shared: &Shared, kind: &str, payload: Value) {
-        if shared.recording_guard.load(Ordering::Acquire) && !shared.cached_coc_is_foreground() {
+        if !shared.cached_coc_is_foreground() {
             return;
         }
         let beep = {
@@ -1753,6 +1939,124 @@ mod win {
         if beep {
             play_recording_beep();
         }
+    }
+
+    fn record_key_event(shared: &Shared, key: &str, down: bool) {
+        let foreground = shared.cached_coc_is_foreground();
+        let beep = {
+            let mut current = lock(&shared.recording);
+            let Some(recording) = current.as_mut() else {
+                return;
+            };
+            let accepted =
+                append_recording_key_event(recording, key, down, foreground, Instant::now());
+            should_play_recording_beep(&mut recording.beeped, accepted)
+        };
+        if beep {
+            play_recording_beep();
+        }
+    }
+
+    fn append_recording_key_event(
+        recording: &mut Recording,
+        key: &str,
+        down: bool,
+        foreground: bool,
+        now: Instant,
+    ) -> bool {
+        if (down && !foreground) || (!down && !recording.held_keys.contains(key)) {
+            return false;
+        }
+        let kind = if down { "key_down" } else { "key_up" };
+        let accepted = append_recording_event(
+            &mut recording.steps,
+            &mut recording.last_event_at,
+            &mut recording.overflowed,
+            recording.captures_at,
+            now,
+            MAX_CAPTURE_EVENTS,
+            kind,
+            json!({"key": key}),
+        );
+        if accepted {
+            if down {
+                recording.held_keys.insert(key.to_owned());
+            } else {
+                recording.held_keys.remove(key);
+            }
+        }
+        accepted
+    }
+
+    fn record_mouse_button_event(
+        shared: &Shared,
+        button: MouseButton,
+        down: bool,
+        point: Option<RecordedMousePoint>,
+    ) {
+        let beep = {
+            let mut current = lock(&shared.recording);
+            let Some(recording) = current.as_mut() else {
+                return;
+            };
+            let accepted =
+                append_recording_mouse_button_event(recording, button, down, point, Instant::now());
+            should_play_recording_beep(&mut recording.beeped, accepted)
+        };
+        if beep {
+            play_recording_beep();
+        }
+    }
+
+    fn append_recording_mouse_button_event(
+        recording: &mut Recording,
+        button: MouseButton,
+        down: bool,
+        point: Option<RecordedMousePoint>,
+        now: Instant,
+    ) -> bool {
+        let event_point = if down {
+            point
+        } else if recording.held_buttons.contains_key(&button) {
+            point.or_else(|| recording.held_buttons.get(&button).copied())
+        } else {
+            None
+        };
+        let Some(point) = event_point else {
+            return false;
+        };
+        let Some((origin_x, origin_y)) = point.window_origin else {
+            return false;
+        };
+        let button_name = match button {
+            MouseButton::Left => "left",
+            MouseButton::Right => "right",
+            MouseButton::Middle => "middle",
+        };
+        let accepted = append_recording_event(
+            &mut recording.steps,
+            &mut recording.last_event_at,
+            &mut recording.overflowed,
+            recording.captures_at,
+            now,
+            MAX_CAPTURE_EVENTS,
+            "mouse_click",
+            json!({
+                "x": point.x,
+                "y": point.y,
+                "windowOrigin": {"x": origin_x, "y": origin_y},
+                "button": button_name,
+                "action": if down {"down"} else {"up"},
+            }),
+        );
+        if accepted {
+            if down {
+                recording.held_buttons.insert(button, point);
+            } else {
+                recording.held_buttons.remove(&button);
+            }
+        }
+        accepted
     }
 
     fn play_recording_beep() {
@@ -1829,6 +2133,7 @@ mod win {
             armed: true,
         };
         let mut input_failed = false;
+        let mut input_detail = None;
         let mut release_failed = false;
         let mut stop_reason = None;
         'playback: loop {
@@ -1916,6 +2221,11 @@ mod win {
                             }
                         } else {
                             input_failed = true;
+                            input_detail = Some(playback_input_detail(
+                                step_index + 1,
+                                step.event.label(),
+                                error,
+                            ));
                             break 'playback;
                         }
                     }
@@ -1936,6 +2246,7 @@ mod win {
             input_failed,
             release_failed,
             stop_reason,
+            input_detail,
             || guard.finish(),
             |event| {
                 let _ = shared.events.send(event.clone());
@@ -2122,10 +2433,14 @@ mod win {
         target: CocTarget,
     ) -> io::Result<()> {
         match event {
-            ReplayEvent::Move { x, y } => send_targeted_mouse_move(target, *x, *y, held),
-            ReplayEvent::Click { x, y, button, down } => {
+            ReplayEvent::Move { point } => send_targeted_mouse_move(target, *point, held),
+            ReplayEvent::Click {
+                point,
+                button,
+                down,
+            } => {
                 let held_position =
-                    send_targeted_mouse_button(target, *x, *y, *button, *down, held)?;
+                    send_targeted_mouse_button(target, *point, *button, *down, held)?;
                 if *down {
                     held.buttons.insert(*button, held_position);
                 } else {
@@ -2133,8 +2448,8 @@ mod win {
                 }
                 Ok(())
             }
-            ReplayEvent::Scroll { x, y, dx, dy } => {
-                send_targeted_scroll(target, *x, *y, *dx, *dy, held)
+            ReplayEvent::Scroll { point, dx, dy } => {
+                send_targeted_scroll(target, *point, *dx, *dy, held)
             }
             ReplayEvent::Key { virtual_key, down } => {
                 send_targeted_key(target, *virtual_key, *down, &held.keys)?;
@@ -2204,10 +2519,18 @@ mod win {
         target_window(target, true).is_ok()
     }
 
-    fn target_client_point(target: CocTarget, x: i32, y: i32) -> io::Result<(HWND, POINT)> {
+    fn target_client_point(
+        target: CocTarget,
+        recorded: RecordedMousePoint,
+    ) -> io::Result<(HWND, POINT)> {
         let window = target_window(target, true)?;
-        let mut point = POINT { x, y };
-        if unsafe { ScreenToClient(window, &mut point) } == 0 {
+        let mut point = POINT {
+            x: recorded.x,
+            y: recorded.y,
+        };
+        if let Some((x, y)) = recorded.client_position()? {
+            point = POINT { x, y };
+        } else if unsafe { ScreenToClient(window, &mut point) } == 0 {
             return Err(io::Error::last_os_error());
         }
         let mut client = RECT {
@@ -2224,9 +2547,7 @@ mod win {
             || point.x >= client.right
             || point.y >= client.bottom
         {
-            return Err(invalid_input(
-                "recorded mouse position is outside the Clash of Clans client area",
-            ));
+            return Err(invalid_input(OUTSIDE_COC_CLIENT_AREA));
         }
         Ok((window, point))
     }
@@ -2261,11 +2582,13 @@ mod win {
 
     fn send_targeted_mouse_move(
         target: CocTarget,
-        x: i32,
-        y: i32,
+        recorded: RecordedMousePoint,
         held: &HeldInputs,
     ) -> io::Result<()> {
-        let (window, point) = target_client_point(target, x, y)?;
+        let (window, point) = match target_client_point(target, recorded) {
+            Ok(target_point) => target_point,
+            Err(error) => return ignore_outside_mouse_move(error),
+        };
         post_target_message(
             target,
             window,
@@ -2278,13 +2601,12 @@ mod win {
 
     fn send_targeted_mouse_button(
         target: CocTarget,
-        x: i32,
-        y: i32,
+        recorded: RecordedMousePoint,
         button: MouseButton,
         down: bool,
         held: &HeldInputs,
     ) -> io::Result<(i32, i32)> {
-        let (window, point) = target_client_point(target, x, y)?;
+        let (window, point) = target_client_point(target, recorded)?;
         let lparam = pack_window_coordinates(point.x, point.y)?;
         post_target_message(
             target,
@@ -2315,14 +2637,26 @@ mod win {
 
     fn send_targeted_scroll(
         target: CocTarget,
-        x: i32,
-        y: i32,
+        recorded: RecordedMousePoint,
         dx: i32,
         dy: i32,
         held: &HeldInputs,
     ) -> io::Result<()> {
-        let (window, _) = target_client_point(target, x, y)?;
-        let lparam = pack_window_coordinates(x, y)?;
+        let (window, client_point) = target_client_point(target, recorded)?;
+        let mut screen_point = if recorded.window_origin.is_some() {
+            client_point
+        } else {
+            POINT {
+                x: recorded.x,
+                y: recorded.y,
+            }
+        };
+        if recorded.window_origin.is_some()
+            && unsafe { ClientToScreen(window, &mut screen_point) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let lparam = pack_window_coordinates(screen_point.x, screen_point.y)?;
         for (amount, message) in [(dy, WM_MOUSEWHEEL), (dx, WM_MOUSEHWHEEL)] {
             if amount == 0 {
                 continue;
@@ -2508,12 +2842,13 @@ mod win {
     mod tests {
         use super::{
             ForegroundLossAction, HeldInputs, MouseButton, NativeEvent, PlaybackFailure,
-            PlaybackPauseResult, ReplayWait, finalized_playback_event, finish_guard_release,
-            foreground_loss_action, invalid_target_window, is_extended_key, join_playback_task,
-            key_release_order, pack_window_coordinates, pause_after_release,
-            playback_completion_event, release_guard_on_drop, release_targeted_inputs_with,
-            shift_replay_timing, signal_playback_resume, target_visibility_allowed,
-            wait_for_replay_step,
+            PlaybackPauseResult, RecordedMousePoint, Recording, ReplayWait,
+            append_recording_key_event, append_recording_mouse_button_event,
+            finalized_playback_event, finish_guard_release, foreground_loss_action,
+            invalid_target_window, is_extended_key, join_playback_task, key_release_order,
+            pack_window_coordinates, pause_after_release, playback_completion_event,
+            release_guard_on_drop, release_targeted_inputs_with, shift_replay_timing,
+            signal_playback_resume, target_visibility_allowed, wait_for_replay_step,
         };
         use std::cell::{Cell, RefCell};
         use std::collections::{HashMap, HashSet};
@@ -2521,7 +2856,7 @@ mod win {
             Arc,
             atomic::{AtomicUsize, Ordering},
         };
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
         use tokio::sync::{oneshot, watch};
 
         #[test]
@@ -2654,6 +2989,7 @@ mod win {
                 false,
                 false,
                 None,
+                None,
                 || {
                     finish_guard_release(&mut armed, || {
                         attempts += 1;
@@ -2707,6 +3043,7 @@ mod win {
                 false,
                 false,
                 None,
+                None,
                 || {
                     finish_guard_release(&mut armed, || {
                         attempts += 1;
@@ -2725,6 +3062,7 @@ mod win {
                         &NativeEvent::PlaybackFailed {
                             playback_id: 9,
                             reason: PlaybackFailure::Release,
+                            detail: None,
                         }
                     );
                     order.borrow_mut().push("publish");
@@ -2744,6 +3082,7 @@ mod win {
                 NativeEvent::PlaybackFailed {
                     playback_id: 9,
                     reason: PlaybackFailure::Release,
+                    detail: None,
                 }
             );
         }
@@ -2942,10 +3281,11 @@ mod win {
             assert_eq!(held.keys, HashSet::from([0x41]));
             let release_failed = matches!(&result, PlaybackPauseResult::ReleaseFailed);
             assert_eq!(
-                playback_completion_event(5, false, release_failed, None),
+                playback_completion_event(5, false, release_failed, None, None),
                 NativeEvent::PlaybackFailed {
                     playback_id: 5,
                     reason: PlaybackFailure::Release,
+                    detail: None,
                 }
             );
         }
@@ -2964,6 +3304,80 @@ mod win {
             assert_eq!(shifted_start, started + paused_for);
             assert_eq!(deadline, started + Duration::from_secs(7) + paused_for);
         }
+
+        fn recording_for_test(started: Instant) -> Recording {
+            Recording {
+                captures_at: started,
+                last_event_at: None,
+                steps: Vec::new(),
+                held_keys: HashSet::new(),
+                held_buttons: HashMap::new(),
+                overflowed: false,
+                beeped: false,
+            }
+        }
+
+        #[test]
+        fn key_release_is_recorded_after_focus_leaves_coc() {
+            let started = Instant::now();
+            let mut recording = recording_for_test(started);
+
+            assert!(append_recording_key_event(
+                &mut recording,
+                "space",
+                true,
+                true,
+                started + Duration::from_millis(1),
+            ));
+            assert!(append_recording_key_event(
+                &mut recording,
+                "space",
+                false,
+                false,
+                started + Duration::from_millis(10),
+            ));
+            assert!(!append_recording_key_event(
+                &mut recording,
+                "space",
+                false,
+                false,
+                started + Duration::from_millis(11),
+            ));
+            assert_eq!(recording.steps[0]["type"], "key_down");
+            assert_eq!(recording.steps[1]["type"], "key_up");
+            assert!(recording.held_keys.is_empty());
+        }
+
+        #[test]
+        fn mouse_release_outside_coc_uses_the_captured_press_position() {
+            let started = Instant::now();
+            let mut recording = recording_for_test(started);
+            let point = RecordedMousePoint {
+                x: 1240,
+                y: 790,
+                window_origin: Some((1000, 500)),
+            };
+
+            assert!(append_recording_mouse_button_event(
+                &mut recording,
+                MouseButton::Left,
+                true,
+                Some(point),
+                started + Duration::from_millis(1),
+            ));
+            assert!(append_recording_mouse_button_event(
+                &mut recording,
+                MouseButton::Left,
+                false,
+                None,
+                started + Duration::from_millis(10),
+            ));
+            assert_eq!(recording.steps[0]["data"]["action"], "down");
+            assert_eq!(recording.steps[1]["data"]["action"], "up");
+            assert_eq!(recording.steps[1]["data"]["x"], 1240);
+            assert_eq!(recording.steps[1]["data"]["y"], 790);
+            assert!(recording.held_buttons.is_empty());
+        }
     }
 }
 
@@ -2979,6 +3393,94 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(5));
 
         assert_eq!(decode_window_title(3, 0, &[67, 111, 67]).unwrap(), "CoC");
+    }
+
+    #[test]
+    fn recorded_mouse_origin_makes_coordinates_stable_when_coc_moves() {
+        let point = RecordedMousePoint {
+            x: 1_240,
+            y: 790,
+            window_origin: Some((1_000, 500)),
+        };
+        assert_eq!(point.client_position().unwrap(), Some((240, 290)));
+
+        let old_macro_point = RecordedMousePoint {
+            window_origin: None,
+            ..point
+        };
+        assert_eq!(old_macro_point.client_position().unwrap(), None);
+    }
+
+    #[test]
+    fn mouse_event_parser_keeps_legacy_screen_coordinates_and_reads_window_origin() {
+        let legacy = serde_json::json!({"x": 500, "y": 300});
+        assert_eq!(
+            read_mouse_point(legacy.as_object().unwrap()).unwrap(),
+            RecordedMousePoint {
+                x: 500,
+                y: 300,
+                window_origin: None,
+            }
+        );
+
+        let anchored = serde_json::json!({
+            "x": 1240,
+            "y": 790,
+            "windowOrigin": {"x": 1000, "y": 500}
+        });
+        assert_eq!(
+            read_mouse_point(anchored.as_object().unwrap())
+                .unwrap()
+                .client_position()
+                .unwrap(),
+            Some((240, 290))
+        );
+        assert!(
+            read_mouse_point(
+                serde_json::json!({"x": 1, "y": 2, "windowOrigin": "invalid"})
+                    .as_object()
+                    .unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn playback_failure_detail_names_the_step_and_explains_outside_coordinates() {
+        assert_eq!(
+            playback_input_detail(
+                3,
+                "clic de souris",
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "recorded mouse position is outside the Clash of Clans client area"
+                )
+            ),
+            "Étape 3 (clic de souris) : la position souris enregistrée est hors de la zone de jeu CoC; réenregistrez la macro avec Clash of Clans au premier plan"
+        );
+    }
+
+    #[test]
+    fn only_outside_client_positions_are_ignored_for_mouse_moves() {
+        assert!(
+            ignore_outside_mouse_move(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                OUTSIDE_COC_CLIENT_AREA
+            ))
+            .is_ok()
+        );
+        let out_of_range = ignore_outside_mouse_move(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mouse x coordinate is out of range",
+        ))
+        .unwrap_err();
+        assert_eq!(out_of_range.kind(), io::ErrorKind::InvalidInput);
+        let permission_error = ignore_outside_mouse_move(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            OUTSIDE_COC_CLIENT_AREA,
+        ))
+        .unwrap_err();
+        assert_eq!(permission_error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
@@ -3019,48 +3521,64 @@ mod tests {
     #[test]
     fn playback_completion_distinguishes_cancellation_from_injection_failures() {
         assert_eq!(
-            playback_completion_event(4, false, false, None),
+            playback_completion_event(4, false, false, None, None),
             NativeEvent::PlaybackEnded { playback_id: 4 }
         );
         assert_eq!(
-            playback_completion_event(4, true, false, None),
+            playback_completion_event(
+                4,
+                true,
+                false,
+                None,
+                Some("Étape 2 (clic de souris) : test".into()),
+            ),
             NativeEvent::PlaybackFailed {
                 playback_id: 4,
                 reason: PlaybackFailure::Input,
+                detail: Some("Étape 2 (clic de souris) : test".into()),
             }
         );
         assert_eq!(
-            playback_completion_event(4, false, true, None),
+            playback_completion_event(4, false, true, None, None),
             NativeEvent::PlaybackFailed {
                 playback_id: 4,
                 reason: PlaybackFailure::Release,
+                detail: None,
             }
         );
         assert_eq!(
-            playback_completion_event(4, true, true, None),
+            playback_completion_event(
+                4,
+                true,
+                true,
+                None,
+                Some("Étape 2 (clic de souris) : test".into()),
+            ),
             NativeEvent::PlaybackFailed {
                 playback_id: 4,
                 reason: PlaybackFailure::InputAndRelease,
+                detail: Some("Étape 2 (clic de souris) : test".into()),
             }
         );
         assert_eq!(
-            playback_completion_event(4, false, false, Some(PlaybackStopReason::FocusLost)),
+            playback_completion_event(4, false, false, Some(PlaybackStopReason::FocusLost), None,),
             NativeEvent::PlaybackStopped {
                 playback_id: 4,
                 reason: PlaybackStopReason::FocusLost,
             }
         );
         assert_eq!(
-            playback_completion_event(4, false, false, Some(PlaybackStopReason::TargetLost)),
+            playback_completion_event(4, false, false, Some(PlaybackStopReason::TargetLost), None,),
             NativeEvent::PlaybackStopped {
                 playback_id: 4,
                 reason: PlaybackStopReason::TargetLost,
             }
         );
         assert!(matches!(
-            playback_completion_event(4, false, true, Some(PlaybackStopReason::FocusLost)),
+            playback_completion_event(4, false, true, Some(PlaybackStopReason::FocusLost), None,),
             NativeEvent::PlaybackFailed {
                 reason: PlaybackFailure::Release,
+                detail: None,
                 ..
             }
         ));
@@ -3210,6 +3728,48 @@ mod tests {
     }
 
     #[test]
+    fn trimmed_capture_still_releases_keys_and_mouse_buttons() {
+        let capture = finish_recording(
+            vec![
+                event_value(0.0, "key_down", json!({"key":"a"})),
+                event_value(
+                    1.0,
+                    "mouse_click",
+                    json!({"x":100,"y":200,"windowOrigin":{"x":50,"y":60},"button":"left","action":"down"}),
+                ),
+                event_value(4.0, "nop", json!({})),
+            ],
+            false,
+        );
+
+        assert_eq!(capture.steps[0]["type"], "key_down");
+        assert_eq!(capture.steps[1]["data"]["action"], "down");
+        assert_eq!(capture.steps[2]["type"], "nop");
+        assert_eq!(capture.steps[3]["type"], "key_up");
+        assert_eq!(capture.steps[3]["data"]["key"], "a");
+        assert_eq!(capture.steps[4]["data"]["action"], "up");
+        assert_eq!(capture.steps[4]["data"]["x"], 100);
+        assert_eq!(capture.steps[4]["data"]["y"], 200);
+    }
+
+    #[test]
+    fn synthetic_releases_stay_within_the_capture_limit() {
+        let mut steps = vec![
+            event_value(0.0, "key_down", json!({"key":"a"})),
+            event_value(0.1, "nop", json!({})),
+            event_value(0.1, "nop", json!({})),
+        ];
+
+        let discarded_events = balance_recorded_inputs(&mut steps, 3);
+
+        assert!(discarded_events);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0]["type"], "key_down");
+        assert_eq!(steps[1]["type"], "nop");
+        assert_eq!(steps[2]["type"], "key_up");
+    }
+
+    #[test]
     fn capture_limit_preserves_collected_steps_and_marks_the_partial_capture() {
         let now = Instant::now();
         let mut steps = vec![event_value(5.0, "nop", json!({}))];
@@ -3263,8 +3823,11 @@ mod tests {
         assert!(matches!(
             &parsed[0].event,
             ReplayEvent::Click {
-                x: -1920,
-                y: 40,
+                point: RecordedMousePoint {
+                    x: -1920,
+                    y: 40,
+                    window_origin: None,
+                },
                 button: MouseButton::Left,
                 down: true,
             }
@@ -3272,8 +3835,11 @@ mod tests {
         assert!(matches!(
             &parsed[1].event,
             ReplayEvent::Scroll {
-                x: 2500,
-                y: -10,
+                point: RecordedMousePoint {
+                    x: 2500,
+                    y: -10,
+                    window_origin: None,
+                },
                 dx: 0,
                 dy: 1,
             }

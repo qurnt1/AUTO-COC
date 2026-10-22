@@ -118,6 +118,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
               <summary>Voir les détails de sûreté<Icon name="chevron" size={15} /></summary>
               <div>
                 <p>Le replay démarre uniquement si Clash of Clans est au premier plan et reste ciblé sur sa fenêtre. Si le jeu perd le focus, AUTO-COC libère les commandes maintenues puis met en pause ou arrête la lecture selon l’option des réglages. Aucune entrée n’est envoyée à une autre application.</p>
+                <p>La capture démarre avec CoC au premier plan. Les nouveaux appuis clavier et clics sont capturés dans CoC; si le focus change, leurs relâchements restent enregistrés pour éviter une touche ou un bouton bloqué. Les actions souris sont limitées à sa zone de jeu. Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge; les anciennes macros gardent les coordonnées écran. Les déplacements souris hors zone sont ignorés, mais un clic ou un défilement hors zone arrête le replay.</p>
                 <p>La capture commence après 3 secondes; à l’arrêt, les 3 dernières secondes sont retirées. Il faut donc laisser enregistrer plus de 3 secondes pour garder une séquence.</p>
                 <p>Google Play Games peut ignorer les messages ciblés. Un crash du jeu Android peut rester invisible si sa fenêtre hôte demeure ouverte.</p>
               </div>

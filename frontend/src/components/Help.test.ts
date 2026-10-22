@@ -36,7 +36,10 @@ describe("help page", () => {
     expect(html).toContain("enregistrez plus de 3 s");
     expect(html).toContain("Les 3 dernières secondes sont retirées.");
     expect(html).toContain("Clash of Clans doit être au premier plan.");
+    expect(html).toContain("leurs relâchements restent enregistrés pour éviter une touche ou un bouton bloqué");
     expect(html).toContain("Voir les détails de sûreté");
+    expect(html).toContain("Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge");
+    expect(html).toContain("Les déplacements souris hors zone sont ignorés, mais un clic ou un défilement hors zone arrête le replay");
     expect(html).not.toMatch(/<details[^>]*open/);
   });
 

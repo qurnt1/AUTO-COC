@@ -80,10 +80,11 @@ describe("Settings", () => {
     const html = renderSettings(true);
 
     expect(html).toContain("Pause automatique si Clash of Clans perd le premier plan");
-    expect(html).toContain("Le replay démarre seulement si CoC est au premier plan.");
+    expect(html).toContain("Le replay et l’enregistrement démarrent seulement si CoC est au premier plan.");
     expect(html).toContain("Activée, l’option attend jusqu’à 30 s que le jeu soit actif");
-    expect(html).toContain("Désactivée, CoC doit déjà être actif et une perte de focus arrête le replay.");
+    expect(html).toContain("Désactivée, CoC doit déjà être actif pour démarrer; une perte de focus arrête le replay.");
     expect(html).toContain("Les entrées restent ciblées sur la fenêtre du jeu.");
+    expect(html).toContain("La capture est limitée à CoC");
     expect(html).toContain('type="checkbox" checked=""');
   });
 
@@ -93,8 +94,9 @@ describe("Settings", () => {
 
     expect(control).toContain('type="checkbox"');
     expect(control).not.toContain("checked");
-    expect(html).toContain("Le replay démarre seulement si CoC est au premier plan.");
+    expect(html).toContain("Le replay et l’enregistrement démarrent seulement si CoC est au premier plan.");
     expect(html).toContain("Les entrées restent ciblées sur la fenêtre du jeu.");
+    expect(html).toContain("les actions souris sont gardées uniquement dans sa zone de jeu.");
   });
 
   it("guides bot creation first and unlocks token verification only after saving", () => {

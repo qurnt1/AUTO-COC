@@ -36,10 +36,10 @@ impl Default for Help {
                 HelpSection {
                     title: "Garde du premier plan".into(),
                     body: concat!(
-                        "Quand la pause automatique est activée, une action lancée depuis l’atelier peut attendre jusqu’à 30 secondes que Clash of Clans passe au premier plan. Les raccourcis et Telegram ne patientent pas. Le replay exige toujours CoC au premier plan et envoie ses actions uniquement à sa fenêtre, même si l’option est désactivée. Google Play Games peut ignorer ces actions ciblées.\n\n",
+                        "L’enregistrement et le replay démarrent uniquement quand CoC est reconnu au premier plan. Quand la pause automatique est activée, une action lancée depuis l’atelier peut attendre jusqu’à 30 secondes que Clash of Clans passe au premier plan. Les raccourcis et Telegram ne patientent pas. Le replay envoie ses actions uniquement à la fenêtre du jeu, même si l’option est désactivée. Google Play Games peut ignorer ces actions ciblées.\n\n",
                         "Si CoC perd le premier plan pendant un replay, AUTO-COC relâche les touches et boutons maintenus. L’option activée met ensuite le replay en pause; désactivée, elle l’arrête. Si la libération échoue, le replay s’arrête avec une erreur. Pour reprendre au même point, choisissez « Reprendre », puis retournez dans le jeu. « Annuler la reprise » garde le replay en pause. Vous pouvez l’arrêter depuis l’atelier, avec le raccourci Arrêter, Telegram STOP ou en fermant l’application.\n\n",
                         "Avec la pause activée, une perte de focus pendant la capture arrête l’enregistrement et sauvegarde les actions déjà capturées. Si la sauvegarde échoue, utilisez Arrêter pour réessayer.\n\n",
-                        "Les positions de souris sont enregistrées à l’écran et contrôlées par rapport à la fenêtre CoC. Si vous déplacez la fenêtre, une action peut viser ailleurs; une position hors de la zone de jeu arrête le replay. Réenregistrez la macro après avoir déplacé la fenêtre. Un crash interne du jeu peut ne pas être détecté si la fenêtre Google Play Games reste ouverte avec le même titre."
+                        "La capture est limitée à CoC; les actions souris sont gardées uniquement dans sa zone de jeu. Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge. Les anciennes macros gardent les coordonnées écran; les déplacements souris hors zone sont ignorés, mais un clic ou un défilement hors zone arrête le replay. Un crash interne du jeu peut ne pas être détecté si la fenêtre Google Play Games reste ouverte avec le même titre."
                     )
                     .into(),
                 },
@@ -260,8 +260,8 @@ mod tests {
         for phrase in [
             "depuis l’atelier peut attendre jusqu’à 30 secondes",
             "Les raccourcis et Telegram ne patientent pas",
-            "Le replay exige toujours CoC au premier plan",
-            "uniquement à sa fenêtre",
+            "L’enregistrement et le replay démarrent uniquement quand CoC est reconnu au premier plan",
+            "uniquement à la fenêtre du jeu",
             "Google Play Games peut ignorer",
             "Si CoC perd le premier plan pendant un replay",
             "met ensuite le replay en pause",
@@ -274,8 +274,10 @@ mod tests {
             "fermant l’application",
             "une perte de focus pendant la capture arrête l’enregistrement",
             "sauvegarde les actions déjà capturées",
-            "Les positions de souris sont enregistrées à l’écran",
-            "hors de la zone de jeu arrête le replay",
+            "La capture est limitée à CoC",
+            "Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge",
+            "Les anciennes macros gardent les coordonnées écran",
+            "les déplacements souris hors zone sont ignorés",
             "Un crash interne du jeu peut ne pas être détecté",
             "la fenêtre Google Play Games reste ouverte avec le même titre",
         ] {

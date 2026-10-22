@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { BackendClientError, type Snapshot } from "./api";
+import { reconcileBackendActionError } from "./actionError";
 import { createBackendClient } from "./backend";
 import { Atelier } from "./components/Atelier";
 import { Help } from "./components/Help";
@@ -69,11 +70,13 @@ function DesktopApp() {
   const mobileMenuButton = useRef<HTMLButtonElement>(null);
   const mobileDrawer = useRef<HTMLElement>(null);
   const mobileDrawerWasOpen = useRef(false);
+  const previousBackendError = useRef<string | null>(null);
 
   const connect = useCallback(async (signal?: AbortSignal) => {
     return api.connect(signal);
   }, [api]);
   const revision = snapshot?.revision;
+  const backendLastError = snapshot?.lastError;
 
   useEffect(() => () => api.dispose(), [api]);
   useEffect(() => api.listenShutdownErrors((error) => {
@@ -81,8 +84,15 @@ function DesktopApp() {
     setActionError(error.message);
   }), [api]);
   useEffect(() => {
-    if (snapshot?.lastError) setActionError(snapshot.lastError);
-  }, [snapshot?.lastError]);
+    if (backendLastError === undefined) return;
+    const previousError = previousBackendError.current;
+    previousBackendError.current = backendLastError;
+    setActionError((current) => reconcileBackendActionError(
+      current,
+      previousError,
+      backendLastError,
+    ));
+  }, [backendLastError]);
 
   useEffect(() => {
     if (window.location.pathname === "/") window.history.replaceState({}, "", "/macros");

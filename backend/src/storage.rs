@@ -1147,6 +1147,29 @@ mod tests {
     }
 
     #[test]
+    fn recorded_mouse_window_origin_survives_macro_save_and_reload() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Anchored").unwrap();
+        let steps = vec![serde_json::json!({
+            "t": 0.1,
+            "type": "mouse_move",
+            "data": {
+                "x": 1240,
+                "y": 790,
+                "windowOrigin": {"x": 1000, "y": 500}
+            }
+        })];
+
+        store.save_recorded_steps("Anchored", &steps).unwrap();
+        assert_eq!(store.get_macro("Anchored").unwrap().steps, steps);
+
+        drop(store);
+        let store = Store::open_at(dir.path()).unwrap();
+        assert_eq!(store.get_macro("Anchored").unwrap().steps, steps);
+    }
+
+    #[test]
     fn refuses_invalid_and_duplicate_macro_mutations() {
         let dir = tempdir().unwrap();
         let mut store = Store::open_at(dir.path()).unwrap();
