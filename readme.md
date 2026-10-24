@@ -1,53 +1,89 @@
-# AUTO-COC
+# 🎮 AUTO-COC v4.0
 
-AUTO-COC aide à rejouer des gestes clavier et souris répétitifs dans Clash of Clans lancé avec Google Play Games sur Windows. L’application s’adresse aux joueurs qui veulent enregistrer une séquence une fois, la retrouver dans leur bibliothèque et la relancer sans refaire chaque action manuellement.
+<p align="center">
+  <strong>Enregistrez, organisez et rejouez vos macros dans Clash of Clans.</strong>
+</p>
 
-Les macros et réglages sont conservés sur l’ordinateur. L’application réunit l’enregistrement, le replay, les raccourcis personnalisables et des commandes d’arrêt dans une fenêtre desktop. Telegram est une option séparée pour piloter certaines commandes à distance.
+<p align="center">
+  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white" alt="Windows 10 et 11"/>
+  <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2"/>
+  <img src="https://img.shields.io/badge/React-19-149eca?logo=react&logoColor=white" alt="React 19"/>
+  <img src="https://img.shields.io/badge/Backend-Rust-black?logo=rust&logoColor=white" alt="Backend Rust"/>
+</p>
 
-![Atelier AUTO-COC pendant la lecture d’une macro](./public/assets/ui.png)
+<p align="center">
+  <img src="assets/atelier.png" alt="Atelier AUTO-COC pendant la lecture d’une macro" width="960"/>
+</p>
 
-## Utiliser l’application
+---
+
+## 📋 Description
+
+AUTO-COC est une application Windows pour enregistrer puis rejouer des actions clavier et souris dans Clash of Clans lancé avec Google Play Games. Les macros et les réglages restent sur l’ordinateur; Telegram permet, en option, de piloter quelques commandes à distance.
+
+### ✨ Fonctions principales
+
+| Fonctionnalité | Utilisation |
+| --- | --- |
+| 📝 Enregistrement | Capture une séquence après un compte à rebours de trois secondes. Les trois dernières secondes sont retirées à l’arrêt. |
+| 🗂️ Bibliothèque | Créez, sélectionnez, renommez et supprimez vos macros depuis l’Atelier. |
+| 🎯 Replay ciblé | Adresse les actions à la fenêtre reconnue de Clash of Clans; le mode arrière-plan se règle dans l’application. |
+| 🔁 Boucle | Répète la macro jusqu’à l’arrêt. |
+| ⌨️ Raccourcis | Personnalisez les commandes globales de lecture et d’arrêt. |
+| 📲 Telegram | Lancez ou arrêtez une macro, sélectionnez une séquence et demandez une capture d’écran. |
+
+## 🎮 Utilisation
 
 1. Dans l’Atelier, créez ou sélectionnez une macro.
-2. Ouvrez Clash of Clans au premier plan et démarrez l’enregistrement. La capture commence après trois secondes de préparation. À l’arrêt, les trois dernières secondes sont retirées; il faut donc enregistrer plus de trois secondes pour conserver des actions.
-3. Examinez le résumé et le déroulé visuel de la séquence, puis lancez ou arrêtez le replay depuis l’Atelier ou avec vos raccourcis.
-4. Dans Réglages, personnalisez les raccourcis, activez la répétition et choisissez si le replay peut continuer en arrière-plan.
+2. Ouvrez Clash of Clans au premier plan et démarrez l’enregistrement. Après les trois secondes de préparation, effectuez vos actions.
+3. Arrêtez l’enregistrement, puis examinez le résumé et la trace avant de lancer la lecture.
+4. Activez la boucle ou choisissez le comportement à la perte de focus directement dans l’Atelier ou dans Réglages.
 
-Dans **Réglages > Système**, **Capturer CoC** place le jeu au premier plan et enregistre l’image de sa fenêtre en PNG.
+### ⌨️ Raccourcis par défaut
 
-Par défaut, `F1` bascule entre lecture et arrêt, `Ctrl+Shift+1` démarre le replay et `Ctrl+Shift+0` arrête l’opération en cours. Modifiez-les dans Réglages > Raccourcis. Si Windows refuse une combinaison déjà utilisée, choisissez-en une autre.
+| Raccourci | Action |
+| --- | --- |
+| `F1` | Basculer entre lecture et arrêt |
+| `Ctrl+Shift+1` | Démarrer la lecture |
+| `Ctrl+Shift+0` | Arrêter l’opération en cours |
 
-## Contrôle du replay et limites
+Modifiez ces combinaisons dans **Réglages > Raccourcis**. Si Windows indique qu’une combinaison est déjà utilisée, choisissez-en une autre.
 
-**Autoriser le replay en arrière-plan** est activé par défaut lorsqu’aucune valeur n’est enregistrée. Quand ce réglage est activé, AUTO-COC cherche une fenêtre visible reconnue de Clash of Clans et adresse les actions à cette fenêtre, même si une autre application est au premier plan. Si la fenêtre ciblée ou son processus disparaît, le replay s’arrête. En cas de cible absente ou ambiguë, le démarrage échoue plutôt que d’envoyer les actions ailleurs.
+## ⚙️ Réglages et comportement
 
-Si le réglage est désactivé, un lancement depuis l’Atelier peut attendre jusqu’à 30 secondes que CoC passe au premier plan; les raccourcis et Telegram ne patientent pas. Une perte de focus pendant la lecture met ensuite le replay en pause; il faut reprendre depuis l’Atelier et revenir dans le jeu. L’enregistrement reste toujours limité au premier plan et s’arrête si CoC perd le focus.
+### Replay en arrière-plan
 
-Le ciblage d’une fenêtre ne garantit pas que Google Play Games transmette ou que le jeu traite chaque action. AUTO-COC ne peut pas toujours détecter un crash interne de Clash of Clans si la fenêtre hôte de Google Play Games reste ouverte avec le même titre. Pour les nouvelles macros, les coordonnées suivent CoC quand sa fenêtre bouge; les anciennes macros conservent leurs coordonnées écran. Les déplacements hors de la zone du jeu sont ignorés, tandis qu’un clic ou un défilement hors zone arrête le replay.
+Le replay en arrière-plan est autorisé par défaut lorsqu’aucune valeur n’est enregistrée. Dans **Réglages**, l’option **Mettre en pause si CoC perd le focus** permet de choisir le comportement :
 
-L’aide intégrée présente les parcours de base, les raccourcis configurés, les précautions de lecture et les diagnostics de l’application. Le token Telegram n’est pas affiché dans l’aide ni dans les diagnostics. Telegram est facultatif : il faut configurer un bot et appairer une conversation privée avant de l’utiliser. Il prend notamment en charge l’arrêt, le lancement et la sélection de macros; `gif` indique que la capture GIF n’est pas prise en charge. Si Telegram confirme qu’un panneau ne peut plus être modifié, le bot envoie un nouveau message puis essaie de supprimer l’ancien panneau. Si Telegram refuse cette suppression ou si le réseau échoue, il tente d’en retirer les boutons. Ces opérations restent au mieux : l’ancien message peut subsister si Telegram refuse aussi la modification.
+- Si elle est désactivée, AUTO-COC cible la fenêtre visible reconnue de Clash of Clans même lorsqu’une autre application est au premier plan. Le replay s’arrête si la fenêtre ou son processus disparaît; en cas de cible absente ou ambiguë, le démarrage échoue.
+- Si elle est activée, une perte de focus met la lecture en pause. Un lancement depuis l’Atelier peut attendre jusqu’à 30 secondes que CoC passe au premier plan; les raccourcis et Telegram ne patientent pas.
+- L’enregistrement reste toujours limité au premier plan et s’arrête si CoC perd le focus.
 
-Une capture CoC depuis Réglages ou Telegram tente d’afficher le jeu au premier plan avant de lire ses pixels. Windows peut refuser ce changement de focus pour une demande Telegram distante; dans ce cas, aucune image n’est envoyée et le message demande d’activer CoC sur le PC puis de réessayer.
+Le ciblage évite d’envoyer volontairement les entrées à l’application au premier plan, mais ne prouve pas que Google Play Games ou CoC traite chaque action. Un crash interne du jeu peut aussi passer inaperçu si la fenêtre hôte reste ouverte avec le même titre. Les nouvelles macros suivent la fenêtre de CoC lorsqu’elle bouge; les anciennes conservent leurs coordonnées écran. Les déplacements hors de la zone du jeu sont ignorés; un clic ou un défilement hors zone arrête le replay.
 
-La [matrice de régression desktop](docs/desktop-regression-matrix.md) distingue la couverture automatisée des vérifications qui nécessitent une session Windows et le jeu réel.
+### 📲 Telegram et captures d’écran
 
-## Prérequis Windows
+Configurez un bot avec [@BotFather](https://t.me/BotFather), puis appairez une conversation privée dans **Réglages > Telegram**. Le bot permet notamment d’arrêter ou lancer la lecture et de choisir une macro. La commande `gif` n’est pas prise en charge.
+
+Une capture depuis **Réglages > Système** ou Telegram tente de mettre CoC au premier plan avant de lire l’image de sa fenêtre. Windows peut refuser le changement de focus demandé à distance par Telegram; dans ce cas, aucune photo n’est envoyée et le bot demande de réessayer depuis le PC. Le token n’apparaît ni dans l’aide ni dans les diagnostics.
+
+## 🚀 Installation et développement
+
+### Prérequis Windows
 
 - Windows 10 ou 11 x64.
-- Rust installé avec [rustup](https://rustup.rs/) et le toolchain MSVC. Tauri utilise les [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) : installez la charge **Desktop development with C++** et le Windows SDK. Si nécessaire, sélectionnez le toolchain avec `rustup default stable-msvc`.
-- Node.js `22.12+` et npm pour le frontend.
-- Le runtime [Microsoft Edge WebView2 Evergreen](https://developer.microsoft.com/microsoft-edge/webview2/). Il est fourni sur la plupart des versions récentes de Windows 10/11. Si le runtime manque, l’installateur actuel télécharge son bootstrapper, ce qui nécessite une connexion Internet.
-- Le CLI Tauri 2, installé une fois :
+- Rust avec le toolchain MSVC et les [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (charge **Desktop development with C++** et Windows SDK). Au besoin : `rustup default stable-msvc`.
+- Node.js `22.12+` et npm.
+- Le runtime [Microsoft Edge WebView2 Evergreen](https://developer.microsoft.com/microsoft-edge/webview2/). Si nécessaire, l’installateur télécharge son bootstrapper et a besoin d’une connexion Internet.
+- Le CLI Tauri 2, à installer une fois :
 
 ```powershell
 cargo install tauri-cli --version "2.12.4" --locked
 ```
 
-Les prérequis Windows détaillés sont décrits dans la [documentation Tauri](https://v2.tauri.app/start/prerequisites/) et la [documentation Microsoft WebView2](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
+### Lancer l’application en développement
 
-## Développement
-
-Depuis la racine du dépôt, installez les dépendances puis démarrez la fenêtre Tauri :
+Depuis la racine du dépôt :
 
 ```powershell
 cd frontend
@@ -55,9 +91,11 @@ npm ci
 cargo tauri dev
 ```
 
-La configuration Tauri lance Vite sur `127.0.0.1:5173` et ouvre l’interface dans la fenêtre de développement. Pour quitter, fermez la fenêtre ou utilisez `Ctrl+C` dans le terminal de développement.
+La fenêtre Tauri charge Vite sur `127.0.0.1:5173`. Fermez la fenêtre ou faites `Ctrl+C` dans le terminal pour arrêter le mode développement.
 
-Les vérifications du frontend sont disponibles depuis `frontend` :
+## 🧪 Tests et validation
+
+Depuis `frontend`, les contrôles de l’interface sont :
 
 ```powershell
 npm run lint
@@ -66,7 +104,7 @@ npm test
 npm run build
 ```
 
-Vérifications Rust du backend, depuis la racine :
+Depuis la racine, les vérifications Rust du backend sont :
 
 ```powershell
 cargo fmt --manifest-path backend/Cargo.toml --check
@@ -74,50 +112,43 @@ cargo clippy --manifest-path backend/Cargo.toml --all-targets
 cargo test --manifest-path backend/Cargo.toml
 ```
 
-## Construire l’installateur Windows
+Le workflow [Windows desktop CI](.github/workflows/desktop.yml) exécute les contrôles frontend et Rust, construit l’installateur NSIS x64 et lance un smoke test de l’application installée. Celui-ci vérifie le lancement, quelques actions accessibles, la persistance d’une macro vide, la seconde instance et la fermeture.
 
-Depuis `frontend`, exécutez les vérifications frontend, puis construisez l’installateur NSIS x64 :
+Ces tests automatisés ne valident pas les pixels de l’interface, les raccourcis globaux réels, le traitement des clics par le jeu ni un bot Telegram en service. Avant distribution, vérifiez sur Windows l’enregistrement et le replay dans CoC, le mode arrière-plan et l’arrêt lorsque sa fenêtre disparaît, les raccourcis, Telegram et la capture d’écran. Un succès de `PostMessageW` signifie que Windows a accepté un message dans la file de la fenêtre ciblée; cela ne prouve pas que le jeu l’a traité.
+
+## 📦 Construire et distribuer l’installateur
+
+Depuis `frontend`, après installation des dépendances :
 
 ```powershell
-npm ci
-npm run lint
-npm run typecheck
-npm test
 cargo tauri build --bundles nsis --target x86_64-pc-windows-msvc
 ```
 
-`cargo tauri build` exécute aussi `npm run build` selon `frontend/src-tauri/tauri.conf.json`. L’installateur est produit sous `frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/` avec un nom se terminant par `-setup.exe`. L’option `--bundles nsis` limite cette commande à NSIS, même si la configuration permet aussi MSI.
+La configuration exécute aussi `npm run build`. L’installateur `*-setup.exe` est créé dans `frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`. NSIS est utilisé ici même si la configuration Tauri propose aussi MSI.
 
-L’installateur NSIS utilise le mode d’installation par utilisateur par défaut. Les données AUTO-COC sont conservées dans `%LOCALAPPDATA%\AUTO-COC`; le token Telegram est protégé pour le compte Windows courant. Le runtime WebView2 peut être installé pendant l’installation si nécessaire.
+Les installations NSIS utilisent le mode par utilisateur. AUTO-COC conserve ses données dans `%LOCALAPPDATA%\AUTO-COC`; le token Telegram est protégé pour le compte Windows courant. Les anciennes versions Python plaçaient leurs macros et réglages dans leur dossier `config/`; AUTO-COC v4 ne les importe pas automatiquement. Faites-en une copie avant de supprimer l’ancien projet.
 
-Les versions précédentes stockaient les macros et réglages dans le dossier `config/` de l’ancien projet. Cette version ne les importe pas automatiquement; conservez une copie de ces fichiers et recréez manuellement les macros ou réglages dont vous avez besoin.
+### Générer et vérifier un installateur candidat
 
-## CI et publication
-
-Le workflow [Windows desktop CI](.github/workflows/desktop.yml) vérifie le frontend et le backend sur Windows x64, construit l’installateur NSIS et exécute un smoke test d’installation, de lancement, d’actions accessibles dans l’interface et de fermeture. Après réussite des vérifications et du smoke test, l’installateur est joint à l’exécution de pull request sous `auto-coc-windows-x64-nsis`; la rétention configurée est de 14 jours, sous réserve des politiques du dépôt ou de l’organisation. Un push sur `main` construit et vérifie le paquet, mais ne conserve pas d’artefact. Aucun GitHub Release n’est créé et l’application n’est pas publiée.
-
-### Générer et valider un installateur candidat
-
-La version applicative est actuellement `4.0.0` dans `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/Cargo.toml` et `backend/Cargo.toml`. Depuis `frontend`, lancez la commande de build de la section précédente. Le fichier `*-setup.exe` se trouve dans `frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
-
-Pour valider ce paquet localement, lancez le smoke test depuis une session Windows interactive, avec un compte de test où `%LOCALAPPDATA%\com.autococ.desktop` n’existe pas. Depuis la racine du dépôt, lancez le test sur un dossier temporaire existant :
+La version applicative est `4.0.0` dans `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/Cargo.toml` et `backend/Cargo.toml`. Pour lancer le smoke test local, ouvrez une session Windows interactive avec un profil de test où `%LOCALAPPDATA%\com.autococ.desktop` n’existe pas, puis exécutez depuis la racine :
 
 ```powershell
 $env:RUNNER_TEMP = $env:TEMP
 .\.github\scripts\windows-runtime-smoke.ps1 -BundleDirectory .\frontend\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis
 ```
 
-Le script installe le paquet dans un espace temporaire et tente de le désinstaller à la fin. Il vérifie le démarrage de la fenêtre, la création et le renommage d’une macro via l’interface accessible, la persistance du fichier, le lancement d’une seconde instance et la fermeture propre. Il prend un instantané des processus Chrome/Edge avant le démarrage, puis vérifie après les actions qu’aucun nouveau processus n’est encore actif; un navigateur lancé puis fermé avant ce contrôle ne serait pas détecté. Il refuse d’exécuter le test si le profil Tauri existe déjà. Ce smoke test ne valide pas le rendu visuel, les raccourcis globaux, ni l’enregistrement et la lecture réels; effectuez aussi les contrôles manuels de la matrice avant toute distribution.
+Le script installe le paquet dans un espace temporaire et tente de le désinstaller ensuite. Il refuse de démarrer si le profil Tauri existe déjà. Le smoke ne remplace pas les vérifications manuelles d’enregistrement, de replay et de raccourcis dans le jeu.
 
-Avant de distribuer une version, installez l’artefact sur une machine Windows propre, avec un compte utilisateur standard, et vérifiez le démarrage, l’absence de terminal et de navigateur externe, les raccourcis globaux, l’enregistrement/la lecture, la fermeture, ainsi que la conservation des macros et réglages après mise à niveau. Testez aussi l’installation lorsque WebView2 est absent, avec et sans accès réseau selon le mode de distribution choisi.
+Le workflow conserve l’installateur comme artefact d’une pull request pendant 14 jours, selon les politiques GitHub du dépôt. Un push sur `main` construit et vérifie le paquet sans conserver d’artefact. Le workflow ne publie pas l’application et ne crée pas de GitHub Release.
 
-Avant une release publique, mettez à jour de façon cohérente les versions ci-dessus, configurez la signature Authenticode en gardant certificat et clé privée hors du dépôt, puis ajoutez et validez une procédure de publication qui crée une GitHub Release et y attache l’installateur. Le workflow actuel n’a que la permission `contents: read` et ne réalise aucune de ces étapes. Sans signature, Windows SmartScreen peut avertir l’utilisateur; une signature ne garantit pas qu’un nouveau certificat aura immédiatement une réputation SmartScreen. L’[updater Tauri](https://v2.tauri.app/plugin/updater/) n’est pas configuré et n’est pas fourni par le workflow actuel.
+Avant une distribution publique, mettez à jour ensemble les versions, configurez une signature Authenticode en gardant la clé privée hors du dépôt, et validez une procédure de publication qui attache l’installateur à une GitHub Release. Sans signature, Windows SmartScreen peut afficher un avertissement. L’updater Tauri n’est pas configuré.
 
-## Structure du dépôt
+## 📁 Structure du dépôt
 
 ```text
-backend/            logique métier Rust, stockage, accès Windows et tests
-frontend/           interface React/TypeScript
-frontend/src-tauri/ fenêtre desktop, commandes Tauri et packaging Windows
-config/             icône et ressources suivies
+assets/                 capture de l’application utilisée dans ce README
+backend/                logique métier Rust, stockage et accès Windows
+frontend/src/           interface React et TypeScript
+frontend/src-tauri/     fenêtre desktop, commandes et packaging Tauri
+  icons/icon.ico        icône du paquet Windows
 ```
