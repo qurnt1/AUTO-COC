@@ -1,16 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ActionRunner, BackendClient, MacroDetail, MacroStep, MacroSummary, Snapshot } from "../api";
+import type { ActionRunner, BackendClient, MacroDetail, MacroSummary, Snapshot } from "../api";
 import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
 import { OnboardingGuide } from "./OnboardingGuide";
 import { formatDuration } from "./formatDuration";
 import { getOnboardingStage } from "../onboardingStage";
-import {
-  getSequencePageBounds,
-  getTimelineMarkers,
-  nextSequencePageStart,
-  previousSequencePageStart,
-} from "./sequence";
+import { getTimelineMarkers, getTraceNodeClass } from "./sequence";
 
 type DialogState = { kind: "create" } | { kind: "rename"; macro: MacroSummary } | { kind: "delete"; macro: MacroSummary } | null;
 type PageProps = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void };
@@ -34,18 +29,14 @@ export function handleMacroNavigationKey(
   return Math.max(0, Math.min(destination, itemCount - 1));
 }
 
-const eventNames: Record<string, { label: string; icon: "mouse" | "key" | "scroll" | "dots" }> = {
-  mouse_move: { label: "Déplacement", icon: "mouse" },
-  mouse_click: { label: "Clic", icon: "mouse" },
-  scroll: { label: "Défilement", icon: "scroll" },
-  key_down: { label: "Touche enfoncée", icon: "key" },
-  key_up: { label: "Touche relâchée", icon: "key" },
-  nop: { label: "Pause", icon: "dots" },
+const eventNames: Record<string, string> = {
+  mouse_move: "Déplacement",
+  mouse_click: "Clic",
+  scroll: "Défilement",
+  key_down: "Touche enfoncée",
+  key_up: "Touche relâchée",
+  nop: "Pause",
 };
-
-function formatTime(seconds: number): string {
-  return `${Math.max(0, seconds).toFixed(2).replace(".", ",")} s`;
-}
 
 function MacroDialog({ dialog, busy, onClose, onSubmit }: {
   dialog: Exclude<DialogState, null>;
@@ -77,9 +68,16 @@ function MacroDialog({ dialog, busy, onClose, onSubmit }: {
   );
 }
 
-function Sequence({ detail, summary }: { detail: MacroDetail | null; summary: MacroSummary }) {
-  const [pageStart, setPageStart] = useState(0);
+export function Sequence({ detail, summary }: { detail: MacroDetail | null; summary: MacroSummary }) {
   const timelineMarkers = useMemo(() => detail ? getTimelineMarkers(detail.steps) : [], [detail]);
+  const traceCounts = useMemo(() => timelineMarkers.reduce((counts, { step }) => {
+    if (step.type === "mouse_move") counts.movement += 1;
+    else if (step.type === "mouse_click") counts.mouse += 1;
+    else if (step.type.startsWith("key")) counts.keyboard += 1;
+    else counts.other += 1;
+    return counts;
+  }, { movement: 0, mouse: 0, keyboard: 0, other: 0 }), [timelineMarkers]);
+  const traceDescription = `Chronologie condensée, de gauche à droite. Repères affichés : ${traceCounts.movement} fin${traceCounts.movement === 1 ? "" : "s"} de déplacement, ${traceCounts.mouse} clic${traceCounts.mouse === 1 ? "" : "s"} souris, ${traceCounts.keyboard} événement${traceCounts.keyboard === 1 ? "" : "s"} clavier et ${traceCounts.other} autre${traceCounts.other === 1 ? "" : "s"} action${traceCounts.other === 1 ? "" : "s"}.`;
   if (summary.eventCount === 0) {
     return (
       <div className="sequence-empty">
@@ -91,51 +89,19 @@ function Sequence({ detail, summary }: { detail: MacroDetail | null; summary: Ma
   }
   if (!detail) return <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div>;
 
-  const page = getSequencePageBounds(detail.steps.length, pageStart);
-  const steps = detail.steps.slice(page.start, page.end);
-  const pageHasInternalScroll = steps.length > 9;
   return (
     <div className="sequence-wrap">
-      <div className="trace-heading"><span>Déroulé réel</span><span>{detail.steps.length} événements</span></div>
-      <div className="trace-track" aria-hidden="true">
-        {timelineMarkers.map(({ step, index, left }) => <span key={`${index}-${step.t}-${step.type}`} className={`trace-node ${step.type === "mouse_click" ? "is-click" : step.type.startsWith("key") ? "is-key" : ""}`} style={{ left }} title={`${index + 1}. ${eventNames[step.type]?.label ?? step.type}`} />)}
+      <div className="trace-heading"><span>Déroulé réel</span><span>{timelineMarkers.length} repères</span></div>
+      <div className="trace-track" role="img" aria-label={traceDescription}>
+        {timelineMarkers.map(({ step, index, left }) => <span key={`${index}-${step.t}-${step.type}`} className={`trace-node ${getTraceNodeClass(step.type)}`} style={{ left }} title={`${index + 1}. ${eventNames[step.type] ?? step.type}`} />)}
       </div>
-      {pageHasInternalScroll && <p id="sequence-scroll-hint" className="sequence-scroll-hint">Faites défiler la liste pour parcourir cette page.</p>}
-      <ol
-        key={page.start}
-        className="sequence-list"
-        tabIndex={0}
-        aria-label={`Événements ${page.start + 1} à ${page.end} sur ${detail.steps.length}`}
-        aria-describedby={pageHasInternalScroll ? "sequence-scroll-hint" : undefined}
-      >
-        {steps.map((step, index) => <SequenceRow key={`${page.start + index}-${step.t}-${step.type}`} step={step} index={page.start + index} />)}
-      </ol>
-      {detail.steps.length > 8 && (
-        <nav className="sequence-more" aria-label="Navigation des événements">
-          <button className="text-button" type="button" disabled={page.start === 0} onClick={() => setPageStart(previousSequencePageStart(page.start))}>
-            Précédent
-          </button>
-          <span role="status" aria-live="polite" aria-atomic="true">
-            Événements {page.start + 1} à {page.end} sur {detail.steps.length}
-          </span>
-          <button className="text-button" type="button" disabled={page.end >= detail.steps.length} onClick={() => setPageStart(nextSequencePageStart(detail.steps.length, page.start))}>
-            Suivant
-          </button>
-        </nav>
-      )}
+      <ul className="trace-legend" aria-label="Légende de la trace">
+        <li><span className="trace-legend-swatch is-move" aria-hidden="true" />Fin d’un déplacement</li>
+        <li><span className="trace-legend-swatch is-click" aria-hidden="true" />Clic souris</li>
+        <li><span className="trace-legend-swatch is-key" aria-hidden="true" />Touche clavier</li>
+        <li><span className="trace-legend-swatch is-other" aria-hidden="true" />Pause ou défilement</li>
+      </ul>
     </div>
-  );
-}
-
-function SequenceRow({ step, index }: { step: MacroStep; index: number }) {
-  const event = eventNames[step.type] ?? { label: `Événement : ${step.type}`, icon: "dots" as const };
-  return (
-    <li className="sequence-row">
-      <span className="sequence-index">{String(index + 1).padStart(2, "0")}</span>
-      <span className={`sequence-symbol ${step.type === "mouse_click" ? "click" : ""}`}><Icon name={event.icon} size={15} /></span>
-      <span className="sequence-event">{event.label}</span>
-      <span className="sequence-time">{formatTime(step.t)}</span>
-    </li>
   );
 }
 
@@ -307,7 +273,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               <div className="macro-title-line">
                 <h1 tabIndex={-1}>{selected.name}</h1>
               </div>
-              <p>{selected.readable ? "Séquence prête à être examinée ou rejouée." : selected.issue ?? "Cette macro ne peut pas être lue."}</p>
+              {!selected.readable && <p>{selected.issue ?? "Cette macro ne peut pas être lue."}</p>}
               <div className="macro-actions-menu">
                 <button className="text-button" type="button" disabled={!online || active || busy !== null} onClick={() => setDialog({ kind: "rename", macro: selected })}><Icon name="edit" size={15} />Renommer</button>
                 <span className="action-divider" />
@@ -325,6 +291,10 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               </div>
               <p className="recording-note">Après le compte à rebours, laissez l’enregistrement tourner plus de 3 s avant de l’arrêter. Les 3 dernières secondes seront retirées.</p>
               <div className="sequence-panel">
+                {!recordingSelectedMacro && selected.readable && <div className="sequence-summary" role="group" aria-label="Informations sur la macro">
+                  <div className="sequence-summary-item"><span>Événements</span><strong>{selected.eventCount.toLocaleString("fr-FR")}</strong></div>
+                  <div className="sequence-summary-item"><span>Durée enregistrée</span><strong>{formatDuration(selected.durationSeconds)}</strong></div>
+                </div>}
                 {recordingSelectedMacro ? (
                   <div className="recording-progress">
                     <span className={`recording-mark ${recordingProgressPhase}`}><Icon name="record" size={17} /></span>
@@ -367,9 +337,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
               {snapshot.status.kind === "idle" && selected.readable && selected.eventCount > 0 && <p className="play-safety-note"><Icon name="shield" size={14} />{snapshot.settings.allowCocBackgroundPlayback ? "Clash of Clans doit être ouvert; le replay reste ciblé sur sa fenêtre." : "Pour lire, Clash of Clans doit être la fenêtre active."}</p>}
             </section>
 
-            <div className="macro-facts" aria-label="Informations sur la macro">
-              <div><span>Événements</span><strong>{selected.eventCount.toLocaleString("fr-FR")}</strong></div>
-              <div><span>Durée enregistrée</span><strong>{formatDuration(selected.durationSeconds)}</strong></div>
+            <div className="macro-options" role="group" aria-label="Options de la macro">
               <label className={`loop-setting ${active ? "is-muted" : ""}`}>
                 <span className="loop-text"><span>Boucle</span><small>Répéter la lecture</small></span>
                 <input type="checkbox" checked={snapshot.settings.loop} disabled={!online || active || busy !== null} onChange={(event) => run("loop", () => api.updateSettings({ loop: event.target.checked }), event.target.checked ? "Boucle activée." : "Boucle désactivée.")} />

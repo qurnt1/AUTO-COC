@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ActionRunner, BackendClient, Snapshot } from "../api";
-import { Atelier, handleMacroNavigationKey } from "./Atelier";
+import { Atelier, handleMacroNavigationKey, Sequence } from "./Atelier";
 
 const baseSnapshot: Snapshot = {
   revision: 2,
@@ -101,6 +101,80 @@ describe("foreground wait in the workshop", () => {
     expect(html).toContain(">Reprendre</button>");
     expect(html).toContain(">Arrêter la lecture</button>");
     expect(html).not.toContain(">Lire la macro</button>");
+  });
+});
+
+describe("macro trace presentation", () => {
+  it("renders movement endpoints and distinguishes mouse and keyboard markers with an accessible legend", () => {
+    const summary = baseSnapshot.macros[0];
+    const detail = {
+      name: "Récolte",
+      steps: [
+        { t: 0.1, type: "mouse_move", data: { x: 1 } },
+        { t: 0.1, type: "mouse_move", data: { x: 2 } },
+        { t: 0.2, type: "mouse_click", data: null },
+        { t: 0.1, type: "key_down", data: null },
+      ],
+    };
+
+    const html = renderToStaticMarkup(createElement(Sequence, { detail, summary }));
+
+    expect(html.match(/class="trace-node/g)).toHaveLength(3);
+    expect(html).toContain('class="trace-node is-click"');
+    expect(html).toContain('class="trace-node is-key"');
+    expect(html).toContain('aria-label="Légende de la trace"');
+    expect(html).toContain("Fin d’un déplacement");
+    expect(html).toContain("Clic souris");
+    expect(html).toContain("Touche clavier");
+  });
+
+  it("shows raw event count and recorded duration above execution, without a scrollable list or pagination", () => {
+    const snapshot: Snapshot = {
+      ...baseSnapshot,
+      macros: [{ ...baseSnapshot.macros[0], eventCount: 1_234, durationSeconds: 90 }],
+    };
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    const metricsPosition = html.indexOf("sequence-summary");
+    const executionPosition = html.indexOf("run-copy");
+    expect(html).toContain("1 234");
+    expect(html).toContain("1 min 30 s");
+    expect(metricsPosition).toBeGreaterThanOrEqual(0);
+    expect(metricsPosition).toBeLessThan(executionPosition);
+    expect(html).not.toContain("sequence-list");
+    expect(html).not.toContain("sequence-more");
+    expect(html).not.toContain("sequence-scroll-hint");
+    expect(html).not.toContain("Faites défiler la liste");
+    expect(html).not.toContain("Séquence prête à être examinée ou rejouée.");
+  });
+
+  it("keeps the read error visible for a macro that cannot be read", () => {
+    const snapshot: Snapshot = {
+      ...baseSnapshot,
+      macros: [{ ...baseSnapshot.macros[0], readable: false, issue: "Fichier de macro invalide." }],
+    };
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain("Fichier de macro invalide.");
+    expect(html).not.toContain("Séquence prête à être examinée ou rejouée.");
   });
 });
 
