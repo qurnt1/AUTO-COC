@@ -12,7 +12,7 @@ function snapshot(revision: number, elapsedSeconds = 0): Snapshot {
     settings: {
       loop: false,
       cocPath: "",
-      requireCocForeground: false,
+      allowCocBackgroundPlayback: false,
       shortcuts: { toggle: "F1", play: "Ctrl+Shift+1", stop: "Ctrl+Shift+0" },
       telegram: { tokenConfigured: false, paired: false, status: "not_configured", pairingCode: null, pairingExpiresAt: null },
     },
@@ -223,7 +223,7 @@ describe("TauriBackendClient", () => {
     await client.stopRecording();
     await client.startPlayback();
     await client.stopPlayback();
-    await client.updateSettings({ loop: true, cocPath: "C:/CoC.exe", requireCocForeground: true });
+    await client.updateSettings({ loop: true, cocPath: "C:/CoC.exe", allowCocBackgroundPlayback: true });
     await client.updateShortcuts({ toggle: "F2", play: "Ctrl+1", stop: "Ctrl+2" });
     await client.launchCoc();
     await client.saveTelegramToken("secret-test-token");
@@ -248,7 +248,7 @@ describe("TauriBackendClient", () => {
       "open_macros_folder", "quit_application", "shutdown_prepare", "shutdown_confirm", "get_help",
       "get_diagnostics", "complete_onboarding", "screenshot",
     ]);
-    expect(fake.calls[9].args).toEqual({ settings: { loop: true, cocPath: "C:/CoC.exe", requireCocForeground: true } });
+    expect(fake.calls[9].args).toEqual({ settings: { loop: true, cocPath: "C:/CoC.exe", allowCocBackgroundPlayback: true } });
     expect(fake.calls[10].args).toEqual({ shortcuts: { toggle: "F2", play: "Ctrl+1", stop: "Ctrl+2" } });
     expect(fake.calls[20].args).toEqual({ confirmationId: "confirm-1" });
     expect(screenshot.type).toBe("image/png");

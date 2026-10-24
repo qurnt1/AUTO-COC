@@ -13,7 +13,7 @@ const snapshot: Snapshot = {
   settings: {
     loop: false,
     cocPath: "",
-    requireCocForeground: true,
+    allowCocBackgroundPlayback: true,
     shortcuts: { toggle: "F1", play: "Ctrl+Shift+1", stop: "Ctrl+Shift+0" },
     telegram: {
       tokenConfigured: false,
@@ -42,10 +42,10 @@ describe("normalizeShortcut", () => {
 });
 
 describe("Settings", () => {
-  function renderSettings(requireCocForeground: boolean, initialTab: "general" | "shortcuts" | "telegram" = "general", telegram = snapshot.settings.telegram) {
+  function renderSettings(allowCocBackgroundPlayback: boolean, initialTab: "general" | "shortcuts" | "telegram" = "general", telegram = snapshot.settings.telegram) {
     return renderToStaticMarkup(createElement(Settings, {
       api: {} as BackendClient,
-      snapshot: { ...snapshot, settings: { ...snapshot.settings, requireCocForeground, telegram } },
+      snapshot: { ...snapshot, settings: { ...snapshot.settings, allowCocBackgroundPlayback, telegram } },
       busy: null,
       run: (async (_label, action) => action()) as ActionRunner,
       online: true,
@@ -76,27 +76,25 @@ describe("Settings", () => {
     expect(uriField).toBe("googleplaygames://launch/?id=com.supercell.clashofclans&amp;lid=1&amp;pid=1");
   });
 
-  it("explains the CoC-only replay and the automatic pause option", () => {
+  it("explains targeted background playback and its pause fallback", () => {
     const html = renderSettings(true);
 
-    expect(html).toContain("Pause automatique si Clash of Clans perd le premier plan");
-    expect(html).toContain("Le replay et l’enregistrement démarrent seulement si CoC est au premier plan.");
-    expect(html).toContain("Activée, l’option attend jusqu’à 30 s que le jeu soit actif");
-    expect(html).toContain("Désactivée, CoC doit déjà être actif pour démarrer; une perte de focus arrête le replay.");
-    expect(html).toContain("Les entrées restent ciblées sur la fenêtre du jeu.");
-    expect(html).toContain("La capture est limitée à CoC");
+    expect(html).toContain("Autoriser le replay en arrière-plan");
+    expect(html).toContain("Si CoC est ouvert, le replay peut démarrer en arrière-plan et continuer quand vous passez à une autre application.");
+    expect(html).toContain("Les actions sont envoyées à la fenêtre de CoC uniquement.");
+    expect(html).toContain("Si la fenêtre ou le processus disparaît, le replay s’arrête.");
+    expect(html).toContain("Désactivée, la lecture démarre au premier plan puis se met en pause dès que CoC perd le focus.");
     expect(html).toContain('type="checkbox" checked=""');
   });
 
-  it("renders the foreground requirement unchecked when it is disabled", () => {
+  it("renders background replay unchecked when it is disabled", () => {
     const html = renderSettings(false);
-    const control = html.match(/<label class="switch-control"><span class="sr-only">Activer la pause automatique Clash of Clans<\/span>(.*?)<\/label>/)?.[1];
+    const control = html.match(/<label class="switch-control"><span class="sr-only">Autoriser le replay en arrière-plan<\/span>(.*?)<\/label>/)?.[1];
 
     expect(control).toContain('type="checkbox"');
     expect(control).not.toContain("checked");
-    expect(html).toContain("Le replay et l’enregistrement démarrent seulement si CoC est au premier plan.");
-    expect(html).toContain("Les entrées restent ciblées sur la fenêtre du jeu.");
-    expect(html).toContain("les actions souris sont gardées uniquement dans sa zone de jeu.");
+    expect(html).toContain("Désactivée, la lecture démarre au premier plan puis se met en pause dès que CoC perd le focus.");
+    expect(html).toContain("L’enregistrement reste limité au premier plan.");
   });
 
   it("guides bot creation first and unlocks token verification only after saving", () => {

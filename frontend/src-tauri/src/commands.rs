@@ -60,6 +60,10 @@ impl From<ServiceError> for CommandError {
                 "coc_not_foreground",
                 "Affichez Clash of Clans au premier plan avant de démarrer la macro.",
             ),
+            ServiceError::CocWindowUnavailable => Self::new(
+                "coc_window_unavailable",
+                "Ouvrez Clash of Clans avant de démarrer le replay.",
+            ),
             ServiceError::InvalidShortcut => Self::new(
                 "invalid_shortcut",
                 "Le raccourci doit contenir une combinaison de touches prise en charge.",

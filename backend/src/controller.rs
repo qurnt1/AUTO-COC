@@ -56,6 +56,8 @@ pub enum ControllerError {
     NativeInputFailed,
     #[error("Clash of Clans must be the active foreground window")]
     CocNotForeground,
+    #[error("Clash of Clans doit être ouvert pour démarrer le replay")]
+    CocWindowUnavailable,
     #[error("recorded steps could not be saved and remain available for retry")]
     RecordingSavePending,
     #[error("recording reached the event limit and only its collected events were saved")]
@@ -468,7 +470,7 @@ impl Controller {
     async fn monitor_coc_foreground(&self) {
         let operation = {
             let machine = self.machine.lock().await;
-            if machine.closing || !machine.store.settings().require_coc_foreground {
+            if machine.closing {
                 return;
             }
             if machine.foreground_loss_handled
@@ -500,10 +502,7 @@ impl Controller {
 
         {
             let mut machine = self.machine.lock().await;
-            if !machine.store.settings().require_coc_foreground
-                || machine.foreground_loss_handled
-                || !same_operation(&machine.operation, &operation)
-            {
+            if machine.foreground_loss_handled || !same_operation(&machine.operation, &operation) {
                 return;
             }
             machine.foreground_loss_handled = true;
@@ -563,10 +562,7 @@ impl Controller {
         }
 
         let mut machine = self.machine.lock().await;
-        if machine.closing
-            || !machine.store.settings().require_coc_foreground
-            || !same_operation(&machine.operation, &operation)
-        {
+        if machine.closing || !same_operation(&machine.operation, &operation) {
             return;
         }
         if matches!(
@@ -634,7 +630,7 @@ impl Controller {
                 steps,
                 looped,
             } => {
-                let playback_id = match native.start_playback(steps.as_slice(), looped, true).await
+                let playback_id = match native.start_playback(steps.as_slice(), looped, false).await
                 {
                     Ok(playback_id) => playback_id,
                     Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -864,13 +860,13 @@ impl Controller {
         &self,
         loop_playback: Option<bool>,
         coc_path: Option<String>,
-        require_coc_foreground: Option<bool>,
+        allow_coc_background_playback: Option<bool>,
     ) -> Result<Snapshot, ControllerError> {
         let mut machine = self.machine.lock().await;
         ensure_idle(&machine)?;
         machine
             .store
-            .update_settings(loop_playback, coc_path, require_coc_foreground)?;
+            .update_settings(loop_playback, coc_path, allow_coc_background_playback)?;
         self.changed(&mut machine).await
     }
 
@@ -928,19 +924,18 @@ impl Controller {
             .selected_macro()
             .ok_or(StoreError::NotFound)?
             .to_owned();
-        let require_coc_foreground = machine.store.settings().require_coc_foreground;
         let native = self.native.lock().await;
         let native = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?;
         let foreground = native.coc_is_foreground();
-        if require_coc_foreground && !foreground {
+        if !foreground {
             arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
             return self.changed(&mut machine).await;
         }
         ensure_start_foreground(true, foreground)?;
         if let Err(error) = native.start_recording().await {
-            if require_coc_foreground && error.kind() == std::io::ErrorKind::PermissionDenied {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
                 arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
                 return self.changed(&mut machine).await;
             }
@@ -1037,7 +1032,7 @@ impl Controller {
 
     async fn request_playback_resume(&self) -> Result<Snapshot, ControllerError> {
         let mut machine = self.machine.lock().await;
-        if machine.closing || !machine.store.settings().require_coc_foreground {
+        if machine.closing || machine.store.settings().allow_coc_background_playback {
             return Err(ControllerError::InvalidState);
         }
         let Operation::Paused {
@@ -1109,15 +1104,13 @@ impl Controller {
         let macro_name = name.to_owned();
         let steps = Arc::new(macro_file.steps);
         let looped = use_saved_loop && machine.store.settings().loop_playback;
-        let require_coc_foreground = machine.store.settings().require_coc_foreground;
+        let allow_background = machine.store.settings().allow_coc_background_playback;
         let native = self.native.lock().await;
         let native = native
             .as_ref()
             .ok_or(ControllerError::NativeInputUnavailable)?;
         let foreground = native.coc_is_foreground();
-        let should_wait =
-            playback_waits_for_foreground(require_coc_foreground, allow_wait, foreground)?;
-        if should_wait {
+        if playback_waits_for_foreground(allow_background, allow_wait, foreground)? {
             arm_for_foreground(
                 &mut machine,
                 PendingOperation::Playing {
@@ -1128,20 +1121,22 @@ impl Controller {
             );
             return self.changed(&mut machine).await;
         }
-        ensure_start_foreground(true, foreground)?;
-        let pending = (allow_wait && require_coc_foreground).then(|| PendingOperation::Playing {
+        if !allow_background {
+            ensure_start_foreground(true, foreground)?;
+        }
+        let pending = (!allow_background && allow_wait).then(|| PendingOperation::Playing {
             macro_name: macro_name.clone(),
             steps: Arc::clone(&steps),
             looped,
         });
         let playback_id = match native
-            .start_playback(steps.as_slice(), looped, require_coc_foreground)
+            .start_playback(steps.as_slice(), looped, allow_background)
             .await
         {
             Ok(playback_id) => playback_id,
             Err(error)
                 if allow_wait
-                    && require_coc_foreground
+                    && !allow_background
                     && error.kind() == std::io::ErrorKind::PermissionDenied =>
             {
                 if let Some(pending) = pending {
@@ -1149,6 +1144,9 @@ impl Controller {
                     return self.changed(&mut machine).await;
                 }
                 return Err(map_native_error(error));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ControllerError::CocWindowUnavailable);
             }
             Err(error) => return Err(map_native_error(error)),
         };
@@ -1893,13 +1891,13 @@ fn ensure_start_foreground(required: bool, foreground: bool) -> Result<(), Contr
 }
 
 fn playback_waits_for_foreground(
-    require_coc_foreground: bool,
+    allow_background: bool,
     allow_wait: bool,
     foreground: bool,
 ) -> Result<bool, ControllerError> {
-    if foreground {
+    if foreground || allow_background {
         Ok(false)
-    } else if require_coc_foreground && allow_wait {
+    } else if allow_wait {
         Ok(true)
     } else {
         Err(ControllerError::CocNotForeground)
@@ -2074,9 +2072,10 @@ fn playback_failure_message(reason: PlaybackFailure, detail: Option<&str>) -> St
             || "La lecture a été interrompue par une erreur de saisie Windows.".into(),
             |detail| format!("La lecture a échoué. {detail}."),
         ),
-        PlaybackFailure::Release => {
-            "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris.".into()
-        }
+        PlaybackFailure::Release => detail.map_or_else(
+            || "AUTO-COC n’a pas pu relâcher une touche ou un bouton après la lecture. Vérifiez le clavier et la souris.".into(),
+            |detail| format!("AUTO-COC n’a pas pu relâcher une touche ou un bouton. {detail}"),
+        ),
         PlaybackFailure::InputAndRelease => {
             detail.map_or_else(
                 || "La lecture a échoué et AUTO-COC n’a pas pu relâcher une touche ou un bouton. Vérifiez le clavier et la souris.".into(),
@@ -2088,9 +2087,6 @@ fn playback_failure_message(reason: PlaybackFailure, detail: Option<&str>) -> St
 
 fn playback_stop_message(reason: PlaybackStopReason) -> &'static str {
     match reason {
-        PlaybackStopReason::FocusLost => {
-            "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée et ne reprendra pas automatiquement."
-        }
         PlaybackStopReason::TargetLost => {
             "La fenêtre ou le processus Clash of Clans a disparu. La lecture a été arrêtée."
         }
@@ -2279,6 +2275,9 @@ fn native_event_error_message(
         ControllerError::CocNotForeground => Some(
             "Affichez Clash of Clans au premier plan avant de démarrer une macro avec un raccourci.",
         ),
+        ControllerError::CocWindowUnavailable => {
+            Some("Ouvrez Clash of Clans avant de démarrer le replay.")
+        }
         _ if !has_existing_error => Some("Une action clavier n’a pas pu être exécutée."),
         _ => None,
     }
@@ -2912,7 +2911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_guard_setting_cannot_change_during_an_operation() {
+    async fn background_playback_setting_cannot_change_during_an_operation() {
         let dir = tempdir().unwrap();
         let controller = Controller::new(Store::open_at(dir.path()).unwrap());
         {
@@ -2933,7 +2932,7 @@ mod tests {
                 .await
                 .unwrap()
                 .settings
-                .require_coc_foreground
+                .allow_coc_background_playback
         );
     }
 
@@ -3211,6 +3210,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn release_failure_includes_target_loss_detail() {
+        assert_eq!(
+            playback_failure_message(
+                PlaybackFailure::Release,
+                Some(
+                    "La fenêtre Clash of Clans a disparu avant la libération des commandes maintenues."
+                ),
+            ),
+            "AUTO-COC n’a pas pu relâcher une touche ou un bouton. La fenêtre Clash of Clans a disparu avant la libération des commandes maintenues."
+        );
+    }
+
     #[tokio::test]
     async fn playback_input_failure_detail_is_visible_in_snapshot() {
         let dir = tempdir().unwrap();
@@ -3239,17 +3251,18 @@ mod tests {
     }
 
     #[test]
-    fn replay_cannot_start_outside_coc_when_automatic_guard_is_disabled() {
+    fn background_replay_skips_focus_check_but_foreground_only_mode_waits_or_rejects() {
         assert!(matches!(
             playback_waits_for_foreground(false, false, false),
             Err(ControllerError::CocNotForeground)
         ));
         assert!(matches!(
             playback_waits_for_foreground(false, true, false),
-            Err(ControllerError::CocNotForeground)
+            Ok(true)
         ));
         assert!(!playback_waits_for_foreground(false, false, true).unwrap());
-        assert!(playback_waits_for_foreground(true, true, false).unwrap());
+        assert!(!playback_waits_for_foreground(true, true, false).unwrap());
+        assert!(!playback_waits_for_foreground(true, false, false).unwrap());
     }
 
     #[tokio::test]
@@ -3315,36 +3328,6 @@ mod tests {
 
         assert!(matches!(machine.operation, Operation::Idle));
         assert_eq!(machine.last_error, None);
-    }
-
-    #[tokio::test]
-    async fn controller_stop_result_reports_focus_loss_as_safe_stop() {
-        let dir = tempdir().unwrap();
-        let controller = Controller::new(Store::open_at(dir.path()).unwrap());
-        let mut machine = controller.machine.lock().await;
-        machine.operation = Operation::Playing {
-            macro_name: "Focus lost".into(),
-            started: Instant::now(),
-            playback_id: 74,
-        };
-
-        apply_stopped_playback_result(
-            &mut machine,
-            74,
-            Ok(Some(NativeEvent::PlaybackStopped {
-                playback_id: 74,
-                reason: PlaybackStopReason::FocusLost,
-            })),
-        )
-        .unwrap();
-
-        assert!(matches!(machine.operation, Operation::Idle));
-        assert_eq!(
-            machine.last_error.as_deref(),
-            Some(
-                "Clash of Clans n’est plus la fenêtre active. La lecture a été arrêtée et ne reprendra pas automatiquement."
-            )
-        );
     }
 
     #[tokio::test]

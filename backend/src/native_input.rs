@@ -80,22 +80,7 @@ pub enum PlaybackFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackStopReason {
-    FocusLost,
     TargetLost,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ForegroundLossAction {
-    Pause,
-    Stop,
-}
-
-fn foreground_loss_action(pause_on_focus_loss: bool) -> ForegroundLossAction {
-    if pause_on_focus_loss {
-        ForegroundLossAction::Pause
-    } else {
-        ForegroundLossAction::Stop
-    }
 }
 
 fn playback_completion_event(
@@ -120,7 +105,12 @@ fn playback_completion_event(
             } else {
                 PlaybackFailure::Release
             },
-            detail: input_detail,
+            detail: input_detail.or_else(|| {
+                (stop_reason == Some(PlaybackStopReason::TargetLost)).then(|| {
+                    "La fenêtre Clash of Clans a disparu avant la libération des commandes maintenues."
+                        .into()
+                })
+            }),
         }
     } else if input_failed {
         NativeEvent::PlaybackFailed {
@@ -255,17 +245,17 @@ impl NativeInput {
         &self,
         steps: &[Value],
         looped: bool,
-        require_coc_foreground: bool,
+        allow_background_playback: bool,
     ) -> io::Result<u64> {
         #[cfg(windows)]
         {
             self.inner
-                .start_playback(steps, looped, require_coc_foreground)
+                .start_playback(steps, looped, allow_background_playback)
                 .await
         }
         #[cfg(not(windows))]
         {
-            let _ = (steps, looped, require_coc_foreground);
+            let _ = (steps, looped, allow_background_playback);
             Err(unsupported())
         }
     }
@@ -1110,6 +1100,52 @@ mod win {
         is_coc_window_identity(&title, &image_path).then_some((window, process_id, created_at))
     }
 
+    fn playback_target(allow_background_playback: bool) -> io::Result<CocTarget> {
+        if let Some((window, process_id, process_created_at)) = current_foreground_coc_window() {
+            return Ok(CocTarget {
+                window: window as isize,
+                process_id,
+                process_created_at,
+            });
+        }
+        if !allow_background_playback {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Clash of Clans must be the foreground window to start playback",
+            ));
+        }
+
+        let mut candidates = enumerate_coc_windows()?
+            .into_iter()
+            .filter(|window| unsafe { IsWindowVisible(*window) } != 0)
+            .filter_map(|window| {
+                let mut process_id = 0;
+                if unsafe { GetWindowThreadProcessId(window, &mut process_id) } == 0
+                    || process_id == 0
+                {
+                    return None;
+                }
+                let (_, process_created_at) = process_image_and_creation_time(process_id)?;
+                Some(CocTarget {
+                    window: window as isize,
+                    process_id,
+                    process_created_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        single_background_target(&mut candidates)
+    }
+
+    fn single_background_target(candidates: &mut Vec<CocTarget>) -> io::Result<CocTarget> {
+        if candidates.len() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no unique visible Clash of Clans window is available",
+            ));
+        }
+        Ok(candidates.remove(0))
+    }
+
     pub(super) fn coc_windows() -> io::Result<Vec<isize>> {
         enumerate_coc_windows()
             .map(|windows| windows.into_iter().map(|window| window as isize).collect())
@@ -1442,7 +1478,7 @@ mod win {
             &self,
             steps: &[Value],
             looped: bool,
-            require_coc_foreground: bool,
+            allow_background_playback: bool,
         ) -> io::Result<u64> {
             let parsed = parse_steps(steps)?;
             let mut playback = self.shared.playback.lock().await;
@@ -1457,19 +1493,10 @@ mod win {
                 playback.take();
                 joined?;
             }
-            let target = current_foreground_coc_window()
-                .map(|(window, process_id, process_created_at)| CocTarget {
-                    window: window as isize,
-                    process_id,
-                    process_created_at,
-                })
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "Clash of Clans must be the foreground window to start playback",
-                    )
-                })?;
-            ensure_coc_foreground(true, target_is_foreground(target))?;
+            let target = playback_target(allow_background_playback)?;
+            if !allow_background_playback {
+                ensure_coc_foreground(true, target_is_foreground(target))?;
+            }
             let id = self.shared.next_playback_id.fetch_add(1, Ordering::Relaxed);
             let (cancel, cancel_rx) = watch::channel(false);
             let (resume, resume_rx) = watch::channel(());
@@ -1481,7 +1508,7 @@ mod win {
                     parsed,
                     looped,
                     target,
-                    require_coc_foreground,
+                    allow_background_playback,
                     cancel_rx,
                     resume_rx,
                 )
@@ -2123,7 +2150,7 @@ mod win {
         steps: Vec<ReplayStep>,
         looped: bool,
         target: CocTarget,
-        pause_on_focus_loss: bool,
+        allow_background_playback: bool,
         mut cancel: watch::Receiver<bool>,
         mut resume: watch::Receiver<()>,
     ) -> NativeEvent {
@@ -2144,22 +2171,24 @@ mod win {
                 elapsed = elapsed.saturating_add(step.delay);
                 let mut deadline = start + elapsed;
                 'step: loop {
-                    match wait_for_replay_step(deadline, &mut cancel, true, || {
-                        target_is_foreground(target)
-                    })
+                    match wait_for_replay_step(
+                        deadline,
+                        &mut cancel,
+                        !allow_background_playback,
+                        || target_window(target, false).is_ok(),
+                        || target_is_foreground(target),
+                    )
                     .await
                     {
                         ReplayWait::Ready => {}
                         ReplayWait::Cancelled => {
                             break 'playback;
                         }
+                        ReplayWait::TargetLost => {
+                            stop_reason = Some(PlaybackStopReason::TargetLost);
+                            break 'playback;
+                        }
                         ReplayWait::ForegroundLost => {
-                            if foreground_loss_action(pause_on_focus_loss)
-                                == ForegroundLossAction::Stop
-                            {
-                                stop_reason = Some(PlaybackStopReason::FocusLost);
-                                break 'playback;
-                            }
                             match pause_for_foreground(
                                 id,
                                 &shared,
@@ -2188,10 +2217,18 @@ mod win {
                             }
                         }
                     }
-                    if let Err(error) = apply_event(&step.event, &mut guard.held, target) {
+                    if let Err(error) = apply_event(
+                        &step.event,
+                        &mut guard.held,
+                        target,
+                        !allow_background_playback,
+                    ) {
+                        if error.kind() == io::ErrorKind::NotFound {
+                            stop_reason = Some(PlaybackStopReason::TargetLost);
+                            break 'playback;
+                        }
                         if error.kind() == io::ErrorKind::PermissionDenied
-                            && foreground_loss_action(pause_on_focus_loss)
-                                == ForegroundLossAction::Pause
+                            && !allow_background_playback
                         {
                             match pause_for_foreground(
                                 id,
@@ -2395,20 +2432,25 @@ mod win {
     enum ReplayWait {
         Ready,
         Cancelled,
+        TargetLost,
         ForegroundLost,
     }
 
     async fn wait_for_replay_step(
         deadline: tokio::time::Instant,
         cancel: &mut watch::Receiver<bool>,
-        require_coc_foreground: bool,
+        require_foreground: bool,
+        mut target_is_available: impl FnMut() -> bool,
         mut coc_is_foreground: impl FnMut() -> bool,
     ) -> ReplayWait {
         loop {
             if cancel.has_changed().is_err() || *cancel.borrow() {
                 return ReplayWait::Cancelled;
             }
-            if require_coc_foreground && !coc_is_foreground() {
+            if !target_is_available() {
+                return ReplayWait::TargetLost;
+            }
+            if require_foreground && !coc_is_foreground() {
                 return ReplayWait::ForegroundLost;
             }
             let now = tokio::time::Instant::now();
@@ -2431,16 +2473,25 @@ mod win {
         event: &ReplayEvent,
         held: &mut HeldInputs,
         target: CocTarget,
+        require_foreground: bool,
     ) -> io::Result<()> {
         match event {
-            ReplayEvent::Move { point } => send_targeted_mouse_move(target, *point, held),
+            ReplayEvent::Move { point } => {
+                send_targeted_mouse_move(target, *point, held, require_foreground)
+            }
             ReplayEvent::Click {
                 point,
                 button,
                 down,
             } => {
-                let held_position =
-                    send_targeted_mouse_button(target, *point, *button, *down, held)?;
+                let held_position = send_targeted_mouse_button(
+                    target,
+                    *point,
+                    *button,
+                    *down,
+                    held,
+                    require_foreground,
+                )?;
                 if *down {
                     held.buttons.insert(*button, held_position);
                 } else {
@@ -2449,10 +2500,10 @@ mod win {
                 Ok(())
             }
             ReplayEvent::Scroll { point, dx, dy } => {
-                send_targeted_scroll(target, *point, *dx, *dy, held)
+                send_targeted_scroll(target, *point, *dx, *dy, held, require_foreground)
             }
             ReplayEvent::Key { virtual_key, down } => {
-                send_targeted_key(target, *virtual_key, *down, &held.keys)?;
+                send_targeted_key(target, *virtual_key, *down, &held.keys, require_foreground)?;
                 if *down {
                     held.keys.insert(*virtual_key);
                 } else {
@@ -2522,8 +2573,9 @@ mod win {
     fn target_client_point(
         target: CocTarget,
         recorded: RecordedMousePoint,
+        require_foreground: bool,
     ) -> io::Result<(HWND, POINT)> {
-        let window = target_window(target, true)?;
+        let window = target_window(target, require_foreground)?;
         let mut point = POINT {
             x: recorded.x,
             y: recorded.y,
@@ -2584,8 +2636,9 @@ mod win {
         target: CocTarget,
         recorded: RecordedMousePoint,
         held: &HeldInputs,
+        require_foreground: bool,
     ) -> io::Result<()> {
-        let (window, point) = match target_client_point(target, recorded) {
+        let (window, point) = match target_client_point(target, recorded, require_foreground) {
             Ok(target_point) => target_point,
             Err(error) => return ignore_outside_mouse_move(error),
         };
@@ -2595,7 +2648,7 @@ mod win {
             WM_MOUSEMOVE,
             mouse_key_state(held, None),
             pack_window_coordinates(point.x, point.y)?,
-            true,
+            require_foreground,
         )
     }
 
@@ -2605,8 +2658,9 @@ mod win {
         button: MouseButton,
         down: bool,
         held: &HeldInputs,
+        require_foreground: bool,
     ) -> io::Result<(i32, i32)> {
-        let (window, point) = target_client_point(target, recorded)?;
+        let (window, point) = target_client_point(target, recorded, require_foreground)?;
         let lparam = pack_window_coordinates(point.x, point.y)?;
         post_target_message(
             target,
@@ -2614,7 +2668,7 @@ mod win {
             WM_MOUSEMOVE,
             mouse_key_state(held, None),
             lparam,
-            true,
+            require_foreground,
         )?;
         let message = match (button, down) {
             (MouseButton::Left, true) => WM_LBUTTONDOWN,
@@ -2630,7 +2684,7 @@ mod win {
             message,
             mouse_key_state(held, Some((button, down))),
             lparam,
-            true,
+            require_foreground,
         )?;
         Ok((point.x, point.y))
     }
@@ -2641,8 +2695,9 @@ mod win {
         dx: i32,
         dy: i32,
         held: &HeldInputs,
+        require_foreground: bool,
     ) -> io::Result<()> {
-        let (window, client_point) = target_client_point(target, recorded)?;
+        let (window, client_point) = target_client_point(target, recorded, require_foreground)?;
         let mut screen_point = if recorded.window_origin.is_some() {
             client_point
         } else {
@@ -2665,7 +2720,7 @@ mod win {
                 .checked_mul(WHEEL_DELTA)
                 .ok_or_else(|| invalid_input("scroll amount is too large"))?;
             let wparam = mouse_key_state(held, None) | (usize::from(delta as u16) << 16);
-            post_target_message(target, window, message, wparam, lparam, true)?;
+            post_target_message(target, window, message, wparam, lparam, require_foreground)?;
         }
         Ok(())
     }
@@ -2701,8 +2756,9 @@ mod win {
         virtual_key: u16,
         down: bool,
         held: &HashSet<u16>,
+        require_foreground: bool,
     ) -> io::Result<()> {
-        let window = target_window(target, true)?;
+        let window = target_window(target, require_foreground)?;
         let alt_down = [0x12, 0xa4, 0xa5].iter().any(|key| held.contains(key));
         let system_key = alt_down || matches!(virtual_key, 0x12 | 0xa4 | 0xa5);
         let message = match (system_key, down) {
@@ -2732,7 +2788,7 @@ mod win {
             message,
             usize::from(virtual_key),
             (flags | 1) as LPARAM,
-            true,
+            require_foreground,
         )
     }
 
@@ -2841,14 +2897,15 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::{
-            ForegroundLossAction, HeldInputs, MouseButton, NativeEvent, PlaybackFailure,
-            PlaybackPauseResult, RecordedMousePoint, Recording, ReplayWait,
-            append_recording_key_event, append_recording_mouse_button_event,
-            finalized_playback_event, finish_guard_release, foreground_loss_action,
-            invalid_target_window, is_extended_key, join_playback_task, key_release_order,
-            pack_window_coordinates, pause_after_release, playback_completion_event,
-            release_guard_on_drop, release_targeted_inputs_with, shift_replay_timing,
-            signal_playback_resume, target_visibility_allowed, wait_for_replay_step,
+            CocTarget, HeldInputs, MouseButton, NativeEvent, PlaybackFailure, PlaybackPauseResult,
+            RecordedMousePoint, Recording, ReplayWait, Shared, append_recording_key_event,
+            append_recording_mouse_button_event, current_foreground_coc_window,
+            finalized_playback_event, finish_guard_release, invalid_target_window, is_extended_key,
+            join_playback_task, key_release_order, pack_window_coordinates, parse_steps,
+            pause_after_release, playback_completion_event, playback_target, release_guard_on_drop,
+            release_targeted_inputs_with, run_playback, send_targeted_mouse_move,
+            shift_replay_timing, signal_playback_resume, single_background_target,
+            target_is_foreground, target_visibility_allowed, wait_for_replay_step,
         };
         use std::cell::{Cell, RefCell};
         use std::collections::{HashMap, HashSet};
@@ -2898,8 +2955,107 @@ mod win {
         #[test]
         fn hidden_window_is_allowed_for_release_but_not_dispatch() {
             assert!(target_visibility_allowed(false, false, false));
+            assert!(target_visibility_allowed(false, true, false));
             assert!(!target_visibility_allowed(true, false, true));
             assert!(!target_visibility_allowed(true, true, false));
+        }
+
+        #[test]
+        fn background_target_selection_fails_closed_on_missing_or_ambiguous_windows() {
+            let mut candidates = Vec::new();
+            assert_eq!(
+                single_background_target(&mut candidates)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+
+            candidates.push(CocTarget {
+                window: 1,
+                process_id: 2,
+                process_created_at: 3,
+            });
+            assert_eq!(single_background_target(&mut candidates).unwrap().window, 1);
+
+            candidates.extend([
+                CocTarget {
+                    window: 4,
+                    process_id: 5,
+                    process_created_at: 6,
+                },
+                CocTarget {
+                    window: 7,
+                    process_id: 8,
+                    process_created_at: 9,
+                },
+            ]);
+            assert_eq!(
+                single_background_target(&mut candidates)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Clash of Clans open and another application in the foreground; posts one mouse move only"]
+        async fn live_coc_background_target_accepts_mouse_move_and_noop_replay() {
+            assert!(current_foreground_coc_window().is_none());
+            let target = playback_target(true).unwrap();
+            assert!(!target_is_foreground(target));
+            let mut client = super::RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            assert_ne!(
+                unsafe { super::GetClientRect(target.window as super::HWND, &mut client) },
+                0
+            );
+            send_targeted_mouse_move(
+                target,
+                RecordedMousePoint {
+                    x: client.right / 2,
+                    y: client.bottom / 2,
+                    window_origin: Some((0, 0)),
+                },
+                &HeldInputs::default(),
+                false,
+            )
+            .unwrap();
+            let steps = parse_steps(&[serde_json::json!({
+                "t": 0.25,
+                "type": "nop",
+                "data": {}
+            })])
+            .unwrap();
+            let (_cancel, cancel_rx) = watch::channel(false);
+            let (_resume, resume_rx) = watch::channel(());
+            let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+            let shared = Arc::new(Shared {
+                recording: std::sync::Mutex::new(None),
+                coc_identity_valid: std::sync::atomic::AtomicBool::new(false),
+                coc_window: std::sync::atomic::AtomicIsize::new(0),
+                coc_process_id: std::sync::atomic::AtomicU32::new(0),
+                coc_process_created_at: std::sync::atomic::AtomicU64::new(0),
+                shortcuts: std::sync::Mutex::new(
+                    super::super::parse_shortcuts(&super::super::ShortcutSettings::default())
+                        .unwrap(),
+                ),
+                injected_keys: std::sync::Mutex::new(HashSet::new()),
+                suppressed_hotkeys: std::sync::Mutex::new(HashMap::new()),
+                events,
+                playback: super::AsyncMutex::new(None),
+                next_playback_id: std::sync::atomic::AtomicU64::new(1),
+            });
+
+            let terminal =
+                run_playback(shared, 1, steps, false, target, true, cancel_rx, resume_rx).await;
+
+            assert_eq!(terminal, NativeEvent::PlaybackEnded { playback_id: 1 });
         }
 
         #[test]
@@ -2965,12 +3121,6 @@ mod win {
             assert!(result.is_err());
             assert!(held.keys.is_empty());
             assert_eq!(held.buttons, HashMap::from([(MouseButton::Left, (10, 20))]));
-        }
-
-        #[test]
-        fn focus_loss_policy_only_selects_pause_or_safe_stop() {
-            assert_eq!(foreground_loss_action(true), ForegroundLossAction::Pause);
-            assert_eq!(foreground_loss_action(false), ForegroundLossAction::Stop);
         }
 
         #[test]
@@ -3110,17 +3260,43 @@ mod win {
         }
 
         #[tokio::test]
-        async fn playback_wait_cancels_as_soon_as_focus_is_lost() {
+        async fn foreground_only_playback_pauses_when_focus_is_lost() {
             let (_cancel_tx, mut cancel) = watch::channel(false);
             let result = wait_for_replay_step(
                 tokio::time::Instant::now() + Duration::from_secs(10),
                 &mut cancel,
                 true,
+                || true,
                 || false,
             )
             .await;
 
             assert!(matches!(result, ReplayWait::ForegroundLost));
+        }
+
+        #[tokio::test]
+        async fn background_playback_ignores_focus_loss_but_stops_when_target_disappears() {
+            let (_cancel_tx, mut cancel) = watch::channel(false);
+            let result = wait_for_replay_step(
+                tokio::time::Instant::now(),
+                &mut cancel,
+                false,
+                || true,
+                || false,
+            )
+            .await;
+            assert!(matches!(result, ReplayWait::Ready));
+
+            let (_cancel_tx, mut cancel) = watch::channel(false);
+            let result = wait_for_replay_step(
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                &mut cancel,
+                false,
+                || false,
+                || false,
+            )
+            .await;
+            assert!(matches!(result, ReplayWait::TargetLost));
         }
 
         #[tokio::test]
@@ -3561,13 +3737,6 @@ mod tests {
             }
         );
         assert_eq!(
-            playback_completion_event(4, false, false, Some(PlaybackStopReason::FocusLost), None,),
-            NativeEvent::PlaybackStopped {
-                playback_id: 4,
-                reason: PlaybackStopReason::FocusLost,
-            }
-        );
-        assert_eq!(
             playback_completion_event(4, false, false, Some(PlaybackStopReason::TargetLost), None,),
             NativeEvent::PlaybackStopped {
                 playback_id: 4,
@@ -3575,10 +3744,10 @@ mod tests {
             }
         );
         assert!(matches!(
-            playback_completion_event(4, false, true, Some(PlaybackStopReason::FocusLost), None,),
+            playback_completion_event(4, false, true, Some(PlaybackStopReason::TargetLost), None,),
             NativeEvent::PlaybackFailed {
                 reason: PlaybackFailure::Release,
-                detail: None,
+                detail: Some(_),
                 ..
             }
         ));

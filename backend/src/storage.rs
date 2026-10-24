@@ -213,7 +213,7 @@ impl Store {
         &mut self,
         loop_playback: Option<bool>,
         coc_path: Option<String>,
-        require_coc_foreground: Option<bool>,
+        allow_coc_background_playback: Option<bool>,
     ) -> Result<(), StoreError> {
         if coc_path
             .as_ref()
@@ -223,10 +223,8 @@ impl Store {
         }
         let old_loop_playback = self.state.settings.loop_playback;
         let old_coc_path = self.state.settings.coc_path.clone();
-        let old_require_coc_foreground = self.state.settings.require_coc_foreground;
-        let had_loop = self.state.present.contains("loop");
-        let had_coc_path = self.state.present.contains("cocPath");
-        let had_require_coc_foreground = self.state.present.contains("requireCocForeground");
+        let old_allow_coc_background_playback = self.state.settings.allow_coc_background_playback;
+        let old_present = self.state.present.clone();
         if let Some(value) = loop_playback {
             self.state.settings.loop_playback = value;
             self.state.present.insert("loop".into());
@@ -235,23 +233,18 @@ impl Store {
             self.state.settings.coc_path = value;
             self.state.present.insert("cocPath".into());
         }
-        if let Some(value) = require_coc_foreground {
-            self.state.settings.require_coc_foreground = value;
-            self.state.present.insert("requireCocForeground".into());
+        if let Some(value) = allow_coc_background_playback {
+            self.state.settings.allow_coc_background_playback = value;
+            self.state
+                .present
+                .insert("allowCocBackgroundPlayback".into());
+            self.state.present.remove("requireCocForeground");
         }
         if let Err(error) = self.persist_settings() {
             self.state.settings.loop_playback = old_loop_playback;
             self.state.settings.coc_path = old_coc_path;
-            self.state.settings.require_coc_foreground = old_require_coc_foreground;
-            if !had_loop {
-                self.state.present.remove("loop");
-            }
-            if !had_coc_path {
-                self.state.present.remove("cocPath");
-            }
-            if !had_require_coc_foreground {
-                self.state.present.remove("requireCocForeground");
-            }
+            self.state.settings.allow_coc_background_playback = old_allow_coc_background_playback;
+            self.state.present = old_present;
             return Err(error);
         }
         Ok(())
@@ -1043,30 +1036,37 @@ mod tests {
     }
 
     #[test]
-    fn new_install_defaults_guard_on_but_legacy_missing_field_stays_off() {
+    fn background_replay_defaults_on_and_persists_the_new_setting_name() {
         let dir = tempdir().unwrap();
         let store = Store::open_at(dir.path()).unwrap();
-        assert!(store.settings().require_coc_foreground);
+        assert!(store.settings().allow_coc_background_playback);
         let settings_path = store.settings_path.clone();
         let mut old_json = serde_json::to_value(&store.state).unwrap();
         old_json["settings"]
             .as_object_mut()
             .unwrap()
-            .remove("requireCocForeground");
+            .remove("allowCocBackgroundPlayback");
         fs::write(&settings_path, serde_json::to_vec(&old_json).unwrap()).unwrap();
 
         let mut store = Store::open_at(dir.path()).unwrap();
-        assert!(!store.settings().require_coc_foreground);
+        assert!(store.settings().allow_coc_background_playback);
         store.update_settings(None, None, Some(false)).unwrap();
         drop(store);
         let store = Store::open_at(dir.path()).unwrap();
-        assert!(!store.settings().require_coc_foreground);
+        assert!(!store.settings().allow_coc_background_playback);
         assert!(
             !read_settings(&settings_path)
                 .unwrap()
                 .settings
-                .require_coc_foreground
+                .allow_coc_background_playback
         );
+        let value: Value = serde_json::from_slice(&fs::read(settings_path).unwrap()).unwrap();
+        assert!(
+            value["settings"]
+                .get("allowCocBackgroundPlayback")
+                .is_some()
+        );
+        assert!(value["settings"].get("requireCocForeground").is_none());
     }
 
     #[test]
@@ -1332,7 +1332,7 @@ mod tests {
 
         let store = Store::open_at(dir.path()).unwrap();
 
-        assert!(store.settings().require_coc_foreground);
+        assert!(store.settings().allow_coc_background_playback);
         assert_eq!(
             fs::metadata(manifest).unwrap().len(),
             MAX_PLACEHOLDER_MANIFEST_BYTES + 1

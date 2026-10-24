@@ -12,7 +12,7 @@ const baseSnapshot: Snapshot = {
   settings: {
     loop: false,
     cocPath: "",
-    requireCocForeground: true,
+    allowCocBackgroundPlayback: true,
     shortcuts: { toggle: "F1", play: "Ctrl+Shift+1", stop: "Ctrl+Shift+0" },
     telegram: {
       tokenConfigured: false,
@@ -183,13 +183,13 @@ describe("first-use guide and macro selection", () => {
     }));
 
     expect(html).toContain("Première utilisation · étape 3 sur 3");
-    expect(html).toContain("La séquence est prête. Clash of Clans doit être la fenêtre active pour la lire.");
+    expect(html).toContain("La séquence est prête. Ouvrez Clash of Clans; le replay arrière-plan s’active dans Réglages &gt; Général.");
     expect(html).toContain(">Aller au bouton Lire</button>");
     expect(html).toContain('id="play-macro-button"');
     expect(html).toContain(">Lire la macro</button>");
     expect(html.match(/>Lire la macro<\/button>/g)).toHaveLength(1);
     expect(html).toContain(">Terminer le guide</button>");
-    expect(html).toContain("Pour lire, Clash of Clans doit être la fenêtre active.");
+    expect(html).toContain("Clash of Clans doit être ouvert; le replay reste ciblé sur sa fenêtre.");
   });
 
   it("keeps both creation actions without repeating instructions during onboarding", () => {

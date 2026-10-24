@@ -37,7 +37,7 @@ export function OnboardingGuide({ mode, stage = "create", disabled, busy, onPrim
     create: "Donnez un nom à la macro que vous allez enregistrer.",
     select: "Choisissez une macro lisible dans la bibliothèque.",
     record: "Après le compte à rebours, enregistrez plus de 3 s. Les 3 dernières secondes sont retirées.",
-    play: "La séquence est prête. Clash of Clans doit être la fenêtre active pour la lire.",
+    play: "La séquence est prête. Ouvrez Clash of Clans; le replay arrière-plan s’active dans Réglages > Général.",
   };
 
   return (

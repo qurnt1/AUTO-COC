@@ -118,7 +118,7 @@ impl DesktopRuntime {
             .set_settings(
                 settings.loop_playback,
                 settings.coc_path,
-                settings.require_coc_foreground,
+                settings.allow_coc_background_playback,
             )
             .await?)
     }

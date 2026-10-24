@@ -173,7 +173,7 @@ export class TauriBackendClient implements BackendClient {
     return this.snapshotCommand("stop_playback");
   }
 
-  updateSettings(settings: { loop?: boolean; cocPath?: string; requireCocForeground?: boolean }): Promise<Snapshot> {
+  updateSettings(settings: { loop?: boolean; cocPath?: string; allowCocBackgroundPlayback?: boolean }): Promise<Snapshot> {
     return this.snapshotCommand("patch_settings", { settings });
   }
 

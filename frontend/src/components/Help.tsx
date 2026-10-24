@@ -7,7 +7,7 @@ import type { SettingsTab } from "./Settings";
 
 const quickGuides: { title: string; body: string; action: string; destination: "atelier" | "settings"; settingsTab?: SettingsTab }[] = [
   { title: "Créer une macro", body: "Nommez-la, enregistrez plus de 3 s, puis arrêtez. Les 3 dernières secondes sont retirées.", action: "Ouvrir l’atelier", destination: "atelier" },
-  { title: "Lire une macro", body: "Choisissez une séquence prête. Clash of Clans doit être au premier plan.", action: "Ouvrir l’atelier", destination: "atelier" },
+  { title: "Lire une macro", body: "Choisissez une séquence prête et vérifiez que Clash of Clans est ouvert. Le replay peut continuer en arrière-plan si l’option est activée.", action: "Ouvrir l’atelier", destination: "atelier" },
   { title: "Piloter avec Telegram", body: "Créez le bot avec @BotFather (/newbot). Dans Réglages > Telegram, entrez le token (l’identifiant du bot est facultatif), vérifiez-le, puis générez la commande d’appairage et envoyez-la au bot.", action: "Configurer Telegram", destination: "settings", settingsTab: "telegram" },
 ];
 
@@ -117,7 +117,7 @@ export function Help({ api, snapshot, busy, run, navigate, online, onResumeOnboa
             <details className="safety-details">
               <summary>Voir les détails de sûreté<Icon name="chevron" size={15} /></summary>
               <div>
-                <p>Le replay démarre uniquement si Clash of Clans est au premier plan et reste ciblé sur sa fenêtre. Si le jeu perd le focus, AUTO-COC libère les commandes maintenues puis met en pause ou arrête la lecture selon l’option des réglages. Aucune entrée n’est envoyée à une autre application.</p>
+                <p>Avec l’option activée, le replay démarre quand une fenêtre Clash of Clans reconnue est ouverte et continue si vous passez à une autre application. Les actions vont à cette fenêtre uniquement, sans injection globale. Désactivée, le replay démarre seulement au premier plan, libère les commandes maintenues puis se met en pause si le focus change. Si la fenêtre ou le processus disparaît, la lecture s’arrête. Google Play Games peut toutefois ignorer les messages ciblés.</p>
                 <p>La capture démarre avec CoC au premier plan. Les nouveaux appuis clavier et clics sont capturés dans CoC; si le focus change, leurs relâchements restent enregistrés pour éviter une touche ou un bouton bloqué. Les actions souris sont limitées à sa zone de jeu. Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge; les anciennes macros gardent les coordonnées écran. Les déplacements souris hors zone sont ignorés, mais un clic ou un défilement hors zone arrête le replay.</p>
                 <p>La capture commence après 3 secondes; à l’arrêt, les 3 dernières secondes sont retirées. Il faut donc laisser enregistrer plus de 3 secondes pour garder une séquence.</p>
                 <p>Google Play Games peut ignorer les messages ciblés. Un crash du jeu Android peut rester invisible si sa fenêtre hôte demeure ouverte.</p>

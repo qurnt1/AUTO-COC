@@ -364,7 +364,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                   <button id="play-macro-button" className="button primary play-button" type="button" onClick={() => run("play", () => api.startPlayback(), "Demande de lecture envoyée.")} disabled={!online || !selected.readable || !selected.eventCount || busy !== null}><Icon name="play" size={15} />Lire la macro</button>
                 )}
               </div>
-              {snapshot.status.kind === "idle" && selected.readable && selected.eventCount > 0 && <p className="play-safety-note"><Icon name="shield" size={14} />Pour lire, Clash of Clans doit être la fenêtre active.</p>}
+              {snapshot.status.kind === "idle" && selected.readable && selected.eventCount > 0 && <p className="play-safety-note"><Icon name="shield" size={14} />{snapshot.settings.allowCocBackgroundPlayback ? "Clash of Clans doit être ouvert; le replay reste ciblé sur sa fenêtre." : "Pour lire, Clash of Clans doit être la fenêtre active."}</p>}
             </section>
 
             <div className="macro-facts" aria-label="Informations sur la macro">

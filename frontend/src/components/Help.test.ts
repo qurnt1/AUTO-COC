@@ -35,7 +35,7 @@ describe("help page", () => {
     expect(html).toContain('aria-label="Configurer Telegram : Piloter avec Telegram"');
     expect(html).toContain("enregistrez plus de 3 s");
     expect(html).toContain("Les 3 dernières secondes sont retirées.");
-    expect(html).toContain("Clash of Clans doit être au premier plan.");
+    expect(html).toContain("Le replay peut continuer en arrière-plan si l’option est activée.");
     expect(html).toContain("leurs relâchements restent enregistrés pour éviter une touche ou un bouton bloqué");
     expect(html).toContain("Voir les détails de sûreté");
     expect(html).toContain("Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge");
@@ -134,7 +134,7 @@ describe("help page", () => {
 
     expect(html).toContain("Étape active · 3 sur 3");
     expect(html).toContain('<h2 id="onboarding-title">Lire dans Clash of Clans</h2>');
-    expect(html).toContain("La séquence est prête. Clash of Clans doit être la fenêtre active pour la lire.");
+    expect(html).toContain("La séquence est prête. Ouvrez Clash of Clans; le replay arrière-plan s’active dans Réglages &gt; Général.");
     expect(html).toContain('aria-label="Progression du guide, étape 3 sur 3"');
   });
 });

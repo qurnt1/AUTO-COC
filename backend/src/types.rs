@@ -34,12 +34,12 @@ impl Default for Help {
                     body: "La lecture rejoue les entrées clavier et souris enregistrées. Gardez l’application ouverte pendant une opération et utilisez Arrêter dès qu’un replay ne se déroule pas comme prévu.".into(),
                 },
                 HelpSection {
-                    title: "Garde du premier plan".into(),
+                    title: "Replay en arrière-plan".into(),
                     body: concat!(
-                        "L’enregistrement et le replay démarrent uniquement quand CoC est reconnu au premier plan. Quand la pause automatique est activée, une action lancée depuis l’atelier peut attendre jusqu’à 30 secondes que Clash of Clans passe au premier plan. Les raccourcis et Telegram ne patientent pas. Le replay envoie ses actions uniquement à la fenêtre du jeu, même si l’option est désactivée. Google Play Games peut ignorer ces actions ciblées.\n\n",
-                        "Si CoC perd le premier plan pendant un replay, AUTO-COC relâche les touches et boutons maintenus. L’option activée met ensuite le replay en pause; désactivée, elle l’arrête. Si la libération échoue, le replay s’arrête avec une erreur. Pour reprendre au même point, choisissez « Reprendre », puis retournez dans le jeu. « Annuler la reprise » garde le replay en pause. Vous pouvez l’arrêter depuis l’atelier, avec le raccourci Arrêter, Telegram STOP ou en fermant l’application.\n\n",
-                        "Avec la pause activée, une perte de focus pendant la capture arrête l’enregistrement et sauvegarde les actions déjà capturées. Si la sauvegarde échoue, utilisez Arrêter pour réessayer.\n\n",
-                        "La capture est limitée à CoC; les actions souris sont gardées uniquement dans sa zone de jeu. Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge. Les anciennes macros gardent les coordonnées écran; les déplacements souris hors zone sont ignorés, mais un clic ou un défilement hors zone arrête le replay. Un crash interne du jeu peut ne pas être détecté si la fenêtre Google Play Games reste ouverte avec le même titre."
+                        "L’enregistrement commence uniquement quand CoC est au premier plan et s’arrête si le focus est perdu. Avec l’option activée, le replay peut démarrer dès qu’une fenêtre Clash of Clans reconnue est ouverte et continue si une autre application passe au premier plan. Désactivée, la lecture démarre seulement au premier plan; si CoC perd le focus, elle se met en pause et attend son retour. Les actions sont postées uniquement à la fenêtre ciblée du jeu, sans injection clavier ou souris globale. Google Play Games peut ignorer ces messages.\n\n",
+                        "Si la fenêtre ou le processus ciblé disparaît, le replay s’arrête. AUTO-COC tente de relâcher les touches et boutons maintenus sur cette même fenêtre; si elle est déjà détruite, cette libération peut échouer. Pour reprendre une lecture mise en pause, choisissez « Reprendre », puis retournez dans le jeu. « Annuler la reprise » garde le replay en pause. Vous pouvez aussi l’arrêter depuis l’atelier, avec le raccourci Arrêter, Telegram STOP ou en fermant l’application.\n\n",
+                        "Quand le mode arrière-plan est désactivé, une action lancée depuis l’atelier peut attendre jusqu’à 30 secondes que Clash of Clans passe au premier plan. Les raccourcis et Telegram ne patientent pas. La capture est limitée à CoC; les actions souris sont gardées uniquement dans sa zone de jeu. Si la sauvegarde d’un enregistrement arrêté après une perte de focus échoue, utilisez Arrêter pour réessayer.\n\n",
+                        "Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge. Les anciennes macros gardent les coordonnées écran; les déplacements souris hors zone sont ignorés, mais un clic ou un défilement hors zone arrête le replay. Un crash interne du jeu peut ne pas être détecté si la fenêtre Google Play Games reste ouverte avec le même titre."
                     )
                     .into(),
                 },
@@ -113,8 +113,11 @@ impl Default for TelegramSettings {
 pub struct Settings {
     #[serde(rename = "loop")]
     pub loop_playback: bool,
-    #[serde(default)]
-    pub require_coc_foreground: bool,
+    #[serde(
+        default = "default_background_playback",
+        alias = "requireCocForeground"
+    )]
+    pub allow_coc_background_playback: bool,
     pub coc_path: String,
     pub shortcuts: ShortcutSettings,
     pub telegram: TelegramSettings,
@@ -124,12 +127,16 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             loop_playback: false,
-            require_coc_foreground: true,
+            allow_coc_background_playback: true,
             coc_path: String::new(),
             shortcuts: ShortcutSettings::default(),
             telegram: TelegramSettings::default(),
         }
     }
+}
+
+fn default_background_playback() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -230,7 +237,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_settings_enable_the_guard_but_legacy_settings_without_it_do_not() {
+    fn background_replay_defaults_on_and_accepts_the_previous_setting_name() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "loop": false,
             "cocPath": "",
@@ -245,36 +252,54 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(!settings.require_coc_foreground);
-        assert!(Settings::default().require_coc_foreground);
+        assert!(settings.allow_coc_background_playback);
+        assert!(Settings::default().allow_coc_background_playback);
+
+        let legacy: Settings = serde_json::from_value(serde_json::json!({
+            "loop": false,
+            "requireCocForeground": false,
+            "cocPath": "",
+            "shortcuts": {"toggle": "F1", "play": "Ctrl+Shift+1", "stop": "Ctrl+Shift+0"},
+            "telegram": {
+                "tokenConfigured": false,
+                "paired": false,
+                "status": "not_configured",
+                "pairingCode": null,
+                "pairingExpiresAt": null
+            }
+        }))
+        .unwrap();
+        assert!(!legacy.allow_coc_background_playback);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("allowCocBackgroundPlayback")
+                .is_some()
+        );
     }
 
     #[test]
-    fn help_explains_foreground_guard_pause_and_resume_behavior() {
+    fn help_explains_targeted_background_replay_and_recording_guard() {
         let section = Help::default()
             .sections
             .into_iter()
-            .find(|section| section.title == "Garde du premier plan")
+            .find(|section| section.title == "Replay en arrière-plan")
             .unwrap();
 
         for phrase in [
-            "depuis l’atelier peut attendre jusqu’à 30 secondes",
-            "Les raccourcis et Telegram ne patientent pas",
-            "L’enregistrement et le replay démarrent uniquement quand CoC est reconnu au premier plan",
-            "uniquement à la fenêtre du jeu",
+            "L’enregistrement commence uniquement quand CoC est au premier plan",
+            "continue si une autre application passe au premier plan",
+            "uniquement à la fenêtre ciblée du jeu",
+            "sans injection clavier ou souris globale",
             "Google Play Games peut ignorer",
-            "Si CoC perd le premier plan pendant un replay",
-            "met ensuite le replay en pause",
-            "désactivée, elle l’arrête",
-            "la libération échoue",
+            "Si la fenêtre ou le processus ciblé disparaît",
+            "cette libération peut échouer",
+            "peut attendre jusqu’à 30 secondes",
+            "s’arrête si le focus est perdu",
             "Reprendre",
-            "au même point",
             "Annuler la reprise",
             "Telegram STOP",
             "fermant l’application",
-            "une perte de focus pendant la capture arrête l’enregistrement",
-            "sauvegarde les actions déjà capturées",
-            "La capture est limitée à CoC",
             "Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge",
             "Les anciennes macros gardent les coordonnées écran",
             "les déplacements souris hors zone sont ignorés",
@@ -328,6 +353,7 @@ pub struct MacroFile {
 pub struct SettingsPatch {
     #[serde(rename = "loop")]
     pub loop_playback: Option<bool>,
-    pub require_coc_foreground: Option<bool>,
+    #[serde(alias = "requireCocForeground")]
+    pub allow_coc_background_playback: Option<bool>,
     pub coc_path: Option<String>,
 }
