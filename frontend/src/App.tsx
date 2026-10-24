@@ -33,14 +33,6 @@ function snapshotFrom(value: unknown): Snapshot | null {
   return null;
 }
 
-function statusText(snapshot: Snapshot): string {
-  if (snapshot.status.kind === "waiting_for_foreground") return "En attente de Clash of Clans";
-  if (snapshot.status.kind === "recording") return "Enregistrement en cours";
-  if (snapshot.status.kind === "playing") return "Lecture en cours";
-  if (snapshot.status.kind === "paused") return "Lecture en pause";
-  return "Prêt";
-}
-
 export default function App() {
   if (!isTauri()) {
     return (
@@ -145,7 +137,7 @@ function DesktopApp() {
         } catch (error) {
           if (signal.aborted) return;
           setConnection("disconnected");
-          setConnectionError(error instanceof Error ? error.message : "La connexion locale a été interrompue.");
+          setConnectionError(error instanceof Error ? error.message : "La connexion a été interrompue.");
           await waitBeforeRetry();
         }
       }
@@ -272,7 +264,6 @@ function DesktopApp() {
   }
   const online = connection === "connected";
 
-  const macroState = snapshot ? statusText(snapshot) : connection === "connected" ? "Chargement" : "AUTO-COC indisponible";
   const pageLabel = view === "atelier" ? "Atelier" : view === "settings" ? "Réglages" : "Aide";
 
   return (
@@ -305,11 +296,6 @@ function DesktopApp() {
             {snapshot.macros.length > 5 && <button className="sidebar-more" type="button" onClick={() => navigate("atelier")}>Voir les {snapshot.macros.length - 5} autres</button>}
           </nav>
         ) : <p className="sidebar-empty">Vos macros apparaîtront ici.</p>}
-        <div className="sidebar-spacer" />
-        <button className="local-status" type="button" onClick={() => navigate("help")} aria-label={`État d’AUTO-COC : ${connection === "connected" ? macroState : connection === "connecting" ? "démarrage en cours" : "ne répond pas"}`}>
-          <span className={`connection-mark ${connection}`}><i /></span><span className="local-status-copy"><strong>{connection === "connected" ? macroState : connection === "connecting" ? "Démarrage en cours" : "AUTO-COC ne répond pas"}</strong><small>{connection === "connected" ? "Ce PC · local" : connection === "connecting" ? "Démarrage en cours" : "Voir l’aide"}</small></span><Icon name="chevron" size={14} />
-        </button>
-        <div className="sidebar-version">AUTO-COC <span>·</span> outil local</div>
       </aside>
 
       <div className="page-shell" id="main-content" aria-label={pageLabel} tabIndex={-1}>

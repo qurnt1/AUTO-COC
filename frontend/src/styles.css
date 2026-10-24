@@ -104,9 +104,6 @@ button:disabled { cursor: not-allowed; }
 .sidebar-more { justify-self: start; margin: 5px 0 0 23px; padding: 4px 0; border: 0; color: var(--muted); background: transparent; font-size: 12px; cursor: pointer; }
 .sidebar-more:hover { color: var(--chalk); }
 .sidebar-empty { margin: 12px 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.sidebar-spacer { flex: 1; min-height: 20px; }
-.local-status { display: flex; align-items: center; gap: 9px; width: 100%; padding: 10px 8px; border: 1px solid var(--line); border-radius: 14px; color: inherit; background: var(--panel-soft); text-align: left; cursor: pointer; transition: border-color 160ms ease; }
-.local-status:hover { border-color: var(--accent-border); }
 .connection-mark { display: inline-grid; width: 9px; height: 9px; flex: 0 0 auto; place-items: center; border: 1px solid var(--line); border-radius: 50%; }
 .connection-mark i { width: 4px; height: 4px; border-radius: 50%; background: var(--panel-hover); }
 .connection-mark.connected { border-color: var(--success); }
@@ -114,12 +111,6 @@ button:disabled { cursor: not-allowed; }
 .connection-mark.connecting i { background: var(--accent); }
 .connection-mark.disconnected { border-color: var(--danger); }
 .connection-mark.disconnected i { background: var(--danger); }
-.local-status-copy { display: grid; flex: 1; gap: 3px; min-width: 0; }
-.local-status-copy strong { overflow: hidden; color: var(--chalk); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.local-status-copy small { color: var(--muted-dim); font-size: 11px; }
-.local-status > svg { color: var(--muted); }
-.sidebar-version { padding: 12px 8px 0; color: var(--muted); font-size: 11px; }
-.sidebar-version span { padding: 0 3px; color: var(--muted); }
 .mobile-topbar { display: none; }
 .nav-backdrop { display: none; }
 
@@ -413,14 +404,14 @@ kbd.capture-active { min-width: 160px; border-color: var(--accent-border); color
 .keyboard-reference .section-heading-row { margin-bottom: 14px; }
 .shortcut-reference-row { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); color: var(--chalk); font-size: 12px; }
 .shortcut-reference-row kbd { min-width: 98px; }
-.local-help-icon { color: var(--muted); }
-.local-help-list { margin-top: 13px; border-top: 1px solid var(--line); }
-.local-help-list details { border-bottom: 1px solid var(--line); }
-.local-help-list summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 14px; color: var(--chalk); font-size: 12px; cursor: pointer; list-style: none; }
-.local-help-list summary::-webkit-details-marker { display: none; }
-.local-help-list details[open] summary > svg { transform: rotate(90deg); }
-.local-help-list summary > svg { flex: 0 0 auto; color: var(--muted); transition: transform 140ms ease; }
-.local-help-list details p { max-width: 570px; margin: 0; padding: 0 23px 13px 0; color: var(--muted); font-size: 12px; line-height: 1.55; white-space: pre-line; }
+.detailed-help-icon { color: var(--muted); }
+.detailed-help-list { margin-top: 13px; border-top: 1px solid var(--line); }
+.detailed-help-list details { border-bottom: 1px solid var(--line); }
+.detailed-help-list summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 14px; color: var(--chalk); font-size: 12px; cursor: pointer; list-style: none; }
+.detailed-help-list summary::-webkit-details-marker { display: none; }
+.detailed-help-list details[open] summary > svg { transform: rotate(90deg); }
+.detailed-help-list summary > svg { flex: 0 0 auto; color: var(--muted); transition: transform 140ms ease; }
+.detailed-help-list details p { max-width: 570px; margin: 0; padding: 0 23px 13px 0; color: var(--muted); font-size: 12px; line-height: 1.55; white-space: pre-line; }
 .muted-copy { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .help-callout { padding: 16px 0; border-top: 1px solid var(--line); }
 .callout-mark { display: inline-grid; width: 31px; height: 31px; place-items: center; border: 1px solid var(--accent-border); border-radius: 50%; color: var(--accent); }

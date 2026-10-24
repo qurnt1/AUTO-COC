@@ -217,7 +217,7 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Rubriques des réglages">
           {(["general", "shortcuts", "telegram", "system"] as SettingsTab[]).map((key) => {
-            const labels: Record<SettingsTab, string> = { general: "Général", shortcuts: "Raccourcis", telegram: "Telegram", system: "Actions locales" };
+            const labels: Record<SettingsTab, string> = { general: "Général", shortcuts: "Raccourcis", telegram: "Telegram", system: "Système" };
             const icons: Record<SettingsTab, "sliders" | "keyboard" | "activity" | "shield"> = { general: "sliders", shortcuts: "keyboard", telegram: "activity", system: "shield" };
             return <button key={key} type="button" className={`settings-nav-item ${tab === key ? "active" : ""}`} aria-pressed={tab === key} onClick={() => setTab(key)}><Icon name={icons[key]} size={16} />{labels[key]}{key === "telegram" && telegramVerificationFailed && <i aria-hidden="true" />}</button>;
           })}
@@ -226,7 +226,7 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
         <section className="settings-content">
           {tab === "general" && (
             <>
-              <div className="settings-section-head"><span className="section-kicker">Votre environnement</span><h2>Général</h2><p>Configurez un chemin local ou copiez l’URI Google Play Games affichée sous le champ.</p></div>
+              <div className="settings-section-head"><span className="section-kicker">Votre environnement</span><h2>Général</h2><p>Configurez le chemin de lancement ou copiez l’URI Google Play Games affichée sous le champ.</p></div>
               <form className="setting-row path-setting" onSubmit={(event) => { event.preventDefault(); void run("path", () => api.updateSettings({ cocPath: path.trim() }), "Chemin enregistré."); }}>
                 <div className="setting-row-copy"><strong>Cible de lancement de Clash of Clans</strong><span>Chemin absolu vers l’application ou son raccourci.</span><label className="path-input"><Icon name="folder" size={16} /><input value={path} onChange={(event) => setPath(event.target.value)} placeholder={"Ex. C:\\…\\Clash of Clans.lnk"} aria-label="Cible de lancement de Clash of Clans" /></label><div className="path-uri-note"><span>URI Google Play Games. Faites Tab puis Ctrl+C, ou sélectionnez le texte à la souris.</span><textarea className="path-uri-copy" aria-label="URI Google Play Games à copier" readOnly rows={3} value="googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1" onFocus={(event) => event.currentTarget.select()} /></div></div>
                 <button className="button quiet" type="submit" disabled={!online || busy !== null || path.trim() === snapshot.settings.cocPath}>{busy === "path" ? "Enregistrement…" : "Enregistrer"}</button>
@@ -323,12 +323,12 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
 
           {tab === "system" && (
             <>
-              <div className="settings-section-head"><span className="section-kicker">Outils de cet ordinateur</span><h2>Actions locales</h2><p>Ces actions sont exécutées par AUTO-COC sur ce PC.</p></div>
+              <div className="settings-section-head"><span className="section-kicker">Outils de cet ordinateur</span><h2>Système</h2><p>Ces actions sont exécutées par AUTO-COC sur ce PC.</p></div>
               <div className="setting-row system-action-row">
                 <div className="setting-row-copy"><strong>Capture d’écran</strong><span>L’aperçu reste dans cette page. Aucune image n’est envoyée à Telegram.</span></div>
                 <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void takeScreenshot()}><Icon name="activity" size={15} />{busy === "screenshot" ? "Capture…" : "Capturer l’écran"}</button>
               </div>
-              {screenshotUrl && <figure className="screenshot-preview"><img src={screenshotUrl} alt="Capture d’écran réalisée sur cet ordinateur" /><figcaption><span>Aperçu local</span><a className="text-button" href={screenshotUrl} download="auto-coc-capture.png">Enregistrer l’image</a></figcaption></figure>}
+              {screenshotUrl && <figure className="screenshot-preview"><img src={screenshotUrl} alt="Capture d’écran réalisée sur cet ordinateur" /><figcaption><span>Aperçu</span><a className="text-button" href={screenshotUrl} download="auto-coc-capture.png">Enregistrer l’image</a></figcaption></figure>}
               <div className="setting-row system-action-row">
                 <div className="setting-row-copy"><strong>Dossier des macros</strong><span>Ouvre le dossier de données utilisé par AUTO-COC.</span></div>
                 <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void run("macros-folder", () => api.openMacrosFolder(), "Dossier des macros ouvert.")}><Icon name="folder" size={15} />Ouvrir le dossier</button>

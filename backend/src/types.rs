@@ -45,11 +45,11 @@ impl Default for Help {
                 },
                 HelpSection {
                     title: "Quitter AUTO-COC".into(),
-                    body: "Utilisez Réglages > Outils de cet ordinateur > Quitter AUTO-COC ou fermez complètement la fenêtre de l’application pour arrêter ses services locaux. Arrêtez d’abord tout enregistrement ou replay en cours.".into(),
+                    body: "Utilisez Réglages > Système > Quitter AUTO-COC ou fermez complètement la fenêtre de l’application pour arrêter ses services. Arrêtez d’abord tout enregistrement ou replay en cours.".into(),
                 },
                 HelpSection {
                     title: "Données".into(),
-                    body: "Les macros sont stockées dans le dossier local AUTO-COC de votre profil Windows.".into(),
+                    body: "Les macros sont stockées dans le dossier AUTO-COC de votre profil Windows.".into(),
                 },
             ],
         }
@@ -293,7 +293,7 @@ mod tests {
             .find(|section| section.title == "Données")
             .unwrap();
 
-        assert!(section.body.contains("dossier local AUTO-COC"));
+        assert!(section.body.contains("dossier AUTO-COC"));
         assert!(!section.body.contains("héritées"));
         assert!(!section.body.contains("copiées"));
     }

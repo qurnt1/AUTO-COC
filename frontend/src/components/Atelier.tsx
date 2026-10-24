@@ -375,7 +375,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                 <input type="checkbox" checked={snapshot.settings.loop} disabled={!online || active || busy !== null} onChange={(event) => run("loop", () => api.updateSettings({ loop: event.target.checked }), event.target.checked ? "Boucle activée." : "Boucle désactivée.")} />
               </label>
             </div>
-            <div className="session-facts" aria-label="Statistiques de la session locale">
+            <div className="session-facts" aria-label="Statistiques de la session">
               <span>{snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "resuming" ? "Reprise en attente" : snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "playing" ? "Lecture en attente" : snapshot.status.kind === "playing" ? "Lecture en cours" : snapshot.status.kind === "paused" ? "Lecture en pause" : "Dernière session de lecture"}</span>
               <div><strong>{snapshot.session.cycles.toLocaleString("fr-FR")}</strong><small>cycles</small></div>
               <div><strong>{formatDuration(snapshot.session.elapsedSeconds)}</strong><small>temps de session</small></div>

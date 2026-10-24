@@ -81,7 +81,7 @@ function errorFields(value: unknown): { message?: string; code?: string; status?
 function backendError(error: unknown): BackendClientError {
   if (error instanceof BackendClientError) return error;
   const fields = errorFields(error);
-  return new BackendClientError(fields.message ?? "L’opération locale n’a pas abouti.", fields.status, fields.code);
+  return new BackendClientError(fields.message ?? "L’opération n’a pas abouti.", fields.status, fields.code);
 }
 
 export class TauriBackendClient implements BackendClient {
