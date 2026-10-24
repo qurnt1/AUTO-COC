@@ -17,7 +17,7 @@ const WHEEL_DELTA: i32 = 120;
 const OUTSIDE_COC_CLIENT_AREA: &str =
     "recorded mouse position is outside the Clash of Clans client area";
 
-fn checked_wheel_delta(amount: i32) -> io::Result<i16> {
+pub(crate) fn checked_wheel_delta(amount: i32) -> io::Result<i16> {
     let delta = amount
         .checked_mul(WHEEL_DELTA)
         .ok_or_else(|| invalid_input("scroll amount is too large"))?;
@@ -939,11 +939,17 @@ fn parse_steps(steps: &[Value]) -> io::Result<Vec<ReplayStep>> {
                     down,
                 }
             }
-            "scroll" => ReplayEvent::Scroll {
-                point: read_mouse_point(data)?,
-                dx: read_i32(data.get("dx"))?,
-                dy: read_i32(data.get("dy"))?,
-            },
+            "scroll" => {
+                let dx = read_i32(data.get("dx"))?;
+                let dy = read_i32(data.get("dy"))?;
+                checked_wheel_delta(dx)?;
+                checked_wheel_delta(dy)?;
+                ReplayEvent::Scroll {
+                    point: read_mouse_point(data)?,
+                    dx,
+                    dy,
+                }
+            }
             "key_down" | "key_up" => {
                 let key = data
                     .get("key")
@@ -4255,6 +4261,18 @@ mod tests {
                 dy: 1,
             }
         ));
+    }
+
+    #[test]
+    fn replay_parser_rejects_out_of_range_scroll_before_playback_starts() {
+        let values = [
+            event_value(0.0, "nop", json!({})),
+            event_value(0.1, "scroll", json!({"x":10,"y":20,"dx":274,"dy":1})),
+        ];
+
+        let error = parse_steps(&values).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Windows wheel range"));
     }
 
     #[test]

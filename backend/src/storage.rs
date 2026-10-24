@@ -580,6 +580,13 @@ fn macro_issue(data: &MacroFile) -> Option<String> {
                 .and_then(|number| i32::try_from(number).ok())
                 .is_some()
         };
+        let valid_wheel_amount = |key: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_i64)
+                .and_then(|number| i32::try_from(number).ok())
+                .is_some_and(|amount| crate::native_input::checked_wheel_delta(amount).is_ok())
+        };
         match kind {
             "mouse_move" if !integer("x") || !integer("y") || !valid_window_origin(payload) => {
                 return Some("La position de souris est invalide.".into());
@@ -602,8 +609,8 @@ fn macro_issue(data: &MacroFile) -> Option<String> {
             "scroll"
                 if !integer("x")
                     || !integer("y")
-                    || !integer("dx")
-                    || !integer("dy")
+                    || !valid_wheel_amount("dx")
+                    || !valid_wheel_amount("dy")
                     || !valid_window_origin(payload) =>
             {
                 return Some("Le défilement est invalide.".into());
@@ -1266,6 +1273,34 @@ mod tests {
                 Err(StoreError::InvalidData)
             ));
         }
+    }
+
+    #[test]
+    fn macro_with_out_of_range_scroll_is_unreadable_before_it_can_be_played() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Invalid scroll").unwrap();
+        let path = dir.path().join("macros").join("Invalid scroll.json");
+        let invalid = serde_json::json!({
+            "name": "Invalid scroll",
+            "updated_at": "2026-10-24T00:00:00Z",
+            "sha1": "",
+            "steps": [{
+                "t": 0.1,
+                "type": "scroll",
+                "data": {"x": 10, "y": 20, "dx": 274, "dy": 1}
+            }]
+        });
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+
+        let summary = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.name == "Invalid scroll")
+            .unwrap();
+        assert!(!summary.readable);
+        assert!(store.get_macro("Invalid scroll").is_err());
     }
 
     #[test]

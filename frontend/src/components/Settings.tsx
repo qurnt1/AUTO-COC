@@ -9,6 +9,11 @@ export type SettingsTab = "general" | "shortcuts" | "telegram" | "system";
 type ShortcutName = keyof Snapshot["settings"]["shortcuts"];
 type PairingCode = Pick<PairingPreparation, "code" | "expiresAt">;
 
+export function ScreenshotPreview({ url, busy }: { url: string; busy: string | null }) {
+  if (!url || busy === "screenshot") return null;
+  return <figure className="screenshot-preview"><img src={url} alt="Capture de la fenêtre Clash of Clans" /><figcaption><span>Aperçu CoC</span><a className="text-button" href={url} download="clash-of-clans.png">Enregistrer l’image</a></figcaption></figure>;
+}
+
 const shortcutLabels: Record<ShortcutName, string> = { toggle: "Basculer lecture / arrêt", play: "Lire la macro", stop: "Arrêter" };
 const statusCopy: Record<Snapshot["settings"]["telegram"]["status"], string> = {
   not_configured: "Non configuré",
@@ -183,9 +188,10 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
   }
 
   async function takeScreenshot() {
+    setScreenshotUrl("");
     const blob = await run("screenshot", () => api.getScreenshot(), "Capture de Clash of Clans réalisée. Le jeu est au premier plan.");
     if (!blob) return;
-    setScreenshotUrl((current) => { if (current) URL.revokeObjectURL(current); return URL.createObjectURL(blob); });
+    setScreenshotUrl(URL.createObjectURL(blob));
   }
 
   async function prepareShutdown() {
@@ -328,7 +334,7 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
                 <div className="setting-row-copy"><strong>Capture de Clash of Clans</strong><span>CoC passe au premier plan. L’aperçu reste dans cette page et n’est pas envoyé à Telegram.</span></div>
                 <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void takeScreenshot()}><Icon name="activity" size={15} />{busy === "screenshot" ? "Capture…" : "Capturer CoC"}</button>
               </div>
-              {screenshotUrl && <figure className="screenshot-preview"><img src={screenshotUrl} alt="Capture de la fenêtre Clash of Clans" /><figcaption><span>Aperçu CoC</span><a className="text-button" href={screenshotUrl} download="clash-of-clans.png">Enregistrer l’image</a></figcaption></figure>}
+              <ScreenshotPreview url={screenshotUrl} busy={busy} />
               <div className="setting-row system-action-row">
                 <div className="setting-row-copy"><strong>Dossier des macros</strong><span>Ouvre le dossier de données utilisé par AUTO-COC.</span></div>
                 <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void run("macros-folder", () => api.openMacrosFolder(), "Dossier des macros ouvert.")}><Icon name="folder" size={15} />Ouvrir le dossier</button>

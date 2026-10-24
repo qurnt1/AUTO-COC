@@ -239,8 +239,6 @@ try {
     $createSubmitLabel = "Cr$($accentedE)er la macro"
     $idleStateLabel = 'En attente'
     $cancelWaitLabel = 'Annuler l' + $curlyApostrophe + 'attente'
-    $eventCountLabel = '0 ' + $accentedE + 'v' + $accentedE + 'nements'
-    $renamedMacroEventCountLabel = $RenamedMacroName + ' ' + $eventCountLabel
     $window = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
     if ($window.Current.ProcessId -ne $AppProcessId) {
         throw "The UI Automation window belongs to process $($window.Current.ProcessId), expected AUTO-COC process $AppProcessId."
@@ -255,8 +253,11 @@ try {
             -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
         $null = Wait-ForElement -Root $window -Name 'Enregistrer' `
             -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
-        $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
-            -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
+        $play = Wait-ForElement -Root $window -Name 'Lire la macro' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -IncludeOffscreen
+        if ($play.Current.IsEnabled) {
+            throw 'The empty macro unexpectedly enabled playback after a full restart.'
+        }
         Write-Output "UI Automation confirmed '$RenamedMacroName' reloaded after a full restart with an empty sequence."
         return
     }
@@ -334,8 +335,8 @@ try {
     $null = Wait-ForElement -Root $window -Name $idleStateLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds `
         -StableForMilliseconds 1000
-    $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
-        -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
+    $null = Wait-ForElement -Root $window -Name $RenamedMacroName `
+        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds
     $macroAfterRecording = Read-MacroFile -Path $MacroFilePath
     if ($macroAfterRecording.UpdatedAt -ne $macroBeforeRecording.UpdatedAt) {
         throw 'The macro updated_at timestamp should remain unchanged when the foreground wait is cancelled.'

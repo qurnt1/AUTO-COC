@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ActionRunner, BackendClient, Snapshot } from "../api";
-import { Settings } from "./Settings";
+import { ScreenshotPreview, Settings } from "./Settings";
 import { normalizeShortcut } from "./normalizeShortcut";
 
 const snapshot: Snapshot = {
@@ -82,6 +82,15 @@ describe("Settings", () => {
     expect(html).toContain("Capture de Clash of Clans");
     expect(html).toContain("CoC passe au premier plan.");
     expect(html).toContain(">Capturer CoC</button>");
+  });
+
+  it("hides a previous screenshot while a new capture is pending", () => {
+    const pending = renderToStaticMarkup(createElement(ScreenshotPreview, { url: "blob:previous-capture", busy: "screenshot" }));
+    const ready = renderToStaticMarkup(createElement(ScreenshotPreview, { url: "blob:latest-capture", busy: null }));
+
+    expect(pending).toBe("");
+    expect(ready).toContain("blob:latest-capture");
+    expect(ready).toContain("Aperçu CoC");
   });
 
   it("explains the focus-loss pause and targeted background behavior", () => {

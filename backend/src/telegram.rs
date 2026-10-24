@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -807,13 +807,7 @@ async fn execute_command(
                 {
                     Ok(_) => {
                         if let Some(target) = target {
-                            if client
-                                .delete_message(chat_id, target.message_id)
-                                .await
-                                .is_err()
-                            {
-                                retire_previous_capture_panel(client, chat_id, target).await;
-                            }
+                            retire_previous_capture_panel(client, chat_id, target).await;
                         }
                     }
                     Err(_) => {
@@ -950,17 +944,13 @@ async fn retire_previous_capture_panel(
     chat_id: i64,
     target: ResponseTarget,
 ) {
-    let notice = "📸 Capture envoyée. Les commandes sont sous la nouvelle photo.";
-    let keyboard = Some(empty_keyboard());
-    if target.is_photo {
-        let _ = client
-            .edit_message_caption(chat_id, target.message_id, notice, keyboard)
-            .await;
-    } else {
-        let _ = client
-            .edit_message_text(chat_id, target.message_id, notice, keyboard)
-            .await;
-    }
+    retire_previous_panel(
+        client,
+        chat_id,
+        target,
+        "📸 Capture envoyée. Les commandes sont sous la nouvelle photo.",
+    )
+    .await;
 }
 
 fn controls_markup(target: Option<ResponseTarget>) -> Option<Value> {
@@ -988,30 +978,121 @@ async fn respond_with_id(
     text: &str,
     keyboard: Option<Value>,
 ) -> Option<ResponseTarget> {
+    respond_with_id_using(client, chat_id, target, text, keyboard).await
+}
+
+type ResponseFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+trait ResponseTransport: Sync {
+    fn edit<'a>(
+        &'a self,
+        chat_id: i64,
+        target: ResponseTarget,
+        text: &'a str,
+        keyboard: Option<Value>,
+    ) -> ResponseFuture<'a, Result<(), TelegramError>>;
+
+    fn send<'a>(
+        &'a self,
+        chat_id: i64,
+        text: &'a str,
+        keyboard: Option<Value>,
+    ) -> ResponseFuture<'a, Result<i64, TelegramError>>;
+
+    fn delete<'a>(
+        &'a self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> ResponseFuture<'a, Result<(), TelegramError>>;
+}
+
+impl ResponseTransport for TelegramClient {
+    fn edit<'a>(
+        &'a self,
+        chat_id: i64,
+        target: ResponseTarget,
+        text: &'a str,
+        keyboard: Option<Value>,
+    ) -> ResponseFuture<'a, Result<(), TelegramError>> {
+        Box::pin(async move {
+            if target.is_photo {
+                self.edit_message_caption(chat_id, target.message_id, text, keyboard)
+                    .await
+            } else {
+                self.edit_message_text(chat_id, target.message_id, text, keyboard)
+                    .await
+            }
+        })
+    }
+
+    fn send<'a>(
+        &'a self,
+        chat_id: i64,
+        text: &'a str,
+        keyboard: Option<Value>,
+    ) -> ResponseFuture<'a, Result<i64, TelegramError>> {
+        Box::pin(async move { self.send_message(chat_id, text, keyboard).await })
+    }
+
+    fn delete<'a>(
+        &'a self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> ResponseFuture<'a, Result<(), TelegramError>> {
+        Box::pin(async move { self.delete_message(chat_id, message_id).await })
+    }
+}
+
+async fn retire_previous_panel<T: ResponseTransport>(
+    client: &T,
+    chat_id: i64,
+    target: ResponseTarget,
+    notice: &str,
+) {
+    // Telegram may reject deletion under its message rules, and network failures make the
+    // outcome uncertain. If deletion fails, removing the old panel's buttons is best effort too.
+    if client.delete(chat_id, target.message_id).await.is_err() {
+        let _ = client
+            .edit(chat_id, target, notice, Some(empty_keyboard()))
+            .await;
+    }
+}
+
+async fn respond_with_id_using<T: ResponseTransport>(
+    client: &T,
+    chat_id: i64,
+    target: Option<ResponseTarget>,
+    text: &str,
+    keyboard: Option<Value>,
+) -> Option<ResponseTarget> {
     if let Some(target) = target {
-        let edit = if target.is_photo {
-            client
-                .edit_message_caption(chat_id, target.message_id, text, keyboard.clone())
-                .await
-        } else {
-            client
-                .edit_message_text(chat_id, target.message_id, text, keyboard.clone())
-                .await
-        };
-        match edit {
-            Ok(()) => return Some(target),
-            Err(TelegramError::MessageNotEditable) => {}
-            Err(_) => return Some(target),
+        let mut retried = false;
+        loop {
+            match client.edit(chat_id, target, text, keyboard.clone()).await {
+                Ok(()) | Err(TelegramError::MessageNotModified) => return Some(target),
+                Err(TelegramError::Unauthorized) => return Some(target),
+                Err(TelegramError::MessageNotEditable) => break,
+                Err(_) if !retried => retried = true,
+                // A second ambiguous failure does not prove that the panel is unusable.
+                // Keep its identity so a later response can retry editing the same message.
+                Err(_) => return Some(target),
+            }
         }
     }
-    client
-        .send_message(chat_id, text, keyboard)
-        .await
-        .ok()
-        .map(|message_id| ResponseTarget {
-            message_id,
-            is_photo: false,
-        })
+    let message_id = client.send(chat_id, text, keyboard).await.ok()?;
+    if let Some(target) = target {
+        retire_previous_panel(
+            client,
+            chat_id,
+            target,
+            "Les commandes sont disponibles dans le nouveau message.",
+        )
+        .await;
+    }
+    Some(ResponseTarget {
+        message_id,
+        is_photo: false,
+    })
 }
 
 fn coc_action_error_message(error: &ControllerError, is_reload: bool) -> &'static str {
@@ -1112,6 +1193,71 @@ fn macro_selection_keyboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct MockResponseTransport {
+        state: std::sync::Mutex<MockResponseState>,
+    }
+
+    #[derive(Default)]
+    struct MockResponseState {
+        edits: VecDeque<Result<(), TelegramError>>,
+        sends: VecDeque<Result<i64, TelegramError>>,
+        deletes: VecDeque<Result<(), TelegramError>>,
+        edited_targets: Vec<ResponseTarget>,
+        edited_keyboards: Vec<Option<Value>>,
+        operations: Vec<String>,
+        edit_count: usize,
+        send_count: usize,
+        delete_count: usize,
+    }
+
+    impl ResponseTransport for MockResponseTransport {
+        fn edit<'a>(
+            &'a self,
+            _chat_id: i64,
+            target: ResponseTarget,
+            _text: &'a str,
+            keyboard: Option<Value>,
+        ) -> ResponseFuture<'a, Result<(), TelegramError>> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                state.edit_count += 1;
+                state.edited_targets.push(target);
+                state.edited_keyboards.push(keyboard);
+                state.operations.push(format!("edit:{_text}"));
+                state.edits.pop_front().unwrap_or(Ok(()))
+            })
+        }
+
+        fn send<'a>(
+            &'a self,
+            _chat_id: i64,
+            _text: &'a str,
+            _keyboard: Option<Value>,
+        ) -> ResponseFuture<'a, Result<i64, TelegramError>> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                state.send_count += 1;
+                state.operations.push("send".into());
+                state.sends.pop_front().unwrap_or(Ok(99))
+            })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _chat_id: i64,
+            _message_id: i64,
+        ) -> ResponseFuture<'a, Result<(), TelegramError>> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                state.delete_count += 1;
+                state.operations.push(format!("delete:{_message_id}"));
+                state.deletes.pop_front().unwrap_or(Ok(()))
+            })
+        }
+    }
 
     #[test]
     fn unauthorized_responses_are_distinct_from_other_api_failures() {
@@ -1215,6 +1361,141 @@ mod tests {
         assert!(controls.contains("CAPTURE"));
         assert!(controls.contains("STOP"));
         assert!(controls.contains("LAUNCH_COC"));
+    }
+
+    #[tokio::test]
+    async fn transient_edit_retries_once_and_message_not_modified_is_success() {
+        let client = MockResponseTransport::default();
+        {
+            let mut state = client.state.lock().unwrap();
+            state.edits = VecDeque::from([
+                Err(TelegramError::Request),
+                Err(TelegramError::MessageNotModified),
+            ]);
+        }
+        let target = ResponseTarget {
+            message_id: 8,
+            is_photo: true,
+        };
+
+        let result = respond_with_id_using(&client, 111, Some(target), "Done", None).await;
+
+        assert_eq!(result, Some(target));
+        let state = client.state.lock().unwrap();
+        assert_eq!(state.edit_count, 2);
+        assert_eq!(state.edited_targets, [target, target]);
+        assert_eq!(state.send_count, 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_ambiguous_edit_failures_keep_the_original_panel_without_sending() {
+        let original = ResponseTarget {
+            message_id: 8,
+            is_photo: false,
+        };
+
+        for (first_error, second_error) in [
+            (TelegramError::Request, TelegramError::Rejected),
+            (TelegramError::Rejected, TelegramError::InvalidResponse),
+            (TelegramError::InvalidResponse, TelegramError::Request),
+        ] {
+            let client = MockResponseTransport::default();
+            client.state.lock().unwrap().edits =
+                VecDeque::from([Err(first_error), Err(second_error)]);
+
+            let result = respond_with_id_using(&client, 111, Some(original), "Done", None).await;
+
+            assert_eq!(result, Some(original));
+            let state = client.state.lock().unwrap();
+            assert_eq!(state.edit_count, 2);
+            assert_eq!(state.send_count, 0);
+            assert_eq!(state.delete_count, 0);
+            assert_eq!(state.operations, ["edit:Done", "edit:Done"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_panel_deletion_makes_one_attempt_to_remove_its_buttons() {
+        let client = MockResponseTransport::default();
+        {
+            let mut state = client.state.lock().unwrap();
+            state.deletes = VecDeque::from([Err(TelegramError::Request)]);
+        }
+        let old_panel = ResponseTarget {
+            message_id: 8,
+            is_photo: false,
+        };
+
+        retire_previous_panel(
+            &client,
+            111,
+            old_panel,
+            "Les commandes sont disponibles dans le nouveau message.",
+        )
+        .await;
+
+        let state = client.state.lock().unwrap();
+        assert_eq!(state.delete_count, 1);
+        assert_eq!(state.edit_count, 1);
+        assert_eq!(state.edited_targets, [old_panel]);
+        assert_eq!(state.edited_keyboards, [Some(empty_keyboard())]);
+        assert_eq!(
+            state.operations,
+            [
+                "delete:8",
+                "edit:Les commandes sont disponibles dans le nouveau message."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_send_is_never_retried() {
+        let client = MockResponseTransport::default();
+        {
+            let mut state = client.state.lock().unwrap();
+            state.edits = VecDeque::from([Err(TelegramError::MessageNotEditable)]);
+            state.sends = VecDeque::from([Err(TelegramError::Request)]);
+        }
+        let original = ResponseTarget {
+            message_id: 8,
+            is_photo: true,
+        };
+
+        assert_eq!(
+            respond_with_id_using(&client, 111, Some(original), "Done", None).await,
+            None
+        );
+        let state = client.state.lock().unwrap();
+        assert_eq!(state.edit_count, 1);
+        assert_eq!(state.send_count, 1);
+        assert_eq!(state.delete_count, 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_edit_failure_uses_one_replacement_without_retry() {
+        let client = MockResponseTransport::default();
+        {
+            let mut state = client.state.lock().unwrap();
+            state.edits = VecDeque::from([Err(TelegramError::MessageNotEditable)]);
+            state.sends = VecDeque::from([Ok(42)]);
+        }
+        let original = ResponseTarget {
+            message_id: 8,
+            is_photo: true,
+        };
+
+        let result = respond_with_id_using(&client, 111, Some(original), "Done", None).await;
+
+        assert_eq!(
+            result,
+            Some(ResponseTarget {
+                message_id: 42,
+                is_photo: false,
+            })
+        );
+        let state = client.state.lock().unwrap();
+        assert_eq!(state.edit_count, 1);
+        assert_eq!(state.send_count, 1);
     }
 
     #[test]

@@ -7,7 +7,7 @@ import type { SettingsTab } from "./Settings";
 
 const quickGuides: { title: string; body: string; action: string; destination: "atelier" | "settings"; settingsTab?: SettingsTab }[] = [
   { title: "Créer une macro", body: "Nommez-la, enregistrez plus de 3 s, puis arrêtez. Les 3 dernières secondes sont retirées.", action: "Ouvrir l’atelier", destination: "atelier" },
-  { title: "Lire une macro", body: "Choisissez une séquence prête et vérifiez que Clash of Clans est ouvert. Le replay peut continuer en arrière-plan si l’option est activée.", action: "Ouvrir l’atelier", destination: "atelier" },
+  { title: "Lire une macro", body: "Choisissez une séquence prête et vérifiez que Clash of Clans est ouvert. Pour autoriser le replay en arrière-plan, désactivez « Mettre en pause si CoC perd le focus » dans Réglages > Général.", action: "Ouvrir l’atelier", destination: "atelier" },
   { title: "Piloter avec Telegram", body: "Créez le bot avec @BotFather (/newbot). Dans Réglages > Telegram, entrez le token (l’identifiant du bot est facultatif), vérifiez-le, puis générez la commande d’appairage et envoyez-la au bot.", action: "Configurer Telegram", destination: "settings", settingsTab: "telegram" },
 ];
 

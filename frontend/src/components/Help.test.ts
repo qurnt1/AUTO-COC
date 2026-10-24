@@ -35,7 +35,7 @@ describe("help page", () => {
     expect(html).toContain('aria-label="Configurer Telegram : Piloter avec Telegram"');
     expect(html).toContain("enregistrez plus de 3 s");
     expect(html).toContain("Les 3 dernières secondes sont retirées.");
-    expect(html).toContain("Le replay peut continuer en arrière-plan si l’option est activée.");
+    expect(html).toContain("Pour autoriser le replay en arrière-plan, désactivez « Mettre en pause si CoC perd le focus » dans Réglages &gt; Général.");
     expect(html).toContain("leurs relâchements restent enregistrés pour éviter une touche ou un bouton bloqué");
     expect(html).toContain("Voir les détails de sûreté");
     expect(html).toContain("Les nouvelles macros suivent les coordonnées de CoC si sa fenêtre bouge");
