@@ -3,6 +3,26 @@ import type { MacroStep } from "../api";
 export const MAX_TIMELINE_MARKERS = 32;
 
 export type TimelineMarker = { step: MacroStep; index: number; left: string };
+export type PlaybackPosition = { elapsedSeconds: number; percent: number; cycle: number };
+
+export function getPlaybackPosition(
+  elapsedSeconds: number,
+  durationSeconds: number,
+  looped: boolean,
+): PlaybackPosition {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return { elapsedSeconds: 0, percent: 0, cycle: 0 };
+  }
+
+  const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const cycle = looped ? Math.floor(elapsed / durationSeconds) : 0;
+  const position = looped ? elapsed % durationSeconds : Math.min(elapsed, durationSeconds);
+  return {
+    elapsedSeconds: position,
+    percent: Number(((position / durationSeconds) * 100).toFixed(2)),
+    cycle,
+  };
+}
 
 export function getTimelineMarkers(
   steps: readonly MacroStep[],

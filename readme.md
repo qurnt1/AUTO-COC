@@ -4,12 +4,16 @@ AUTO-COC aide à rejouer des gestes clavier et souris répétitifs dans Clash of
 
 Les macros et réglages sont conservés sur l’ordinateur. L’application réunit l’enregistrement, le replay, les raccourcis personnalisables et des commandes d’arrêt dans une fenêtre desktop. Telegram est une option séparée pour piloter certaines commandes à distance.
 
+![Atelier AUTO-COC pendant la lecture d’une macro](./public/assets/ui.png)
+
 ## Utiliser l’application
 
 1. Dans l’Atelier, créez ou sélectionnez une macro.
 2. Ouvrez Clash of Clans au premier plan et démarrez l’enregistrement. La capture commence après trois secondes de préparation. À l’arrêt, les trois dernières secondes sont retirées; il faut donc enregistrer plus de trois secondes pour conserver des actions.
 3. Examinez le résumé et le déroulé visuel de la séquence, puis lancez ou arrêtez le replay depuis l’Atelier ou avec vos raccourcis.
 4. Dans Réglages, personnalisez les raccourcis, activez la répétition et choisissez si le replay peut continuer en arrière-plan.
+
+Dans **Réglages > Système**, **Capturer CoC** place le jeu au premier plan et enregistre l’image de sa fenêtre en PNG.
 
 Par défaut, `F1` bascule entre lecture et arrêt, `Ctrl+Shift+1` démarre le replay et `Ctrl+Shift+0` arrête l’opération en cours. Modifiez-les dans Réglages > Raccourcis. Si Windows refuse une combinaison déjà utilisée, choisissez-en une autre.
 
@@ -22,6 +26,8 @@ Si le réglage est désactivé, un lancement depuis l’Atelier peut attendre ju
 Le ciblage d’une fenêtre ne garantit pas que Google Play Games transmette ou que le jeu traite chaque action. AUTO-COC ne peut pas toujours détecter un crash interne de Clash of Clans si la fenêtre hôte de Google Play Games reste ouverte avec le même titre. Pour les nouvelles macros, les coordonnées suivent CoC quand sa fenêtre bouge; les anciennes macros conservent leurs coordonnées écran. Les déplacements hors de la zone du jeu sont ignorés, tandis qu’un clic ou un défilement hors zone arrête le replay.
 
 L’aide intégrée présente les parcours de base, les raccourcis configurés, les précautions de lecture et les diagnostics de l’application. Le token Telegram n’est pas affiché dans l’aide ni dans les diagnostics. Telegram est facultatif : il faut configurer un bot et appairer une conversation privée avant de l’utiliser. Il prend notamment en charge l’arrêt, le lancement et la sélection de macros; `gif` indique que la capture GIF n’est pas prise en charge.
+
+Une capture CoC depuis Réglages ou Telegram tente d’afficher le jeu au premier plan avant de lire ses pixels. Windows peut refuser ce changement de focus pour une demande Telegram distante; dans ce cas, aucune image n’est envoyée et le message demande d’activer CoC sur le PC puis de réessayer.
 
 La [matrice de régression desktop](docs/desktop-regression-matrix.md) distingue la couverture automatisée des vérifications qui nécessitent une session Windows et le jeu réel.
 

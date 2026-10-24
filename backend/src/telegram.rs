@@ -14,6 +14,8 @@ pub enum TelegramError {
     Unauthorized,
     #[error("Telegram rejected the request")]
     Rejected,
+    #[error("Telegram message already has the requested content")]
+    MessageNotModified,
     #[error("Telegram response was invalid")]
     InvalidResponse,
 }
@@ -70,14 +72,31 @@ impl TelegramClient {
         chat_id: i64,
         text: &str,
         keyboard: Option<Value>,
-    ) -> Result<(), TelegramError> {
+    ) -> Result<i64, TelegramError> {
         let mut body = json!({"chat_id":chat_id,"text":text});
         if let Some(keyboard) = keyboard {
             body["reply_markup"] = keyboard;
         }
-        self.request::<Value>("sendMessage", &body)
+        self.request::<TelegramSentMessage>("sendMessage", &body)
             .await
-            .map(|_| ())
+            .map(|message| message.message_id)
+    }
+
+    pub async fn edit_message_text(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+        keyboard: Option<Value>,
+    ) -> Result<(), TelegramError> {
+        let mut body = json!({"chat_id":chat_id,"message_id":message_id,"text":text});
+        if let Some(keyboard) = keyboard {
+            body["reply_markup"] = keyboard;
+        }
+        match self.request::<Value>("editMessageText", &body).await {
+            Err(TelegramError::MessageNotModified) => Ok(()),
+            result => result.map(|_| ()),
+        }
     }
 
     pub async fn send_photo(
@@ -138,15 +157,25 @@ impl TelegramClient {
             .send()
             .await
             .map_err(|_| TelegramError::Request)?;
-        if let Some(error) = telegram_error_for_http_status(response.status()) {
-            return Err(error);
+        let status = response.status();
+        if status.as_u16() == 401 {
+            return Err(TelegramError::Unauthorized);
         }
-        let envelope: TelegramEnvelope<T> = response
-            .json()
-            .await
-            .map_err(|_| TelegramError::InvalidResponse)?;
+        let envelope: TelegramEnvelope<T> = response.json().await.map_err(|_| {
+            telegram_error_for_http_status(status).unwrap_or(TelegramError::InvalidResponse)
+        })?;
         if envelope.error_code == Some(401) {
             return Err(TelegramError::Unauthorized);
+        }
+        if envelope
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("message is not modified"))
+        {
+            return Err(TelegramError::MessageNotModified);
+        }
+        if let Some(error) = telegram_error_for_http_status(status) {
+            return Err(error);
         }
         if !envelope.ok {
             return Err(TelegramError::Rejected);
@@ -175,6 +204,13 @@ pub struct TelegramEnvelope<T> {
     result: Option<T>,
     #[serde(default)]
     error_code: Option<u16>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramSentMessage {
+    message_id: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,6 +232,7 @@ pub struct TelegramChat {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct TelegramMessage {
+    pub message_id: i64,
     pub chat: TelegramChat,
     pub from: Option<TelegramUser>,
     pub text: Option<String>,
@@ -532,6 +569,7 @@ async fn handle_update(
                 message.chat.id,
                 command,
                 None,
+                None,
                 callback_names,
                 token,
                 owner,
@@ -562,16 +600,22 @@ async fn handle_update(
     {
         return;
     }
-    let _ = client.answer_callback(&callback.id, "").await;
+    let callback_ack = match command {
+        "LAUNCH_COC" => "Demande de lancement reçue.",
+        "RELOAD_COC" => "Demande de relancement reçue.",
+        _ => "",
+    };
+    let _ = client.answer_callback(&callback.id, callback_ack).await;
     if !controller
         .authorize_telegram_callback(token, &callback)
         .await
     {
         return;
     }
-    let Some(chat_id) = callback.message.as_ref().map(|message| message.chat.id) else {
+    let Some(message) = callback.message.as_ref() else {
         return;
     };
+    let chat_id = message.chat.id;
     let resolved = callback_names
         .get(command)
         .cloned()
@@ -581,12 +625,28 @@ async fn handle_update(
             .confirm_telegram_shutdown(token, &callback, confirmation_id)
             .await
         {
-            Ok(_) => send_text(client, chat_id, "Extinction demandée.").await,
-            Err(_) => {
-                send_text(
+            Ok(_) => {
+                respond(
                     client,
                     chat_id,
+                    Some(message.message_id),
+                    "Extinction demandée.",
+                    Some(empty_keyboard()),
+                )
+                .await;
+            }
+            Err(_) => {
+                respond(
+                    client,
+                    chat_id,
+                    Some(message.message_id),
                     "La confirmation a expiré. Relancez la demande si nécessaire.",
+                    Some(menu_keyboard(
+                        controller
+                            .snapshot()
+                            .await
+                            .is_ok_and(|snapshot| snapshot.settings.loop_playback),
+                    )),
                 )
                 .await
             }
@@ -599,6 +659,7 @@ async fn handle_update(
         chat_id,
         &resolved,
         Some(command),
+        Some(message.message_id),
         callback_names,
         token,
         TelegramOwner {
@@ -615,6 +676,7 @@ async fn execute_command(
     chat_id: i64,
     command: &str,
     callback_data: Option<&str>,
+    message_id: Option<i64>,
     callback_names: &mut HashMap<String, String>,
     token: &str,
     owner: TelegramOwner,
@@ -628,30 +690,30 @@ async fn execute_command(
     match command {
         "STOP" => {
             match controller.stop_active_operation(token, owner).await {
-                Ok(_) => send_text(client, chat_id, "Arrêté.").await,
+                Ok(_) => respond(client, chat_id, message_id, "Arrêté.", controls_markup(message_id)).await,
                 Err(ControllerError::TelegramUnauthorized) => return,
                 Err(ControllerError::RecordingSavePending) => {
-                    send_text(client, chat_id, "L’enregistrement n’a pas pu être sauvegardé. Renvoyez `stop` pour réessayer.").await;
+                    respond(client, chat_id, message_id, "L’enregistrement n’a pas pu être sauvegardé. Renvoyez `stop` pour réessayer.", controls_markup(message_id)).await;
                 }
                 Err(ControllerError::RecordingEventLimit) => {
-                    send_text(client, chat_id, "La limite d’événements a été atteinte. Les événements capturés sont sauvegardés, mais la macro peut être incomplète.").await;
+                    respond(client, chat_id, message_id, "La limite d’événements a été atteinte. Les événements capturés sont sauvegardés, mais la macro peut être incomplète.", controls_markup(message_id)).await;
                 }
-                Err(_) => send_text(client, chat_id, "L’arrêt n’a pas pu être effectué.").await,
+                Err(_) => respond(client, chat_id, message_id, "L’arrêt n’a pas pu être effectué.", controls_markup(message_id)).await,
             }
         }
         "GO" => match controller.start_playback_for_telegram(token, owner).await {
-            Ok(_) => send_text(client, chat_id, "Lecture démarrée.").await,
-            Err(ControllerError::EmptyMacro) => send_text(client, chat_id, "La macro sélectionnée est vide.").await,
-            Err(ControllerError::CocNotForeground) => send_text(client, chat_id, "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro.").await,
+            Ok(_) => respond(client, chat_id, message_id, "Lecture démarrée.", controls_markup(message_id)).await,
+            Err(ControllerError::EmptyMacro) => respond(client, chat_id, message_id, "La macro sélectionnée est vide.", controls_markup(message_id)).await,
+            Err(ControllerError::CocNotForeground) => respond(client, chat_id, message_id, "Affichez Clash of Clans au premier plan sur le PC avant de démarrer la macro.", controls_markup(message_id)).await,
             Err(ControllerError::TelegramUnauthorized) => return,
-            Err(_) => send_text(client, chat_id, "La lecture n’a pas pu démarrer. Vérifiez l’état de l’application et la macro sélectionnée.").await,
+            Err(_) => respond(client, chat_id, message_id, "La lecture n’a pas pu démarrer. Vérifiez l’état de l’application et la macro sélectionnée.", controls_markup(message_id)).await,
         },
         "MENU" => {
             let loop_enabled = controller.snapshot().await.map(|snapshot| snapshot.settings.loop_playback).unwrap_or(false);
-            let _ = client.send_message(chat_id, "Paramètres", Some(menu_keyboard(loop_enabled))).await;
+            respond(client, chat_id, message_id, "Paramètres", Some(menu_keyboard(loop_enabled))).await;
         }
-        "BACK" => { let _ = client.send_message(chat_id, "Commandes :", Some(controls_keyboard(false))).await; }
-        "CAPTURE" => match controller.capture_screenshot_png().await {
+        "BACK" => respond(client, chat_id, message_id, "Commandes :", Some(controls_keyboard(false))).await,
+        "CAPTURE" => match controller.capture_coc_screenshot_png().await {
             Ok(png) => {
                 if controller
                     .authorize_telegram_identity(token, owner.chat_id, owner.user_id, true)
@@ -660,16 +722,22 @@ async fn execute_command(
                     let _ = client.send_photo(chat_id, png, "📸 AUTO-COC").await;
                 }
             }
-            Err(_) => send_text(client, chat_id, "La capture d’écran n’a pas pu être réalisée.").await,
+            Err(ControllerError::TelegramUnauthorized) => return,
+            Err(ControllerError::CocWindowUnavailable) => {
+                respond(client, chat_id, message_id, "Fenêtre Clash of Clans introuvable ou ambiguë. Ouvrez CoC puis réessayez.", controls_markup(message_id)).await;
+            }
+            Err(ControllerError::CocNotForeground) => {
+                respond(client, chat_id, message_id, "Windows n’a pas autorisé AUTO-COC à afficher Clash of Clans. Ouvrez CoC au premier plan sur le PC puis réessayez.", controls_markup(message_id)).await;
+            }
+            Err(_) => respond(client, chat_id, message_id, "La fenêtre CoC n’a pas fourni de capture.", controls_markup(message_id)).await,
         },
-        "CAPTURE_GIF" => send_text(client, chat_id, "La capture GIF n’est pas prise en charge.").await,
+        "CAPTURE_GIF" => respond(client, chat_id, message_id, "La capture GIF n’est pas prise en charge.", controls_markup(message_id)).await,
         "TOGGLE_LOOP" => match controller.toggle_loop_playback_for_telegram(token, owner).await {
             Ok((enabled, _)) => {
-                send_text(client, chat_id, if enabled { "Loop activée." } else { "Loop désactivée." }).await;
-                let _ = client.send_message(chat_id, "Paramètres", Some(menu_keyboard(enabled))).await;
+                respond(client, chat_id, message_id, if enabled { "Loop activée." } else { "Loop désactivée." }, Some(menu_keyboard(enabled))).await;
             }
             Err(ControllerError::TelegramUnauthorized) => return,
-            Err(_) => send_text(client, chat_id, "Le réglage loop n’a pas pu être modifié pendant l’opération.").await,
+            Err(_) => respond(client, chat_id, message_id, "Le réglage loop n’a pas pu être modifié pendant l’opération.", controls_markup(message_id)).await,
         },
         "SHUTDOWN_ASK" => match controller.prepare_telegram_shutdown(token, owner).await {
             Ok(id) => {
@@ -677,10 +745,10 @@ async fn execute_command(
                     [{"text":"Annuler","callback_data":"SHUTDOWN_CANCEL"}],
                     [{"text":"Confirmer l’extinction","callback_data":format!("SHUTDOWN_CONFIRM:{id}")}]
                 ]});
-                let _ = client.send_message(chat_id, "⚠️ Confirmer l’extinction du PC ?", Some(keyboard)).await;
+                respond(client, chat_id, message_id, "⚠️ Confirmer l’extinction du PC ?", Some(keyboard)).await;
             }
             Err(ControllerError::TelegramUnauthorized) => return,
-            Err(_) => send_text(client, chat_id, "L’arrêt ne peut pas être préparé pendant une opération active.").await,
+            Err(_) => respond(client, chat_id, message_id, "L’arrêt ne peut pas être préparé pendant une opération active.", controls_markup(message_id)).await,
         },
         "SHUTDOWN_CANCEL" => {
             if let Err(ControllerError::TelegramUnauthorized) =
@@ -688,46 +756,137 @@ async fn execute_command(
             {
                 return;
             }
-            send_text(client, chat_id, "Extinction annulée.").await;
+            let loop_enabled = controller.snapshot().await.is_ok_and(|snapshot| snapshot.settings.loop_playback);
+            respond(client, chat_id, message_id, "Extinction annulée.", Some(menu_keyboard(loop_enabled))).await;
         }
-        "LAUNCH_COC" => match controller.launch_coc_for_telegram(token, owner).await {
-            Ok(_) => send_text(client, chat_id, "Lancement de CoC demandé.").await,
-            Err(ControllerError::TelegramUnauthorized) => return,
-            Err(_) => send_text(client, chat_id, "CoC n’a pas pu être lancé. Vérifiez son chemin dans les paramètres.").await,
-        },
-        "RELOAD_COC" => {
-            match controller.reload_coc_for_telegram(token, owner).await {
-                Ok(_) => send_text(client, chat_id, "Relancement de Clash of Clans demandé.").await,
+        "LAUNCH_COC" => {
+            let message_id = respond_with_id(
+                client,
+                chat_id,
+                message_id,
+                "⏳ Demande de lancement reçue. Recherche de la fenêtre CoC…",
+                Some(empty_keyboard()),
+            )
+            .await
+            .or(message_id);
+            match controller.launch_coc_for_telegram(token, owner).await {
+                Ok(_) => respond(
+                    client,
+                    chat_id,
+                    message_id,
+                    "✅ CoC est ouvert, sa fenêtre a été détectée.",
+                    Some(controls_keyboard(false)),
+                ).await,
                 Err(ControllerError::TelegramUnauthorized) => return,
-                Err(_) => send_text(client, chat_id, "Clash of Clans n’a pas pu être relancé. Vérifiez son chemin dans les paramètres.").await,
+                Err(ControllerError::CocLaunchUnconfirmed) => respond(
+                    client,
+                    chat_id,
+                    message_id,
+                    "Le lancement a été demandé, mais la fenêtre de CoC n’a pas été détectée dans le délai prévu.",
+                    Some(controls_keyboard(false)),
+                ).await,
+                Err(_) => respond(
+                    client,
+                    chat_id,
+                    message_id,
+                    "CoC n’a pas pu être lancé. Vérifiez son chemin dans les paramètres.",
+                    Some(controls_keyboard(false)),
+                ).await,
+            }
+        }
+        "RELOAD_COC" => {
+            let message_id = respond_with_id(
+                client,
+                chat_id,
+                message_id,
+                "⏳ Demande de relancement reçue. Fermeture puis détection de CoC…",
+                Some(empty_keyboard()),
+            )
+            .await
+            .or(message_id);
+            match controller.reload_coc_for_telegram(token, owner).await {
+                Ok(_) => respond(
+                    client,
+                    chat_id,
+                    message_id,
+                    "✅ Opération terminée, fenêtre de Clash of Clans détectée.",
+                    Some(controls_keyboard(false)),
+                ).await,
+                Err(ControllerError::TelegramUnauthorized) => return,
+                Err(ControllerError::CocLaunchUnconfirmed) => respond(
+                    client,
+                    chat_id,
+                    message_id,
+                    "Le relancement a été demandé, mais la fenêtre de CoC n’est pas réapparue dans le délai prévu.",
+                    Some(controls_keyboard(false)),
+                ).await,
+                Err(_) => respond(
+                    client,
+                    chat_id,
+                    message_id,
+                    "Clash of Clans n’a pas pu être relancé. Vérifiez son chemin dans les paramètres.",
+                    Some(controls_keyboard(false)),
+                ).await,
             }
         }
         "SELECT_MACRO_LIST" => match controller.telegram_macro_names().await {
             Ok(names) => {
                 let keyboard = macro_selection_keyboard(&names, callback_names);
-                let _ = client.send_message(chat_id, "🗂️ Quelle macro choisir ?", Some(keyboard)).await;
+                respond(client, chat_id, message_id, "🗂️ Quelle macro choisir ?", Some(keyboard)).await;
             }
-            Err(_) => send_text(client, chat_id, "La liste des macros est indisponible.").await,
+            Err(_) => respond(client, chat_id, message_id, "La liste des macros est indisponible.", controls_markup(message_id)).await,
         },
         name if name.starts_with("SELECT_MACRO:") => {
             let name = &name["SELECT_MACRO:".len()..];
             match controller.select_macro_for_telegram(name, token, owner).await {
-                Ok(_) => send_text(client, chat_id, &format!("Macro « {name} » sélectionnée.")).await,
+                Ok(_) => respond(client, chat_id, message_id, &format!("Macro « {name} » sélectionnée."), controls_markup(message_id)).await,
                 Err(ControllerError::TelegramUnauthorized) => return,
-                Err(_) => send_text(client, chat_id, "Cette macro est introuvable ou ne peut pas être sélectionnée.").await,
+                Err(_) => respond(client, chat_id, message_id, "Cette macro est introuvable ou ne peut pas être sélectionnée.", controls_markup(message_id)).await,
             }
         }
-        "CANCEL_SELECTION" => send_text(client, chat_id, "Sélection annulée.").await,
-        "DUMMY_COC_STATUS" => send_text(client, chat_id, "CoC a déjà été lancé pendant cette session.").await,
-        "SHUTDOWN_CONFIRM" => send_text(client, chat_id, "Cette confirmation est invalide ou expirée.").await,
+        "CANCEL_SELECTION" => respond(client, chat_id, message_id, "Sélection annulée.", controls_markup(message_id)).await,
+        "DUMMY_COC_STATUS" => respond(client, chat_id, message_id, "CoC a déjà été lancé pendant cette session.", controls_markup(message_id)).await,
+        "SHUTDOWN_CONFIRM" => respond(client, chat_id, message_id, "Cette confirmation est invalide ou expirée.", controls_markup(message_id)).await,
         _ => {
-            if callback_data.is_some() { send_text(client, chat_id, "Action inconnue.").await; }
+            if callback_data.is_some() { respond(client, chat_id, message_id, "Action inconnue.", controls_markup(message_id)).await; }
         }
     }
 }
 
-async fn send_text(client: &TelegramClient, chat_id: i64, text: &str) {
-    let _ = client.send_message(chat_id, text, None).await;
+fn controls_markup(message_id: Option<i64>) -> Option<Value> {
+    message_id.map(|_| controls_keyboard(false))
+}
+
+fn empty_keyboard() -> Value {
+    json!({"inline_keyboard": []})
+}
+
+async fn respond(
+    client: &TelegramClient,
+    chat_id: i64,
+    message_id: Option<i64>,
+    text: &str,
+    keyboard: Option<Value>,
+) {
+    let _ = respond_with_id(client, chat_id, message_id, text, keyboard).await;
+}
+
+async fn respond_with_id(
+    client: &TelegramClient,
+    chat_id: i64,
+    message_id: Option<i64>,
+    text: &str,
+    keyboard: Option<Value>,
+) -> Option<i64> {
+    if let Some(message_id) = message_id
+        && client
+            .edit_message_text(chat_id, message_id, text, keyboard.clone())
+            .await
+            .is_ok()
+    {
+        return Some(message_id);
+    }
+    client.send_message(chat_id, text, keyboard).await.ok()
 }
 
 fn controls_keyboard(coc_launched: bool) -> Value {
@@ -817,6 +976,7 @@ mod tests {
 
     fn message(chat_id: i64, user_id: i64, chat_type: &str) -> TelegramMessage {
         TelegramMessage {
+            message_id: 17,
             chat: TelegramChat {
                 id: chat_id,
                 chat_type: chat_type.into(),
@@ -856,6 +1016,7 @@ mod tests {
         let update: TelegramUpdate = serde_json::from_str(r#"{"update_id":2,"callback_query":{"id":"cb-1","from":{"id":222,"is_bot":false,"first_name":"Test"},"message":{"message_id":7,"chat":{"id":111,"type":"private"}},"data":"STOP"}}"#).unwrap();
         let callback = update.callback_query.unwrap();
         assert!(callback_is_authorized(&callback, owner));
+        assert_eq!(callback.message.as_ref().unwrap().message_id, 7);
         assert_eq!(
             callback_command(callback.data.as_deref().unwrap()),
             Some("STOP")

@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ActionRunner, BackendClient, Snapshot } from "../api";
-import { Atelier, handleMacroNavigationKey, Sequence } from "./Atelier";
+import { Atelier, Sequence } from "./Atelier";
 
 const baseSnapshot: Snapshot = {
   revision: 2,
@@ -128,6 +128,90 @@ describe("macro trace presentation", () => {
     expect(html).toContain("Touche clavier");
   });
 
+  it("shows the live playback cursor and freezes it when playback is paused", () => {
+    const summary = { ...baseSnapshot.macros[0], durationSeconds: 20 };
+    const detail = { name: "Récolte", steps: [{ t: 20, type: "mouse_click", data: null }] };
+    const playing = renderToStaticMarkup(createElement(Sequence, {
+      detail,
+      summary,
+      playback: { elapsedSeconds: 5, isRunning: true, looped: false },
+    }));
+    const paused = renderToStaticMarkup(createElement(Sequence, {
+      detail,
+      summary,
+      playback: { elapsedSeconds: 5, isRunning: false, looped: false },
+    }));
+
+    expect(playing).toContain('class="trace-playhead is-running"');
+    expect(playing).toContain('style="left:25%"');
+    expect(playing).toContain("5 s / 20 s");
+    expect(paused).toContain('class="trace-playhead"');
+    expect(paused).toContain('style="left:25%"');
+  });
+
+  it("shows session and active time as whole seconds", () => {
+    const snapshot: Snapshot = {
+      ...baseSnapshot,
+      status: { kind: "playing", macroName: "Récolte", elapsedSeconds: 10.1 },
+      session: { elapsedSeconds: 10.1, cycles: 1 },
+    };
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain("Temps écoulé : 10 s");
+    expect(html).toContain("<strong>10 s</strong><small>temps de session</small>");
+    expect(html).not.toContain("10,1 s");
+  });
+
+  it("shows the recording countdown as a whole 3, 2, 1 value", () => {
+    const snapshot: Snapshot = {
+      ...baseSnapshot,
+      status: { kind: "recording", macroName: "Récolte", phase: "preparing", countdownSeconds: 2.0149864654, elapsedSeconds: 0 },
+    };
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html).toContain("Préparation · 3 s");
+    expect(html).toContain("La capture commence dans 3 s.");
+    expect(html).not.toContain("2.0149864654");
+  });
+
+  it("places pause-on-focus-loss beside loop and reflects the shared setting", () => {
+    const snapshot: Snapshot = {
+      ...baseSnapshot,
+      settings: { ...baseSnapshot.settings, allowCocBackgroundPlayback: false },
+    };
+    const html = renderToStaticMarkup(createElement(Atelier, {
+      api: {} as BackendClient,
+      snapshot,
+      busy: null,
+      run: (async (_label, callback) => callback()) as ActionRunner,
+      online: true,
+      showOnboarding: false,
+      onDismissOnboarding: () => {},
+      onCompleteOnboarding: () => {},
+    }));
+
+    expect(html.match(/class="macro-option(?: |")/g)).toHaveLength(2);
+    expect(html).toMatch(/Pause hors CoC<\/span><small>Quand le jeu perd le focus<\/small><\/span><input type="checkbox" checked=""/);
+  });
+
   it("shows raw event count and recorded duration above execution, without a scrollable list or pagination", () => {
     const snapshot: Snapshot = {
       ...baseSnapshot,
@@ -179,38 +263,7 @@ describe("macro trace presentation", () => {
 });
 
 describe("first-use guide and macro selection", () => {
-  it("prevents page scrolling at the listbox boundaries without moving selection", () => {
-    const boundaryKeys = [
-      ["ArrowUp", 0],
-      ["Home", 0],
-      ["ArrowDown", 1],
-      ["End", 1],
-    ] as const;
-
-    for (const [key, index] of boundaryKeys) {
-      let prevented = false;
-      const destination = handleMacroNavigationKey({
-        key,
-        preventDefault: () => { prevented = true; },
-      }, index, 2);
-
-      expect(prevented).toBe(true);
-      expect(destination).toBe(index);
-    }
-  });
-
-  it("leaves unrelated keys to the native button behavior", () => {
-    let prevented = false;
-    const destination = handleMacroNavigationKey({
-      key: "Enter",
-      preventDefault: () => { prevented = true; },
-    }, 0, 2);
-
-    expect(prevented).toBe(false);
-    expect(destination).toBeNull();
-  });
-
-  it("explains the highlighted selection without an ambiguous marker", () => {
+  it("keeps macro browsing out of the workshop content", () => {
     const html = renderToStaticMarkup(createElement(Atelier, {
       api: {} as BackendClient,
       snapshot: baseSnapshot,
@@ -222,26 +275,8 @@ describe("first-use guide and macro selection", () => {
       onCompleteOnboarding: () => {},
     }));
 
-    expect(html).toContain("La coche marque la macro sélectionnée, affichée à droite.");
-    expect(html).toContain('aria-selected="true"');
-    expect(html).not.toContain("macro-item-marker");
-    expect(html).not.toContain("selected-chevron");
-    expect(html).not.toContain("Nouvelle macro");
-  });
-
-  it("hides the selection hint when the library has no visible macros", () => {
-    const html = renderToStaticMarkup(createElement(Atelier, {
-      api: {} as BackendClient,
-      snapshot: { ...baseSnapshot, selectedMacro: null, macros: [] },
-      busy: null,
-      run: (async (_label, callback) => callback()) as ActionRunner,
-      online: true,
-      showOnboarding: false,
-      onDismissOnboarding: () => {},
-      onCompleteOnboarding: () => {},
-    }));
-
-    expect(html).not.toContain("library-selection-hint");
+    expect(html).not.toContain("Bibliothèque des macros");
+    expect(html).not.toContain("La coche marque la macro sélectionnée");
   });
 
   it("offers the next useful action based on the selected macro", () => {
@@ -266,7 +301,7 @@ describe("first-use guide and macro selection", () => {
     expect(html).toContain("Clash of Clans doit être ouvert; le replay reste ciblé sur sa fenêtre.");
   });
 
-  it("keeps both creation actions without repeating instructions during onboarding", () => {
+  it("keeps the onboarding creation action without duplicating library instructions", () => {
     const html = renderToStaticMarkup(createElement(Atelier, {
       api: {} as BackendClient,
       snapshot: { ...baseSnapshot, selectedMacro: null, macros: [], onboardingComplete: false },
@@ -279,8 +314,6 @@ describe("first-use guide and macro selection", () => {
     }));
 
     expect(html).toContain(">Créer une macro</button>");
-    expect(html).toContain('aria-label="Créer une macro"');
-    expect(html).toContain("Votre première macro apparaîtra ici.");
     expect(html).not.toContain("Utilisez le bouton + dans la bibliothèque pour commencer.");
   });
 
@@ -297,7 +330,5 @@ describe("first-use guide and macro selection", () => {
     }));
 
     expect(html).toContain(">Parcourir la liste des macros</button>");
-    expect(html).toContain('id="macro-R%C3%A9colte"');
-    expect(html).toContain('role="option" aria-selected="false"');
   });
 });

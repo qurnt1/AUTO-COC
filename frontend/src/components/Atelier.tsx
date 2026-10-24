@@ -1,33 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ActionRunner, BackendClient, MacroDetail, MacroSummary, Snapshot } from "../api";
-import { Dialog } from "./Dialog";
 import { Icon } from "./Icon";
+import { MacroDialog, type MacroDialogState } from "./MacroDialog";
 import { OnboardingGuide } from "./OnboardingGuide";
-import { formatDuration } from "./formatDuration";
+import { formatCountdown, formatDuration, formatElapsedDuration } from "./formatDuration";
 import { getOnboardingStage } from "../onboardingStage";
-import { getTimelineMarkers, getTraceNodeClass } from "./sequence";
+import { getPlaybackPosition, getTimelineMarkers, getTraceNodeClass } from "./sequence";
 
-type DialogState = { kind: "create" } | { kind: "rename"; macro: MacroSummary } | { kind: "delete"; macro: MacroSummary } | null;
-type PageProps = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void };
-
-// eslint-disable-next-line react-refresh/only-export-components -- exported for focused navigation tests.
-export function handleMacroNavigationKey(
-  event: { key: string; preventDefault: () => void },
-  index: number,
-  itemCount: number,
-): number | null {
-  let destination: number;
-  switch (event.key) {
-    case "ArrowDown": destination = index + 1; break;
-    case "ArrowUp": destination = index - 1; break;
-    case "Home": destination = 0; break;
-    case "End": destination = itemCount - 1; break;
-    default: return null;
-  }
-
-  event.preventDefault();
-  return Math.max(0, Math.min(destination, itemCount - 1));
-}
+type DialogState = MacroDialogState | null;
+type PageProps = { api: BackendClient; snapshot: Snapshot; busy: string | null; run: ActionRunner; online: boolean; showOnboarding: boolean; onDismissOnboarding: () => void; onCompleteOnboarding: () => void; onClearMacroSearch?: () => void };
 
 const eventNames: Record<string, string> = {
   mouse_move: "Déplacement",
@@ -38,38 +19,15 @@ const eventNames: Record<string, string> = {
   nop: "Pause",
 };
 
-function MacroDialog({ dialog, busy, onClose, onSubmit }: {
-  dialog: Exclude<DialogState, null>;
-  busy: boolean;
-  onClose: () => void;
-  onSubmit: (name: string) => void;
+export function Sequence({ detail, summary, playback }: {
+  detail: MacroDetail | null;
+  summary: MacroSummary;
+  playback?: { elapsedSeconds: number; isRunning: boolean; looped: boolean };
 }) {
-  const [name, setName] = useState(dialog.kind === "rename" ? dialog.macro.name : "");
-  const destructive = dialog.kind === "delete";
-  const label = dialog.kind === "create" ? "Nom de la macro" : "Nouveau nom";
-  const title = dialog.kind === "create" ? "Créer une macro" : dialog.kind === "rename" ? "Renommer la macro" : "Supprimer cette macro ?";
-  const description = destructive
-    ? `« ${dialog.macro.name} » sera supprimée de votre bibliothèque. Cette action ne peut pas être annulée.`
-    : "Choisissez un nom simple que vous retrouverez facilement.";
-
-  return (
-    <Dialog title={title} description={description} onClose={onClose}>
-      <form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit(name.trim()); }}>
-        {!destructive && <label className="field-label" htmlFor="macro-name">{label}</label>}
-        {!destructive && <input id="macro-name" autoFocus maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex. Récolte des ressources" />}
-        <div className="dialog-actions">
-          <button className="button quiet" type="button" onClick={onClose}>Annuler</button>
-          <button className={`button ${destructive ? "danger" : "primary"}`} type="submit" disabled={busy || (!destructive && !name.trim())}>
-            {busy ? "Patientez…" : destructive ? "Supprimer" : dialog.kind === "create" ? "Créer la macro" : "Enregistrer le nom"}
-          </button>
-        </div>
-      </form>
-    </Dialog>
-  );
-}
-
-export function Sequence({ detail, summary }: { detail: MacroDetail | null; summary: MacroSummary }) {
   const timelineMarkers = useMemo(() => detail ? getTimelineMarkers(detail.steps) : [], [detail]);
+  const playbackPosition = playback
+    ? getPlaybackPosition(playback.elapsedSeconds, summary.durationSeconds, playback.looped)
+    : null;
   const traceCounts = useMemo(() => timelineMarkers.reduce((counts, { step }) => {
     if (step.type === "mouse_move") counts.movement += 1;
     else if (step.type === "mouse_click") counts.mouse += 1;
@@ -91,9 +49,26 @@ export function Sequence({ detail, summary }: { detail: MacroDetail | null; summ
 
   return (
     <div className="sequence-wrap">
-      <div className="trace-heading"><span>Déroulé réel</span><span>{timelineMarkers.length} repères</span></div>
-      <div className="trace-track" role="img" aria-label={traceDescription}>
+      <div className="trace-heading">
+        <span>Déroulé réel</span>
+        <span>{playbackPosition
+          ? `${formatDuration(playbackPosition.elapsedSeconds)} / ${formatDuration(summary.durationSeconds)}`
+          : `${timelineMarkers.length} repères`}</span>
+      </div>
+      <div
+        className="trace-track"
+        role="img"
+        aria-label={playbackPosition
+          ? `${traceDescription} Lecture à ${formatDuration(playbackPosition.elapsedSeconds)} sur ${formatDuration(summary.durationSeconds)}.`
+          : traceDescription}
+      >
         {timelineMarkers.map(({ step, index, left }) => <span key={`${index}-${step.t}-${step.type}`} className={`trace-node ${getTraceNodeClass(step.type)}`} style={{ left }} title={`${index + 1}. ${eventNames[step.type] ?? step.type}`} />)}
+        {playbackPosition && <span
+          key={playbackPosition.cycle}
+          className={playback?.isRunning ? "trace-playhead is-running" : "trace-playhead"}
+          style={{ left: `${playbackPosition.percent}%` }}
+          aria-hidden="true"
+        />}
       </div>
       <ul className="trace-legend" aria-label="Légende de la trace">
         <li><span className="trace-legend-swatch is-move" aria-hidden="true" />Fin d’un déplacement</li>
@@ -105,15 +80,25 @@ export function Sequence({ detail, summary }: { detail: MacroDetail | null; summ
   );
 }
 
-export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDismissOnboarding, onCompleteOnboarding }: PageProps) {
-  const [query, setQuery] = useState("");
+export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDismissOnboarding, onCompleteOnboarding, onClearMacroSearch }: PageProps) {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [detail, setDetail] = useState<MacroDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const selected = snapshot.macros.find((macro) => macro.name === snapshot.selectedMacro) ?? null;
   const active = snapshot.status.kind !== "idle";
-  const filtered = snapshot.macros.filter((macro) => macro.name.toLocaleLowerCase("fr").includes(query.trim().toLocaleLowerCase("fr")));
+  const playbackStatus = snapshot.status.kind === "playing" || snapshot.status.kind === "paused"
+    ? snapshot.status
+    : snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "resuming"
+      ? snapshot.status
+      : null;
+  const timelinePlayback = selected && playbackStatus?.macroName === selected.name
+    ? {
+      elapsedSeconds: snapshot.session.elapsedSeconds,
+      isRunning: snapshot.status.kind === "playing",
+      looped: snapshot.settings.loop,
+    }
+    : undefined;
   const waitingForSelectedRecording = snapshot.status.kind === "waiting_for_foreground"
     && snapshot.status.action === "recording"
     && snapshot.status.macroName === selected?.name;
@@ -123,7 +108,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
   const recordingProgressTitle = waitingForSelectedRecording
     ? "En attente de Clash of Clans"
     : snapshot.status.kind === "recording" && snapshot.status.phase === "preparing"
-      ? `Préparation · ${snapshot.status.countdownSeconds} s`
+      ? `Préparation · ${formatCountdown(snapshot.status.countdownSeconds)} s`
       : "Capture des actions en cours";
   const recordingProgressDetail = snapshot.status.kind === "waiting_for_foreground"
     && snapshot.status.action === "recording"
@@ -131,7 +116,6 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
     ? "La préparation de 3 s commencera quand la fenêtre du jeu sera reconnue. Cette attente expire automatiquement au bout de 30 secondes."
     : "La séquence sera actualisée à l’arrêt de l’enregistrement.";
   const executionCopy = getExecutionCopy(snapshot.status, selected);
-  const selectionVisible = filtered.some((macro) => macro.name === selected?.name);
   const onboardingStage = getOnboardingStage(snapshot);
 
   useEffect(() => {
@@ -187,7 +171,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
           const targetMacro = snapshot.macros.find((macro) => macro.readable && macro.name !== selected?.name)
             ?? snapshot.macros[0];
           if (targetMacro) {
-            setQuery("");
+            onClearMacroSearch?.();
             window.requestAnimationFrame(() => document.getElementById(`macro-${encodeURIComponent(targetMacro.name)}`)?.focus());
           }
         } else if (onboardingStage === "record") void run("record", () => api.startRecording());
@@ -197,60 +181,6 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
       onDismiss={onDismissOnboarding}
     />}
     <main className="workbench">
-      <aside className="library" aria-label="Bibliothèque des macros">
-        <div className="library-heading">
-          <div><span className="section-kicker">Bibliothèque</span><h2>Vos macros</h2></div>
-            <button className="icon-button add-button" type="button" aria-label="Créer une macro" title="Créer une macro" onClick={() => setDialog({ kind: "create" })} disabled={!online || active || busy !== null}>
-            <Icon name="plus" />
-          </button>
-        </div>
-        <label className="search-box">
-          <Icon name="search" size={16} />
-          <span className="sr-only">Rechercher une macro</span>
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher…" />
-          {query && <button type="button" className="clear-search" aria-label="Effacer la recherche" onClick={() => setQuery("")}><Icon name="close" size={14} /></button>}
-        </label>
-        <div className="library-meta"><span>{snapshot.macros.length} {snapshot.macros.length > 1 ? "macros" : "macro"}</span></div>
-        {filtered.length > 0 && <p className="library-selection-hint">La coche marque la macro sélectionnée, affichée à droite.</p>}
-        <div className="macro-list" role="listbox" aria-label="Macros">
-          {filtered.map((macro, index) => {
-            const current = macro.name === selected?.name;
-            return (
-              <button
-                className={`macro-item ${current ? "selected" : ""}`}
-                id={`macro-${encodeURIComponent(macro.name)}`}
-                key={macro.name}
-                type="button"
-                role="option"
-                aria-selected={current}
-                tabIndex={current || (!selectionVisible && index === 0) ? 0 : -1}
-                onClick={() => run("select", () => api.selectMacro(macro.name))}
-                onKeyDown={(event) => {
-                  const destination = handleMacroNavigationKey(event, index, filtered.length);
-                  if (destination === null || destination === index) return;
-                  const target = filtered[destination];
-                  void run("select", () => api.selectMacro(target.name));
-                  window.requestAnimationFrame(() => document.getElementById(`macro-${encodeURIComponent(target.name)}`)?.focus());
-                }}
-                disabled={!online || active || busy !== null}
-              >
-                <span className="macro-item-copy">
-                  <span className="macro-item-name">{macro.name}</span>
-                  <span className="macro-item-meta">{macro.readable ? `${macro.eventCount} événements` : "À vérifier"}<span className="meta-dot">·</span>{formatDuration(macro.durationSeconds)}</span>
-                </span>
-              </button>
-            );
-          })}
-          {filtered.length === 0 && (
-            <div className="library-empty">
-              <Icon name={query ? "search" : "activity"} size={19} />
-              <p>{query ? "Aucune macro trouvée" : "Votre bibliothèque est vide"}</p>
-              <span>{query ? "Essayez un autre nom." : showOnboarding ? "Votre première macro apparaîtra ici." : "Créez une macro pour commencer."}</span>
-            </div>
-          )}
-        </div>
-      </aside>
-
       <section className="macro-workspace" aria-label="Détail de la macro">
         {!selected ? (
           <div className="welcome-empty">
@@ -300,7 +230,7 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
                     <span className={`recording-mark ${recordingProgressPhase}`}><Icon name="record" size={17} /></span>
                     <div><strong>{recordingProgressTitle}</strong><span>{recordingProgressDetail}</span></div>
                   </div>
-                ) : selected.readable ? detailLoading ? <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div> : detailError ? <div className="sequence-failed">Impossible de charger le détail des événements.</div> : <Sequence key={selected.name} detail={detail} summary={selected} /> : null}
+                ) : selected.readable ? detailLoading ? <div className="sequence-loading" role="status" aria-label="Chargement de la séquence"><span /><span /><span /></div> : detailError ? <div className="sequence-failed">Impossible de charger le détail des événements.</div> : <Sequence key={selected.name} detail={detail} summary={selected} playback={timelinePlayback} /> : null}
               </div>
             </section>
 
@@ -338,15 +268,28 @@ export function Atelier({ api, snapshot, busy, run, online, showOnboarding, onDi
             </section>
 
             <div className="macro-options" role="group" aria-label="Options de la macro">
-              <label className={`loop-setting ${active ? "is-muted" : ""}`}>
+              <label className={`macro-option ${active ? "is-muted" : ""}`}>
                 <span className="loop-text"><span>Boucle</span><small>Répéter la lecture</small></span>
                 <input type="checkbox" checked={snapshot.settings.loop} disabled={!online || active || busy !== null} onChange={(event) => run("loop", () => api.updateSettings({ loop: event.target.checked }), event.target.checked ? "Boucle activée." : "Boucle désactivée.")} />
+              </label>
+              <label className={`macro-option ${active ? "is-muted" : ""}`}>
+                <span className="loop-text"><span>Pause hors CoC</span><small>Quand le jeu perd le focus</small></span>
+                <input
+                  type="checkbox"
+                  checked={!snapshot.settings.allowCocBackgroundPlayback}
+                  disabled={!online || active || busy !== null}
+                  onChange={(event) => run(
+                    "focus-guard",
+                    () => api.updateSettings({ allowCocBackgroundPlayback: !event.target.checked }),
+                    event.target.checked ? "Pause hors CoC activée." : "Replay en arrière-plan activé.",
+                  )}
+                />
               </label>
             </div>
             <div className="session-facts" aria-label="Statistiques de la session">
               <span>{snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "resuming" ? "Reprise en attente" : snapshot.status.kind === "waiting_for_foreground" && snapshot.status.action === "playing" ? "Lecture en attente" : snapshot.status.kind === "playing" ? "Lecture en cours" : snapshot.status.kind === "paused" ? "Lecture en pause" : "Dernière session de lecture"}</span>
               <div><strong>{snapshot.session.cycles.toLocaleString("fr-FR")}</strong><small>cycles</small></div>
-              <div><strong>{formatDuration(snapshot.session.elapsedSeconds)}</strong><small>temps de session</small></div>
+              <div><strong>{formatElapsedDuration(snapshot.session.elapsedSeconds)}</strong><small>temps de session</small></div>
             </div>
             <p className="keyboard-note"><Icon name="keyboard" size={14} />Raccourcis globaux disponibles dans les paramètres.</p>
           </>
@@ -383,20 +326,20 @@ function getExecutionCopy(status: Snapshot["status"], selected: MacroSummary | n
     return {
       title: `Enregistrement de « ${status.macroName} »`,
       detail: status.phase === "preparing"
-        ? `La capture commence dans ${status.countdownSeconds} s.`
-        : `Temps écoulé : ${formatDuration(status.elapsedSeconds)}`,
+        ? `La capture commence dans ${formatCountdown(status.countdownSeconds)} s.`
+        : `Temps écoulé : ${formatElapsedDuration(status.elapsedSeconds)}`,
     };
   }
   if (status.kind === "playing") {
     return {
       title: `Lecture de « ${status.macroName} »`,
-      detail: `Temps écoulé : ${formatDuration(status.elapsedSeconds)}`,
+      detail: `Temps écoulé : ${formatElapsedDuration(status.elapsedSeconds)}`,
     };
   }
   if (status.kind === "paused") {
     return {
       title: "En pause, CoC n'est plus la fenêtre active",
-      detail: `Lecture de « ${status.macroName} » suspendue à ${formatDuration(status.elapsedSeconds)}. Cliquez sur « Reprendre », puis revenez dans Clash of Clans. La lecture reprendra dès que le jeu sera de nouveau au premier plan.`,
+      detail: `Lecture de « ${status.macroName} » suspendue à ${formatElapsedDuration(status.elapsedSeconds)}. Cliquez sur « Reprendre », puis revenez dans Clash of Clans. La lecture reprendra dès que le jeu sera de nouveau au premier plan.`,
     };
   }
   return {

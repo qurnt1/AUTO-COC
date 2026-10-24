@@ -159,7 +159,7 @@ function Start-UiAutomationSmoke {
         [Parameter(Mandatory = $true)][string]$MacroName,
         [Parameter(Mandatory = $true)][string]$RenamedMacroName,
         [Parameter(Mandatory = $true)][string]$MacroFilePath,
-        [Parameter(Mandatory = $true)][ValidateSet('setup', 'start-close-recording', 'verify-restart')][string]$Mode,
+        [Parameter(Mandatory = $true)][ValidateSet('setup', 'start-close-foreground-wait', 'verify-restart')][string]$Mode,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][hashtable]$Environment
     )
@@ -257,7 +257,7 @@ $secondProcess = $null
 $installerProcess = $null
 $uninstallerProcess = $null
 $uiAutomationProcess = $null
-$closeRecordingUiAutomationProcess = $null
+$closeWaitUiAutomationProcess = $null
 $restartUiAutomationProcess = $null
 $restartProcess = $null
 $junctionCreated = $false
@@ -289,7 +289,7 @@ try {
         schemaVersion = 1
         settings = [ordered]@{
             loop = $false
-            requireCocForeground = $false
+            allowCocBackgroundPlayback = $false
             cocPath = ''
             shortcuts = [ordered]@{
                 toggle = 'F1'
@@ -315,7 +315,7 @@ try {
         $settingsJson,
         [System.Text.UTF8Encoding]::new($false)
     )
-    Write-Host 'Isolated UIA profile: foreground guard off for empty recording without CoC.'
+    Write-Host 'Isolated UIA profile: playback remains limited to the detected Clash of Clans window.'
 
     # NSIS requires /D= to be the final, unquoted argument.
     $installerProcess = Start-SmokeProcess -Path $installers[0].FullName `
@@ -410,26 +410,26 @@ try {
         )
     }
     catch {
-        throw 'The isolated macro has an invalid updated_at value before close-during-recording.'
+        throw 'The isolated macro has an invalid updated_at value before close-during-wait.'
     }
     if (@($macroBeforeCloseRecording.steps).Count -ne 0) {
-        throw 'The isolated macro must be empty before close-during-recording.'
+        throw 'The isolated macro must be empty before close-during-wait.'
     }
 
-    Write-Host 'Starting an empty recording, waiting for capture, then closing AUTO-COC while it remains active.'
-    $closeRecordingUiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
+    Write-Host 'Starting an empty recording, waiting for the required Clash of Clans window, then closing AUTO-COC.'
+    $closeWaitUiAutomationRun = Start-UiAutomationSmoke -ScriptPath $uiAutomationScript -PowerShellPath $windowsPowerShell `
         -WindowHandle $mainWindow.ToInt64() -AppProcessId $mainProcess.Id -MacroName $macroName `
-        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode start-close-recording `
+        -RenamedMacroName $renamedMacroName -MacroFilePath $renamedMacroFile -Mode start-close-foreground-wait `
         -WorkingDirectory $smokeRoot -Environment $appEnvironment
-    $closeRecordingUiAutomationProcess = $closeRecordingUiAutomationRun.Process
-    Wait-ForUiAutomationSmoke -Run $closeRecordingUiAutomationRun -Mode start-close-recording
+    $closeWaitUiAutomationProcess = $closeWaitUiAutomationRun.Process
+    Wait-ForUiAutomationSmoke -Run $closeWaitUiAutomationRun -Mode start-close-foreground-wait
     $mainProcess.Refresh()
     if ($mainProcess.HasExited) {
-        throw 'AUTO-COC exited before the active recording could be closed gracefully.'
+        throw 'AUTO-COC exited before the foreground wait could be closed gracefully.'
     }
 
     if (-not $mainProcess.CloseMainWindow()) {
-        throw 'CloseMainWindow did not send a close request during the active recording.'
+        throw 'CloseMainWindow did not send a close request during the foreground wait.'
     }
     if (-not $mainProcess.WaitForExit(30000)) {
         throw 'AUTO-COC did not exit within 30 seconds after closing during recording.'
@@ -447,15 +447,15 @@ try {
         )
     }
     catch {
-        throw 'The isolated macro has an invalid updated_at value after close-during-recording.'
+        throw 'The isolated macro has an invalid updated_at value after close-during-wait.'
     }
-    if ($updatedAtAfterCloseRecording -le $updatedAtBeforeCloseRecording) {
-        throw 'The macro updated_at timestamp did not advance after closing during the empty recording.'
+    if ($updatedAtAfterCloseRecording -ne $updatedAtBeforeCloseRecording) {
+        throw 'The macro updated_at timestamp should remain unchanged after closing during the foreground wait.'
     }
     if (@($macroAfterCloseRecording.steps).Count -ne 0) {
-        throw 'The isolated macro should remain empty after closing during the recording without injected input.'
+        throw 'The isolated macro should remain empty after closing during the foreground wait.'
     }
-    Write-Host 'AUTO-COC closed during the empty recording with exit code 0; updated_at advanced and the saved sequence stayed empty.'
+    Write-Host 'AUTO-COC closed during the foreground wait with exit code 0; the saved macro remained unchanged.'
 
     Write-Host 'Relaunching AUTO-COC against the same isolated profile.'
     $restartProcess = Start-SmokeProcess -Path $appPath -WorkingDirectory $installDir `
@@ -506,7 +506,7 @@ try {
 finally {
     foreach ($entry in @(
         @{ Label = 'Windows UI Automation restart helper'; Process = $restartUiAutomationProcess },
-        @{ Label = 'Windows UI Automation close-recording helper'; Process = $closeRecordingUiAutomationProcess },
+        @{ Label = 'Windows UI Automation close-wait helper'; Process = $closeWaitUiAutomationProcess },
         @{ Label = 'Windows UI Automation helper'; Process = $uiAutomationProcess },
         @{ Label = 'AUTO-COC relaunched process'; Process = $restartProcess },
         @{ Label = 'AUTO-COC second instance'; Process = $secondProcess },

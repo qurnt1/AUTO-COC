@@ -135,7 +135,7 @@ impl DesktopRuntime {
     }
 
     pub async fn screenshot(&self) -> Result<Vec<u8>, DesktopRuntimeError> {
-        Ok(self.controller.capture_screenshot_png().await?)
+        Ok(self.controller.capture_coc_screenshot_png().await?)
     }
 
     pub async fn open_macros_folder(&self) -> Result<Snapshot, DesktopRuntimeError> {

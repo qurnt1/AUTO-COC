@@ -1,5 +1,8 @@
 use std::{io, path::Path};
 
+const COC_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const COC_LAUNCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 const GOOGLE_PLAY_GAMES_COC_URI: &str =
     "googleplaygames://launch/?id=com.supercell.clashofclans&lid=1&pid=1";
 
@@ -117,138 +120,207 @@ pub fn open_known_folder(path: &Path) -> io::Result<()> {
     }
 }
 
-pub fn screenshot_png() -> io::Result<Vec<u8>> {
+pub fn coc_screenshot_png() -> io::Result<Vec<u8>> {
     #[cfg(windows)]
     {
-        use std::mem::size_of;
-        use windows_sys::Win32::{
-            Graphics::Gdi::{
-                BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
-                CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits,
-                ReleaseDC, SRCCOPY, SelectObject,
-            },
-            UI::WindowsAndMessaging::{
-                GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN,
-            },
-        };
-
-        let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-        let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
-        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-        if width <= 0
-            || height <= 0
-            || width > 32_768
-            || height > 32_768
-            || (width as u64).saturating_mul(height as u64) > 100_000_000
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid desktop dimensions",
-            ));
-        }
-
-        let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
-        if screen_dc.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
-        if memory_dc.is_null() {
-            unsafe {
-                ReleaseDC(std::ptr::null_mut(), screen_dc);
-            }
-            return Err(io::Error::last_os_error());
-        }
-        let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, width, height) };
-        if bitmap.is_null() {
-            unsafe {
-                DeleteDC(memory_dc);
-                ReleaseDC(std::ptr::null_mut(), screen_dc);
-            }
-            return Err(io::Error::last_os_error());
-        }
-        let previous = unsafe { SelectObject(memory_dc, bitmap.cast()) };
-        if previous.is_null() || previous as isize == -1 {
-            unsafe {
-                DeleteObject(bitmap.cast());
-                DeleteDC(memory_dc);
-                ReleaseDC(std::ptr::null_mut(), screen_dc);
-            }
-            return Err(io::Error::last_os_error());
-        }
-        let copied = unsafe {
-            BitBlt(
-                memory_dc,
-                0,
-                0,
-                width,
-                height,
-                screen_dc,
-                left,
-                top,
-                SRCCOPY | CAPTUREBLT,
-            )
-        };
-        if copied == 0 {
-            unsafe {
-                SelectObject(memory_dc, previous);
-                DeleteObject(bitmap.cast());
-                DeleteDC(memory_dc);
-                ReleaseDC(std::ptr::null_mut(), screen_dc);
-            }
-            return Err(io::Error::last_os_error());
-        }
-
-        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
-        info.bmiHeader = BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            biSizeImage: 0,
-            biXPelsPerMeter: 0,
-            biYPelsPerMeter: 0,
-            biClrUsed: 0,
-            biClrImportant: 0,
-        };
-        let byte_count = width as usize * height as usize * 4;
-        let mut bgra = vec![0u8; byte_count];
-        unsafe {
-            SelectObject(memory_dc, previous);
-        }
-        let lines = unsafe {
-            GetDIBits(
-                memory_dc,
-                bitmap,
-                0,
-                height as u32,
-                bgra.as_mut_ptr().cast(),
-                &mut info,
-                DIB_RGB_COLORS,
-            )
-        };
-        unsafe {
-            DeleteObject(bitmap.cast());
-            DeleteDC(memory_dc);
-            ReleaseDC(std::ptr::null_mut(), screen_dc);
-        }
-        if lines != height {
-            return Err(io::Error::last_os_error());
-        }
-
-        let rgb = bgrx_to_rgb(&bgra);
-        encode_rgb_png(width as u32, height as u32, &rgb)
+        let windows = crate::native_input::coc_windows()?;
+        let window = unique_coc_window(&windows)?;
+        crate::native_input::focus_coc_window(window)?;
+        capture_coc_window_png(window)
     }
     #[cfg(not(windows))]
     {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "screen capture is only available on Windows",
+            "Clash of Clans window capture is only available on Windows",
         ))
     }
+}
+
+fn unique_coc_window(windows: &[isize]) -> io::Result<isize> {
+    match windows {
+        [window] => Ok(*window),
+        [] => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Clash of Clans window was not found",
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "multiple Clash of Clans windows were found",
+        )),
+    }
+}
+
+pub fn wait_for_coc_window() -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        wait_for_coc_window_with(
+            crate::native_input::coc_windows,
+            || std::thread::sleep(COC_LAUNCH_POLL_INTERVAL),
+            std::time::Instant::now() + COC_LAUNCH_TIMEOUT,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Clash of Clans window detection is only available on Windows",
+        ))
+    }
+}
+
+fn wait_for_coc_window_with<T>(
+    mut find_windows: impl FnMut() -> io::Result<Vec<T>>,
+    mut wait: impl FnMut(),
+    deadline: std::time::Instant,
+) -> io::Result<()> {
+    loop {
+        if !find_windows()?.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Clash of Clans window did not appear after launch",
+            ));
+        }
+        wait();
+    }
+}
+
+#[cfg(windows)]
+fn capture_coc_window_png(window: isize) -> io::Result<Vec<u8>> {
+    use std::mem::size_of;
+    use windows_sys::Win32::{
+        Foundation::{HWND, POINT, RECT},
+        Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, ClientToScreen, CreateCompatibleBitmap,
+            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits,
+            ReleaseDC, SRCCOPY, SelectObject,
+        },
+        UI::WindowsAndMessaging::{GetClientRect, GetForegroundWindow},
+    };
+
+    let window = window as HWND;
+    if unsafe { GetForegroundWindow() } != window {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Clash of Clans lost foreground focus before capture",
+        ));
+    }
+    let mut client: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetClientRect(window, &mut client) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut origin = POINT { x: 0, y: 0 };
+    if unsafe { ClientToScreen(window, &mut origin) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let width = client.right - client.left;
+    let height = client.bottom - client.top;
+    if width <= 0
+        || height <= 0
+        || width > 32_768
+        || height > 32_768
+        || (width as u64).saturating_mul(height as u64) > 100_000_000
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Clash of Clans window dimensions",
+        ));
+    }
+
+    let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
+    if screen_dc.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
+    if memory_dc.is_null() {
+        unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
+        return Err(io::Error::last_os_error());
+    }
+    let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, width, height) };
+    if bitmap.is_null() {
+        unsafe {
+            DeleteDC(memory_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+        }
+        return Err(io::Error::last_os_error());
+    }
+    let previous = unsafe { SelectObject(memory_dc, bitmap.cast()) };
+    if previous.is_null() || previous as isize == -1 {
+        unsafe {
+            DeleteObject(bitmap.cast());
+            DeleteDC(memory_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+        }
+        return Err(io::Error::last_os_error());
+    }
+    let copied = unsafe {
+        BitBlt(
+            memory_dc, 0, 0, width, height, screen_dc, origin.x, origin.y, SRCCOPY,
+        )
+    };
+    let foreground_is_still_coc = unsafe { GetForegroundWindow() } == window;
+    if copied == 0 || !foreground_is_still_coc {
+        unsafe {
+            SelectObject(memory_dc, previous);
+            DeleteObject(bitmap.cast());
+            DeleteDC(memory_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+        }
+        return Err(if !foreground_is_still_coc {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Clash of Clans lost foreground focus during capture",
+            )
+        } else {
+            io::Error::last_os_error()
+        });
+    }
+
+    let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+    info.bmiHeader = BITMAPINFOHEADER {
+        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width,
+        biHeight: -height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: 0,
+        biXPelsPerMeter: 0,
+        biYPelsPerMeter: 0,
+        biClrUsed: 0,
+        biClrImportant: 0,
+    };
+    let mut bgra = vec![0u8; width as usize * height as usize * 4];
+    unsafe { SelectObject(memory_dc, previous) };
+    let lines = unsafe {
+        GetDIBits(
+            memory_dc,
+            bitmap,
+            0,
+            height as u32,
+            bgra.as_mut_ptr().cast(),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe {
+        DeleteObject(bitmap.cast());
+        DeleteDC(memory_dc);
+        ReleaseDC(std::ptr::null_mut(), screen_dc);
+    }
+    if lines != height {
+        return Err(io::Error::last_os_error());
+    }
+    if !crate::native_input::coc_windows()?.contains(&(window as isize)) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Clash of Clans window changed during capture",
+        ));
+    }
+    encode_rgb_png(width as u32, height as u32, &bgrx_to_rgb(&bgra))
 }
 
 fn bgrx_to_rgb(pixels: &[u8]) -> Vec<u8> {
@@ -463,6 +535,54 @@ mod tests {
         );
         assert!(wait_result.is_err());
         assert_eq!(*calls.borrow(), ["close", "wait"]);
+    }
+
+    #[test]
+    fn coc_launch_wait_returns_when_a_window_appears() {
+        let mut checks = 0;
+        wait_for_coc_window_with(
+            || {
+                checks += 1;
+                Ok(if checks == 1 {
+                    Vec::<u8>::new()
+                } else {
+                    vec![1]
+                })
+            },
+            || {},
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(checks, 2);
+    }
+
+    #[test]
+    fn coc_launch_wait_times_out_and_propagates_detection_errors() {
+        let deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        let timeout =
+            wait_for_coc_window_with(|| Ok(Vec::<u8>::new()), || {}, deadline).unwrap_err();
+        assert_eq!(timeout.kind(), io::ErrorKind::TimedOut);
+
+        let detection = wait_for_coc_window_with::<u8>(
+            || Err(io::Error::other("window detection failed")),
+            || {},
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(detection.to_string(), "window detection failed");
+    }
+
+    #[test]
+    fn coc_capture_requires_one_identified_game_window() {
+        assert_eq!(unique_coc_window(&[42]).unwrap(), 42);
+        assert_eq!(
+            unique_coc_window(&[]).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            unique_coc_window(&[42, 84]).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

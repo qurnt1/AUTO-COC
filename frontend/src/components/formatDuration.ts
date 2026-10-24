@@ -6,3 +6,11 @@ export function formatDuration(seconds: number): string {
   const rest = Math.floor(seconds % 60);
   return `${minutes} min ${rest.toString().padStart(2, "0")} s`;
 }
+
+export function formatElapsedDuration(seconds: number): string {
+  return formatDuration(Math.floor(seconds));
+}
+
+export function formatCountdown(seconds: number): number {
+  return Math.max(0, Math.ceil(seconds));
+}

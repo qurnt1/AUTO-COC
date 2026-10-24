@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::types::ShortcutSettings;
 
-const PREPARATION: Duration = Duration::from_secs(3);
+pub(crate) const RECORDING_PREPARATION: Duration = Duration::from_secs(3);
 const TAIL_TRIM_SECONDS: f64 = 3.0;
 const MAX_CAPTURE_EVENTS: usize = 250_000;
 const MAX_PLAYBACK_SECONDS: f64 = 86_400.0;
@@ -219,7 +219,7 @@ impl NativeInput {
         }
     }
 
-    pub async fn start_recording(&self) -> io::Result<()> {
+    pub async fn start_recording(&self) -> io::Result<Instant> {
         #[cfg(windows)]
         {
             self.inner.start_recording()
@@ -373,6 +373,37 @@ pub(crate) fn coc_windows() -> io::Result<Vec<isize>> {
     #[cfg(not(windows))]
     {
         Err(unsupported())
+    }
+}
+
+pub(crate) fn focus_coc_window(window: isize) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        win::focus_coc_window(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Err(unsupported())
+    }
+}
+
+fn wait_for_coc_foreground_with(
+    mut is_foreground: impl FnMut() -> io::Result<bool>,
+    mut wait: impl FnMut(),
+    deadline: Instant,
+) -> io::Result<()> {
+    loop {
+        if is_foreground()? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Windows did not allow Clash of Clans to become the foreground window",
+            ));
+        }
+        wait();
     }
 }
 
@@ -976,14 +1007,15 @@ mod win {
             },
             WindowsAndMessaging::{
                 CallNextHookEx, DispatchMessageW, EnumWindows, GetClientRect, GetForegroundWindow,
-                GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+                GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
                 KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, LLMHF_INJECTED,
                 LLMHF_LOWER_IL_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
-                PostMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
-                UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_CLOSE, WM_HOTKEY, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_SYSKEYDOWN, WM_SYSKEYUP,
+                PostMessageW, PostThreadMessageW, SW_RESTORE, SetForegroundWindow,
+                SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+                WH_KEYBOARD_LL, WH_MOUSE_LL, WM_CLOSE, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+                WM_SYSKEYUP,
             },
         },
     };
@@ -1001,6 +1033,8 @@ mod win {
     const MK_MBUTTON: WPARAM = 0x0010;
     const COC_CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
     const COC_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+    const COC_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(3);
+    const COC_FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(50);
     const PAUSED_TARGET_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
     #[derive(Clone)]
@@ -1149,6 +1183,38 @@ mod win {
     pub(super) fn coc_windows() -> io::Result<Vec<isize>> {
         enumerate_coc_windows()
             .map(|windows| windows.into_iter().map(|window| window as isize).collect())
+    }
+
+    pub(super) fn focus_coc_window(window: isize) -> io::Result<()> {
+        let window = window as HWND;
+        if !window_matches_coc(window)? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Clash of Clans window is no longer available",
+            ));
+        }
+
+        if unsafe { IsIconic(window) } != 0 || unsafe { IsWindowVisible(window) } == 0 {
+            unsafe { ShowWindow(window, SW_RESTORE) };
+        }
+        if unsafe { GetForegroundWindow() } != window {
+            unsafe { SetForegroundWindow(window) };
+        }
+
+        wait_for_coc_foreground_with(
+            || {
+                if !window_matches_coc(window)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Clash of Clans window is no longer available",
+                    ));
+                }
+                Ok(unsafe { GetForegroundWindow() } == window
+                    && unsafe { IsWindowVisible(window) } != 0)
+            },
+            || thread::sleep(COC_FOREGROUND_POLL_INTERVAL),
+            Instant::now() + COC_FOREGROUND_TIMEOUT,
+        )
     }
 
     pub(super) fn close_coc_window(window: isize) -> io::Result<()> {
@@ -1442,7 +1508,7 @@ mod win {
             self.shared.cached_coc_identity_is_foreground()
         }
 
-        pub fn start_recording(&self) -> io::Result<()> {
+        pub fn start_recording(&self) -> io::Result<Instant> {
             let mut recording = lock(&self.shared.recording);
             if recording.is_some() {
                 return Err(io::Error::new(
@@ -1451,8 +1517,9 @@ mod win {
                 ));
             }
             ensure_coc_foreground(true, self.shared.cached_coc_is_foreground())?;
+            let started = Instant::now();
             *recording = Some(Recording {
-                captures_at: Instant::now() + PREPARATION,
+                captures_at: started + RECORDING_PREPARATION,
                 last_event_at: None,
                 steps: Vec::new(),
                 held_keys: HashSet::new(),
@@ -1460,7 +1527,7 @@ mod win {
                 overflowed: false,
                 beeped: false,
             });
-            Ok(())
+            Ok(started)
         }
 
         pub fn stop_recording(&self) -> io::Result<RecordingCapture> {
@@ -3670,6 +3737,33 @@ mod tests {
     }
 
     #[test]
+    fn foreground_activation_waits_for_confirmation_and_fails_when_denied() {
+        use std::cell::Cell;
+
+        let checks = Cell::new(0);
+        let waits = Cell::new(0);
+        wait_for_coc_foreground_with(
+            || {
+                checks.set(checks.get() + 1);
+                Ok(checks.get() == 3)
+            },
+            || waits.set(waits.get() + 1),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(checks.get(), 3);
+        assert_eq!(waits.get(), 2);
+
+        let denied = wait_for_coc_foreground_with(
+            || Ok(false),
+            || {},
+            Instant::now() - Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
     fn coc_window_identity_requires_game_title_and_google_play_process() {
         assert!(is_coc_window_identity(
             "Clash of Clans - qurnt12",
@@ -4018,7 +4112,7 @@ mod tests {
     #[test]
     fn recording_beep_follows_the_first_accepted_event_only() {
         let start = Instant::now();
-        let captures_at = start + PREPARATION;
+        let captures_at = start + RECORDING_PREPARATION;
         let mut steps = Vec::new();
         let mut last_event_at = None;
         let mut overflowed = false;

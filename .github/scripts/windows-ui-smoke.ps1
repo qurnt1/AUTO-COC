@@ -9,7 +9,7 @@ param(
     [string]$RenamedMacroName,
     [Parameter(Mandatory = $true)]
     [string]$MacroFilePath,
-    [ValidateSet('setup', 'start-close-recording', 'verify-restart')]
+    [ValidateSet('setup', 'start-close-foreground-wait', 'verify-restart')]
     [string]$Mode = 'setup',
     [int]$TimeoutSeconds = 45
 )
@@ -239,9 +239,9 @@ try {
     $createLabel = "Cr$($accentedE)er une macro"
     $createSubmitLabel = "Cr$($accentedE)er la macro"
     $readyStateLabel = [string][char]0x00C9 + 'tat d' + $curlyApostrophe + 'AUTO-COC : Pr' + $accentedCircumflexE + 't'
+    $cancelWaitLabel = 'Annuler l' + $curlyApostrophe + 'attente'
     $eventCountLabel = '0 ' + $accentedE + 'v' + $accentedE + 'nements'
     $renamedMacroEventCountLabel = $RenamedMacroName + ' ' + $eventCountLabel
-    $stopRecordingLabel = 'Arr' + $accentedCircumflexE + 'ter l' + $curlyApostrophe + 'enregistrement'
     $window = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
     if ($window.Current.ProcessId -ne $AppProcessId) {
         throw "The UI Automation window belongs to process $($window.Current.ProcessId), expected AUTO-COC process $AppProcessId."
@@ -262,23 +262,21 @@ try {
         return
     }
 
-    if ($Mode -eq 'start-close-recording') {
+    if ($Mode -eq 'start-close-foreground-wait') {
         $macroBeforeRecording = Read-MacroFile -Path $MacroFilePath
         if ([string]$macroBeforeRecording.Data.name -cne $RenamedMacroName -or
             @($macroBeforeRecording.Data.steps).Count -ne 0) {
-            throw 'The renamed macro must be empty before starting the close-during-recording scenario.'
+            throw 'The renamed macro must be empty before starting the close-during-wait scenario.'
         }
 
         $record = Wait-ForElement -Root $window -Name 'Enregistrer' `
             -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
         Invoke-Element -Element $record
-        $null = Wait-ForElementContainingName -Root $window -Name 'Capture des actions en cours' `
+        $null = Wait-ForElementContainingName -Root $window -Name 'En attente de Clash of Clans' `
             -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds ($TimeoutSeconds + 10)
-        Start-Sleep -Seconds 4
-        $null = Wait-ForElement -Root $window -Name $stopRecordingLabel `
-            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
-            -RequireEnabled -IncludeOffscreen
-        Write-Output 'UI Automation left the empty recording active for the graceful-close scenario.'
+        $null = Wait-ForElement -Root $window -Name $cancelWaitLabel `
+            -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+        Write-Output 'UI Automation confirmed recording waits for the required Clash of Clans window before capture.'
         return
     }
 
@@ -324,21 +322,19 @@ try {
         throw 'The macro file name does not match the renamed macro before recording.'
     }
     Invoke-Element -Element $record
-    $null = Wait-ForElementContainingName -Root $window -Name 'Capture des actions en cours' `
+    $null = Wait-ForElementContainingName -Root $window -Name 'En attente de Clash of Clans' `
         -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds ($TimeoutSeconds + 10)
-    Start-Sleep -Seconds 4
-    $stopRecording = Wait-ForElement -Root $window -Name $stopRecordingLabel `
-        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
-        -RequireEnabled -IncludeOffscreen
-    Invoke-Element -Element $stopRecording
+    $cancelWait = Wait-ForElement -Root $window -Name $cancelWaitLabel `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
+    Invoke-Element -Element $cancelWait
     $null = Wait-ForElement -Root $window -Name $readyStateLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
         -StableForMilliseconds 1000
     $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
         -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds
     $macroAfterRecording = Read-MacroFile -Path $MacroFilePath
-    if ($macroAfterRecording.UpdatedAt -le $macroBeforeRecording.UpdatedAt) {
-        throw 'The macro updated_at timestamp did not advance after stopping the empty recording.'
+    if ($macroAfterRecording.UpdatedAt -ne $macroBeforeRecording.UpdatedAt) {
+        throw 'The macro updated_at timestamp should remain unchanged when the foreground wait is cancelled.'
     }
     if (@($macroAfterRecording.Data.steps).Count -ne 0) {
         throw 'The isolated macro file should contain no events after the recording without injected input.'
@@ -348,7 +344,7 @@ try {
     if ($play.Current.IsEnabled) {
         throw 'The empty recording unexpectedly enabled macro playback.'
     }
-    Write-Output 'UI Automation confirmed recording start and stop; updated_at advanced and the persisted sequence is empty.'
+    Write-Output 'UI Automation confirmed the foreground wait can be cancelled without changing the saved macro.'
 }
 catch {
     [System.Console]::WriteLine("Windows UI Automation smoke failed: $($_.Exception.Message)")

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTimelineMarkers, getTraceNodeClass, MAX_TIMELINE_MARKERS } from "./sequence";
+import { getPlaybackPosition, getTimelineMarkers, getTraceNodeClass, MAX_TIMELINE_MARKERS } from "./sequence";
 
 describe("timeline markers", () => {
   it("represents each contiguous movement run by its final step and keeps every other action", () => {
@@ -82,5 +82,21 @@ describe("timeline markers", () => {
 
   it("returns no markers for an empty sequence", () => {
     expect(getTimelineMarkers([])).toEqual([]);
+  });
+});
+
+describe("playback position", () => {
+  it("maps elapsed time to a bounded position in a single playback", () => {
+    expect(getPlaybackPosition(4.25, 10, false)).toEqual({ elapsedSeconds: 4.25, percent: 42.5, cycle: 0 });
+    expect(getPlaybackPosition(12, 10, false)).toEqual({ elapsedSeconds: 10, percent: 100, cycle: 0 });
+  });
+
+  it("wraps progress and identifies the current loop cycle", () => {
+    expect(getPlaybackPosition(12.5, 10, true)).toEqual({ elapsedSeconds: 2.5, percent: 25, cycle: 1 });
+  });
+
+  it("returns a safe zero position for invalid or empty durations", () => {
+    expect(getPlaybackPosition(4, 0, true)).toEqual({ elapsedSeconds: 0, percent: 0, cycle: 0 });
+    expect(getPlaybackPosition(Number.NaN, 10, false)).toEqual({ elapsedSeconds: 0, percent: 0, cycle: 0 });
   });
 });

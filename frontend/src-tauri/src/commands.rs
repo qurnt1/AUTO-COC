@@ -58,11 +58,15 @@ impl From<ServiceError> for CommandError {
             ),
             ServiceError::CocNotForeground => Self::new(
                 "coc_not_foreground",
-                "Affichez Clash of Clans au premier plan avant de démarrer la macro.",
+                "Clash of Clans doit être au premier plan pour cette action.",
             ),
             ServiceError::CocWindowUnavailable => Self::new(
                 "coc_window_unavailable",
-                "Ouvrez Clash of Clans avant de démarrer le replay.",
+                "Ouvrez Clash of Clans avant cette action.",
+            ),
+            ServiceError::CocLaunchUnconfirmed => Self::new(
+                "coc_launch_unconfirmed",
+                "La fenêtre de Clash of Clans n’a pas été détectée après la demande de lancement.",
             ),
             ServiceError::InvalidShortcut => Self::new(
                 "invalid_shortcut",
@@ -82,7 +86,7 @@ impl From<ServiceError> for CommandError {
             ),
             ServiceError::ScreenshotUnavailable => Self::new(
                 "screenshot_unavailable",
-                "La capture d’écran n’est pas disponible sur ce poste.",
+                "Le contenu de la fenêtre Clash of Clans n’a pas pu être capturé.",
             ),
             ServiceError::EmptyMacro => Self::new(
                 "empty_macro",

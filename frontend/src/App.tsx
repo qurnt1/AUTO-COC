@@ -7,6 +7,8 @@ import { Atelier } from "./components/Atelier";
 import { Help } from "./components/Help";
 import { ActionErrorFeedback } from "./components/ActionErrorFeedback";
 import { Icon } from "./components/Icon";
+import { MacroDialog, type MacroDialogState } from "./components/MacroDialog";
+import { MacroLibrary } from "./components/MacroLibrary";
 import { Settings, type SettingsTab } from "./components/Settings";
 import appIcon from "./assets/app-icon.png";
 
@@ -57,6 +59,8 @@ function DesktopApp() {
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
+  const [macroQuery, setMacroQuery] = useState("");
+  const [macroDialog, setMacroDialog] = useState<MacroDialogState | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [onboardingDismissed, setOnboardingDismissed] = useState(false);
   const mobileMenuButton = useRef<HTMLButtonElement>(null);
@@ -262,6 +266,17 @@ function DesktopApp() {
     const updated = await run("onboarding", () => api.completeOnboarding(), "Guide de démarrage terminé.");
     if (updated) window.requestAnimationFrame(() => document.querySelector<HTMLElement>("#main-content h1")?.focus({ preventScroll: true }));
   }
+
+  async function createMacro(name: string) {
+    const created = await run("create", () => api.createMacro(name), "Macro créée.");
+    if (created) setMacroDialog(null);
+  }
+
+  function selectMacro(name: string) {
+    navigate("atelier");
+    void run("select", () => api.selectMacro(name));
+  }
+
   const online = connection === "connected";
 
   const pageLabel = view === "atelier" ? "Atelier" : view === "settings" ? "Réglages" : "Aide";
@@ -283,19 +298,16 @@ function DesktopApp() {
           <NavButton view="help" current={view} onNavigate={navigate} icon="help">Aide</NavButton>
         </nav>
         <div className="sidebar-rule" />
-        <div className="sidebar-library-label"><span>Bibliothèque</span><span className="library-count">{snapshot?.macros.length ?? "—"}</span></div>
-        {snapshot && snapshot.macros.length > 0 ? (
-          <nav className="sidebar-macros" aria-label="Accès aux macros">
-            {snapshot.macros.slice(0, 5).map((macro) => {
-              const selected = macro.name === snapshot.selectedMacro;
-              return <button key={macro.name} type="button" className={`sidebar-macro ${selected ? "selected" : ""}`} aria-pressed={selected} onClick={() => { navigate("atelier"); void run("select", () => api.selectMacro(macro.name)); }} disabled={!online || snapshot.status.kind !== "idle" || busy !== null}>
-                <span className="sidebar-macro-name">{macro.name}</span>
-                {selected && <Icon className="sidebar-macro-check" name="check" size={16} />}
-              </button>;
-            })}
-            {snapshot.macros.length > 5 && <button className="sidebar-more" type="button" onClick={() => navigate("atelier")}>Voir les {snapshot.macros.length - 5} autres</button>}
-          </nav>
-        ) : <p className="sidebar-empty">Vos macros apparaîtront ici.</p>}
+        <MacroLibrary
+          macros={snapshot?.macros ?? []}
+          selectedMacro={snapshot?.selectedMacro ?? null}
+          query={macroQuery}
+          loading={!snapshot}
+          disabled={!snapshot || !online || snapshot.status.kind !== "idle" || busy !== null}
+          onQueryChange={setMacroQuery}
+          onCreate={() => setMacroDialog({ kind: "create" })}
+          onSelect={selectMacro}
+        />
       </aside>
 
       <div className="page-shell" id="main-content" aria-label={pageLabel} tabIndex={-1}>
@@ -309,11 +321,12 @@ function DesktopApp() {
         {notice && <div className="action-feedback success" role="status"><Icon name="check" size={16} /><span>{notice}</span></div>}
         {connection === "disconnected" && snapshot && <div className="reconnecting-strip" role="status"><span className="connection-mark disconnected"><i /></span>AUTO-COC ne répond pas. Les commandes sont temporairement indisponibles.</div>}
 
-        {snapshot && view === "atelier" && <Atelier api={api} snapshot={snapshot} busy={busy} run={run} online={online} showOnboarding={!snapshot.onboardingComplete && !onboardingDismissed} onDismissOnboarding={dismissOnboarding} onCompleteOnboarding={() => { void completeOnboarding(); }} />}
+        {snapshot && view === "atelier" && <Atelier api={api} snapshot={snapshot} busy={busy} run={run} online={online} showOnboarding={!snapshot.onboardingComplete && !onboardingDismissed} onDismissOnboarding={dismissOnboarding} onCompleteOnboarding={() => { void completeOnboarding(); }} onClearMacroSearch={() => setMacroQuery("")} />}
         {snapshot && view === "settings" && <Settings api={api} snapshot={snapshot} busy={busy} run={run} online={online} initialTab={settingsTab} />}
         {view === "help" && <Help api={api} snapshot={snapshot} busy={busy} run={run} navigate={navigate} online={online} onResumeOnboarding={resumeOnboarding} onCompleteOnboarding={() => { void completeOnboarding(); }} />}
         {!snapshot && connection !== "disconnected" && <div className="page-loading" role="status"><div className="loading-trace"><i /><i /><i /></div><span>Chargement de votre atelier</span></div>}
       </div>
+      {macroDialog && <MacroDialog dialog={macroDialog} busy={!online || busy !== null || snapshot?.status.kind !== "idle"} onClose={() => setMacroDialog(null)} onSubmit={(name) => { void createMacro(name); }} />}
     </div>
   );
 }

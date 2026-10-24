@@ -11,7 +11,9 @@ use tokio::{
 };
 
 use crate::{
-    native_input::{NativeEvent, NativeInput, PlaybackFailure, PlaybackStopReason},
+    native_input::{
+        NativeEvent, NativeInput, PlaybackFailure, PlaybackStopReason, RECORDING_PREPARATION,
+    },
     storage::{Store, StoreError},
     types::{AppStatus, PendingAction, RecordingPhase, SessionStatus, Snapshot, TelegramStatus},
 };
@@ -58,6 +60,8 @@ pub enum ControllerError {
     CocNotForeground,
     #[error("Clash of Clans doit être ouvert pour démarrer le replay")]
     CocWindowUnavailable,
+    #[error("Clash of Clans window did not appear after launch")]
+    CocLaunchUnconfirmed,
     #[error("recorded steps could not be saved and remain available for retry")]
     RecordingSavePending,
     #[error("recording reached the event limit and only its collected events were saved")]
@@ -611,18 +615,19 @@ impl Controller {
 
         match pending {
             PendingOperation::Recording { macro_name } => {
-                if let Err(error) = native.start_recording().await {
-                    if error.kind() == std::io::ErrorKind::PermissionDenied {
+                let started = match native.start_recording().await {
+                    Ok(started) => started,
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                    Err(_) => {
+                        machine.operation = Operation::Idle;
+                        machine.last_error = Some("L’enregistrement n’a pas pu démarrer.".into());
+                        let _ = self.changed(&mut machine).await;
                         return;
                     }
-                    machine.operation = Operation::Idle;
-                    machine.last_error = Some("L’enregistrement n’a pas pu démarrer.".into());
-                    let _ = self.changed(&mut machine).await;
-                    return;
-                }
+                };
                 machine.operation = Operation::Recording {
                     macro_name,
-                    started: Instant::now(),
+                    started,
                 };
             }
             PendingOperation::Playing {
@@ -934,16 +939,17 @@ impl Controller {
             return self.changed(&mut machine).await;
         }
         ensure_start_foreground(true, foreground)?;
-        if let Err(error) = native.start_recording().await {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+        let started = match native.start_recording().await {
+            Ok(started) => started,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 arm_for_foreground(&mut machine, PendingOperation::Recording { macro_name });
                 return self.changed(&mut machine).await;
             }
-            return Err(map_native_error(error));
-        }
+            Err(error) => return Err(map_native_error(error)),
+        };
         machine.operation = Operation::Recording {
             macro_name,
-            started: Instant::now(),
+            started,
         };
         machine.foreground_loss_handled = false;
         machine.last_error = None;
@@ -1676,11 +1682,15 @@ impl Controller {
         Ok(())
     }
 
-    pub async fn capture_screenshot_png(&self) -> Result<Vec<u8>, ControllerError> {
-        tokio::task::spawn_blocking(crate::system::screenshot_png)
+    pub async fn capture_coc_screenshot_png(&self) -> Result<Vec<u8>, ControllerError> {
+        tokio::task::spawn_blocking(crate::system::coc_screenshot_png)
             .await
             .map_err(|_| ControllerError::ScreenshotUnavailable)?
-            .map_err(|_| ControllerError::ScreenshotUnavailable)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => ControllerError::CocWindowUnavailable,
+                std::io::ErrorKind::PermissionDenied => ControllerError::CocNotForeground,
+                _ => ControllerError::ScreenshotUnavailable,
+            })
     }
 
     pub async fn diagnostics(&self) -> Result<crate::types::Diagnostics, ControllerError> {
@@ -1704,7 +1714,30 @@ impl Controller {
         token: &str,
         owner: crate::telegram::TelegramOwner,
     ) -> Result<Snapshot, ControllerError> {
-        self.launch_coc_with_authority(Some((token, owner))).await
+        {
+            let mut machine = self.machine.lock().await;
+            ensure_telegram_authorized(&machine, token, owner)?;
+            ensure_idle(&machine)?;
+            if crate::native_input::coc_windows()
+                .map_err(|_| ControllerError::NativeInputFailed)?
+                .is_empty()
+            {
+                let path = machine.store.settings().coc_path.clone();
+                crate::system::launch_configured_path(&path)
+                    .map_err(|_| StoreError::InvalidData)?;
+            }
+            machine.coc_launched_once = true;
+            self.changed(&mut machine).await?;
+        }
+
+        tokio::task::spawn_blocking(crate::system::wait_for_coc_window)
+            .await
+            .map_err(|_| ControllerError::NativeInputFailed)?
+            .map_err(map_coc_launch_wait_error)?;
+
+        let machine = self.machine.lock().await;
+        ensure_telegram_authorized(&machine, token, owner)?;
+        Self::snapshot_of(&machine).await
     }
 
     pub async fn reload_coc_for_telegram(
@@ -1738,13 +1771,24 @@ impl Controller {
             .and_then(|result| {
                 result.map_err(|error| ControllerError::Store(StoreError::Io(error)))
             });
-        reservation.succeeded = Some(reload.is_ok());
         reservation.task.take();
+
+        let validation = if reload.is_ok() {
+            tokio::task::spawn_blocking(crate::system::wait_for_coc_window)
+                .await
+                .map_err(|_| ControllerError::NativeInputFailed)
+                .and_then(|result| result.map_err(map_coc_launch_wait_error))
+        } else {
+            Ok(())
+        };
+        reservation.succeeded = Some(reload.is_ok() && validation.is_ok());
 
         let mut machine = self.machine.lock().await;
         machine.coc_reload_in_progress = false;
         reservation.active = false;
         reload?;
+        validation?;
+        ensure_telegram_authorized(&machine, token, owner)?;
         machine.coc_launched_once = true;
         self.changed(&mut machine).await
     }
@@ -1798,18 +1842,13 @@ impl Controller {
                 macro_name,
                 started,
             } => {
-                let elapsed = started.elapsed().as_secs_f64();
-                let active_elapsed = (elapsed - 3.0).max(0.0);
-                let phase = if elapsed >= 3.0 {
-                    RecordingPhase::Capturing
-                } else {
-                    RecordingPhase::Preparing
-                };
+                let (phase, countdown_seconds, active_elapsed) =
+                    recording_timing(*started, Instant::now());
                 (
                     AppStatus::Recording {
                         macro_name: macro_name.clone(),
                         phase,
-                        countdown_seconds: (3.0 - elapsed).max(0.0),
+                        countdown_seconds,
                         elapsed_seconds: active_elapsed,
                     },
                     active_elapsed,
@@ -2171,6 +2210,24 @@ fn playback_elapsed(started: &Instant, paused_at: &Instant) -> f64 {
         .as_secs_f64()
 }
 
+fn recording_timing(started: Instant, now: Instant) -> (RecordingPhase, f64, f64) {
+    let captures_at = started + RECORDING_PREPARATION;
+    let remaining = captures_at.saturating_duration_since(now);
+    if !remaining.is_zero() {
+        (
+            RecordingPhase::Preparing,
+            remaining.as_secs_f64().ceil(),
+            0.0,
+        )
+    } else {
+        (
+            RecordingPhase::Capturing,
+            0.0,
+            now.saturating_duration_since(captures_at).as_secs_f64(),
+        )
+    }
+}
+
 fn pending_paused_operation(pending: PendingOperation) -> Option<Operation> {
     match pending {
         PendingOperation::ResumePlayback {
@@ -2267,6 +2324,14 @@ fn map_native_error(error: std::io::Error) -> ControllerError {
     }
 }
 
+fn map_coc_launch_wait_error(error: std::io::Error) -> ControllerError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut => ControllerError::CocLaunchUnconfirmed,
+        std::io::ErrorKind::Unsupported => ControllerError::NativeInputUnavailable,
+        _ => ControllerError::NativeInputFailed,
+    }
+}
+
 fn native_event_error_message(
     error: &ControllerError,
     has_existing_error: bool,
@@ -2296,6 +2361,7 @@ fn telegram_verification_failure(error: crate::telegram::TelegramError) -> Teleg
         crate::telegram::TelegramError::Unauthorized => TelegramStatus::TokenRejected,
         crate::telegram::TelegramError::Request => TelegramStatus::NetworkError,
         crate::telegram::TelegramError::Rejected
+        | crate::telegram::TelegramError::MessageNotModified
         | crate::telegram::TelegramError::InvalidResponse => TelegramStatus::Error,
     }
 }
@@ -3035,6 +3101,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(update.revision > stale);
+    }
+
+    #[test]
+    fn recording_countdown_and_capture_share_one_monotonic_start() {
+        let started = Instant::now();
+        let captures_at = started + RECORDING_PREPARATION;
+
+        let (phase, countdown, elapsed) = recording_timing(started, started);
+        assert!(matches!(phase, RecordingPhase::Preparing));
+        assert_eq!(countdown, 3.0);
+        assert_eq!(elapsed, 0.0);
+
+        let (phase, countdown, elapsed) =
+            recording_timing(started, captures_at - Duration::from_millis(1));
+        assert!(matches!(phase, RecordingPhase::Preparing));
+        assert_eq!(countdown, 1.0);
+        assert_eq!(elapsed, 0.0);
+
+        let (phase, countdown, elapsed) = recording_timing(started, captures_at);
+        assert!(matches!(phase, RecordingPhase::Capturing));
+        assert_eq!(countdown, 0.0);
+        assert_eq!(elapsed, 0.0);
+
+        let (phase, countdown, elapsed) =
+            recording_timing(started, captures_at + Duration::from_millis(1_050));
+        assert!(matches!(phase, RecordingPhase::Capturing));
+        assert_eq!(countdown, 0.0);
+        assert!((elapsed - 1.05).abs() < 0.000_001);
     }
 
     #[tokio::test]

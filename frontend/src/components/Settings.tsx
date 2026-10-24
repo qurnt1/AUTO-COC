@@ -183,7 +183,7 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
   }
 
   async function takeScreenshot() {
-    const blob = await run("screenshot", () => api.getScreenshot(), "Capture réalisée sur cet ordinateur.");
+    const blob = await run("screenshot", () => api.getScreenshot(), "Capture de Clash of Clans réalisée. Le jeu est au premier plan.");
     if (!blob) return;
     setScreenshotUrl((current) => { if (current) URL.revokeObjectURL(current); return URL.createObjectURL(blob); });
   }
@@ -236,8 +236,8 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
                 <label className="switch-control"><span className="sr-only">Activer la boucle</span><input type="checkbox" checked={snapshot.settings.loop} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("loop-setting", () => api.updateSettings({ loop: event.target.checked }), event.target.checked ? "Boucle activée." : "Boucle désactivée.")} /><i aria-hidden="true" /></label>
               </div>
               <div className="setting-row">
-                <div className="setting-row-copy"><strong>Autoriser le replay en arrière-plan</strong><span>Si CoC est ouvert, le replay peut démarrer en arrière-plan et continuer quand vous passez à une autre application. Les actions sont envoyées à la fenêtre de CoC uniquement. Si la fenêtre ou le processus disparaît, le replay s’arrête. Désactivée, la lecture démarre au premier plan puis se met en pause dès que CoC perd le focus. L’enregistrement reste limité au premier plan.</span></div>
-                <label className="switch-control"><span className="sr-only">Autoriser le replay en arrière-plan</span><input type="checkbox" checked={snapshot.settings.allowCocBackgroundPlayback} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("background-playback-setting", () => api.updateSettings({ allowCocBackgroundPlayback: event.target.checked }), event.target.checked ? "Replay en arrière-plan activé." : "Replay en arrière-plan désactivé.")} /><i aria-hidden="true" /></label>
+                <div className="setting-row-copy"><strong>Mettre en pause si CoC perd le focus</strong><span>Activée, la lecture se met en pause dès que vous quittez le jeu. Si sa fenêtre ou son processus disparaît, elle s’arrête toujours. Désactivée, le replay peut continuer en arrière-plan, avec les actions ciblées sur CoC. L’enregistrement reste limité au premier plan.</span></div>
+                <label className="switch-control"><span className="sr-only">Mettre en pause si CoC perd le focus</span><input type="checkbox" checked={!snapshot.settings.allowCocBackgroundPlayback} disabled={!online || snapshot.status.kind !== "idle" || busy !== null} onChange={(event) => void run("background-playback-setting", () => api.updateSettings({ allowCocBackgroundPlayback: !event.target.checked }), event.target.checked ? "Pause hors CoC activée." : "Replay en arrière-plan activé.")} /><i aria-hidden="true" /></label>
               </div>
               <div className="setting-row coc-launch-row">
                 <div className="setting-row-copy"><strong>Lancer Clash of Clans</strong><span>{snapshot.settings.cocPath ? "Utilise le chemin enregistré ci-dessus." : "Ajoutez d’abord le chemin de l’application."}</span></div>
@@ -325,10 +325,10 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
             <>
               <div className="settings-section-head"><span className="section-kicker">Outils de cet ordinateur</span><h2>Système</h2><p>Ces actions sont exécutées par AUTO-COC sur ce PC.</p></div>
               <div className="setting-row system-action-row">
-                <div className="setting-row-copy"><strong>Capture d’écran</strong><span>L’aperçu reste dans cette page. Aucune image n’est envoyée à Telegram.</span></div>
-                <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void takeScreenshot()}><Icon name="activity" size={15} />{busy === "screenshot" ? "Capture…" : "Capturer l’écran"}</button>
+                <div className="setting-row-copy"><strong>Capture de Clash of Clans</strong><span>CoC passe au premier plan. L’aperçu reste dans cette page et n’est pas envoyé à Telegram.</span></div>
+                <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void takeScreenshot()}><Icon name="activity" size={15} />{busy === "screenshot" ? "Capture…" : "Capturer CoC"}</button>
               </div>
-              {screenshotUrl && <figure className="screenshot-preview"><img src={screenshotUrl} alt="Capture d’écran réalisée sur cet ordinateur" /><figcaption><span>Aperçu</span><a className="text-button" href={screenshotUrl} download="auto-coc-capture.png">Enregistrer l’image</a></figcaption></figure>}
+              {screenshotUrl && <figure className="screenshot-preview"><img src={screenshotUrl} alt="Capture de la fenêtre Clash of Clans" /><figcaption><span>Aperçu CoC</span><a className="text-button" href={screenshotUrl} download="clash-of-clans.png">Enregistrer l’image</a></figcaption></figure>}
               <div className="setting-row system-action-row">
                 <div className="setting-row-copy"><strong>Dossier des macros</strong><span>Ouvre le dossier de données utilisé par AUTO-COC.</span></div>
                 <button className="button quiet" type="button" disabled={!online || busy !== null} onClick={() => void run("macros-folder", () => api.openMacrosFolder(), "Dossier des macros ouvert.")}><Icon name="folder" size={15} />Ouvrir le dossier</button>
