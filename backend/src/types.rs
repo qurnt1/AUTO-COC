@@ -113,10 +113,7 @@ impl Default for TelegramSettings {
 pub struct Settings {
     #[serde(rename = "loop")]
     pub loop_playback: bool,
-    #[serde(
-        default = "default_background_playback",
-        alias = "requireCocForeground"
-    )]
+    #[serde(default = "default_background_playback")]
     pub allow_coc_background_playback: bool,
     pub coc_path: String,
     pub shortcuts: ShortcutSettings,
@@ -237,7 +234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn background_replay_defaults_on_and_accepts_the_previous_setting_name() {
+    fn background_replay_defaults_on_and_round_trips_the_current_setting_name() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "loop": false,
             "cocPath": "",
@@ -255,9 +252,9 @@ mod tests {
         assert!(settings.allow_coc_background_playback);
         assert!(Settings::default().allow_coc_background_playback);
 
-        let legacy: Settings = serde_json::from_value(serde_json::json!({
+        let persisted: Settings = serde_json::from_value(serde_json::json!({
             "loop": false,
-            "requireCocForeground": false,
+            "allowCocBackgroundPlayback": false,
             "cocPath": "",
             "shortcuts": {"toggle": "F1", "play": "Ctrl+Shift+1", "stop": "Ctrl+Shift+0"},
             "telegram": {
@@ -269,9 +266,9 @@ mod tests {
             }
         }))
         .unwrap();
-        assert!(!legacy.allow_coc_background_playback);
+        assert!(!persisted.allow_coc_background_playback);
         assert!(
-            serde_json::to_value(legacy)
+            serde_json::to_value(persisted)
                 .unwrap()
                 .get("allowCocBackgroundPlayback")
                 .is_some()
@@ -353,7 +350,6 @@ pub struct MacroFile {
 pub struct SettingsPatch {
     #[serde(rename = "loop")]
     pub loop_playback: Option<bool>,
-    #[serde(alias = "requireCocForeground")]
     pub allow_coc_background_playback: Option<bool>,
     pub coc_path: Option<String>,
 }

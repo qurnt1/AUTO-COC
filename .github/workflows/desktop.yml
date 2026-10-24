@@ -65,7 +65,7 @@ jobs:
         run: cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0.0" --locked
+        run: cargo install tauri-cli --version "2.12.4" --locked
 
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v1

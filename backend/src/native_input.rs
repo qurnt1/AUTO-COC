@@ -13,8 +13,17 @@ pub(crate) const RECORDING_PREPARATION: Duration = Duration::from_secs(3);
 const TAIL_TRIM_SECONDS: f64 = 3.0;
 const MAX_CAPTURE_EVENTS: usize = 250_000;
 const MAX_PLAYBACK_SECONDS: f64 = 86_400.0;
+const WHEEL_DELTA: i32 = 120;
 const OUTSIDE_COC_CLIENT_AREA: &str =
     "recorded mouse position is outside the Clash of Clans client area";
+
+fn checked_wheel_delta(amount: i32) -> io::Result<i16> {
+    let delta = amount
+        .checked_mul(WHEEL_DELTA)
+        .ok_or_else(|| invalid_input("scroll amount is too large"))?;
+    i16::try_from(delta)
+        .map_err(|_| invalid_input("scroll amount is outside the Windows wheel range"))
+}
 
 fn is_outside_coc_client_area(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::InvalidInput && error.to_string() == OUTSIDE_COC_CLIENT_AREA
@@ -264,6 +273,17 @@ impl NativeInput {
         #[cfg(windows)]
         {
             self.inner.stop_playback().await
+        }
+        #[cfg(not(windows))]
+        {
+            Err(unsupported())
+        }
+    }
+
+    pub fn retry_pending_playback_release(&self) -> io::Result<bool> {
+        #[cfg(windows)]
+        {
+            self.inner.retry_pending_playback_release()
         }
         #[cfg(not(windows))]
         {
@@ -1025,7 +1045,6 @@ mod win {
     const HOTKEY_STOP: i32 = 3;
     const HOTKEY_IDS: [i32; 3] = [HOTKEY_TOGGLE, HOTKEY_PLAY, HOTKEY_STOP];
     const INJECTION_TAG: usize = 0x4155_4343;
-    const WHEEL_DELTA: i32 = 120;
     const MK_LBUTTON: WPARAM = 0x0001;
     const MK_RBUTTON: WPARAM = 0x0002;
     const MK_SHIFT: WPARAM = 0x0004;
@@ -1059,6 +1078,7 @@ mod win {
         suppressed_hotkeys: Mutex<HashMap<i32, Instant>>,
         events: mpsc::UnboundedSender<NativeEvent>,
         playback: AsyncMutex<Option<PlaybackControl>>,
+        pending_release: Mutex<Option<PendingRelease>>,
         next_playback_id: AtomicU64,
     }
 
@@ -1417,6 +1437,11 @@ mod win {
         process_created_at: u64,
     }
 
+    struct PendingRelease {
+        target: CocTarget,
+        held: HeldInputs,
+    }
+
     enum WorkerCommand {
         SetShortcuts {
             bindings: [ParsedHotkey; 3],
@@ -1453,6 +1478,7 @@ mod win {
                 suppressed_hotkeys: Mutex::new(HashMap::new()),
                 events,
                 playback: AsyncMutex::new(None),
+                pending_release: Mutex::new(None),
                 next_playback_id: AtomicU64::new(1),
             });
             let (worker_tx, worker_rx) = std_mpsc::channel();
@@ -1560,6 +1586,7 @@ mod win {
                 playback.take();
                 joined?;
             }
+            self.retry_pending_playback_release()?;
             let target = playback_target(allow_background_playback)?;
             if !allow_background_playback {
                 ensure_coc_foreground(true, target_is_foreground(target))?;
@@ -1600,6 +1627,25 @@ mod win {
             let joined = join_playback_task(&mut control.task).await;
             playback.take();
             joined.map(Some)
+        }
+
+        pub fn retry_pending_playback_release(&self) -> io::Result<bool> {
+            let mut pending = lock(&self.shared.pending_release);
+            let Some(release) = pending.as_mut() else {
+                return Ok(false);
+            };
+            match retry_pending_release(release) {
+                Ok(()) => {
+                    *pending = None;
+                    Ok(true)
+                }
+                Err(error) => {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        *pending = None;
+                    }
+                    Err(error)
+                }
+            }
         }
 
         pub async fn acknowledge_playback_terminal(&self, playback_id: u64) -> io::Result<()> {
@@ -1656,6 +1702,7 @@ mod win {
 
         pub async fn shutdown(&mut self) -> io::Result<()> {
             self.stop_playback().await?;
+            self.retry_pending_playback_release()?;
             let Some(worker) = self.worker.take() else {
                 return Ok(());
             };
@@ -2345,7 +2392,7 @@ mod win {
                 break;
             }
         }
-        finalized_playback_event(
+        let terminal = finalized_playback_event(
             id,
             input_failed,
             release_failed,
@@ -2355,7 +2402,17 @@ mod win {
             |event| {
                 let _ = shared.events.send(event.clone());
             },
-        )
+        );
+        if !guard.held.keys.is_empty() || !guard.held.buttons.is_empty() {
+            let mut pending = lock(&shared.pending_release);
+            if pending.is_none() {
+                *pending = Some(PendingRelease {
+                    target,
+                    held: std::mem::take(&mut guard.held),
+                });
+            }
+        }
+        terminal
     }
 
     enum PlaybackPauseResult {
@@ -2783,9 +2840,7 @@ mod win {
             if amount == 0 {
                 continue;
             }
-            let delta = amount
-                .checked_mul(WHEEL_DELTA)
-                .ok_or_else(|| invalid_input("scroll amount is too large"))?;
+            let delta = checked_wheel_delta(amount)?;
             let wparam = mouse_key_state(held, None) | (usize::from(delta as u16) << 16);
             post_target_message(target, window, message, wparam, lparam, require_foreground)?;
         }
@@ -2863,9 +2918,20 @@ mod win {
         if held.keys.is_empty() && held.buttons.is_empty() {
             return Ok(());
         }
-        release_targeted_inputs_with(
-            || target_window(target, false),
-            held,
+        let mut release = PendingRelease {
+            target,
+            held: std::mem::take(held),
+        };
+        let result = retry_pending_release(&mut release);
+        *held = release.held;
+        result
+    }
+
+    fn retry_pending_release(release: &mut PendingRelease) -> io::Result<()> {
+        let target = release.target;
+        retry_pending_release_with(
+            release,
+            |target| target_window(target, false),
             |window, key, keys| post_target_key_release(target, window, key, keys),
             |window, button, point, held| {
                 let message = match button {
@@ -2882,6 +2948,21 @@ mod win {
                     false,
                 )
             },
+        )
+    }
+
+    fn retry_pending_release_with(
+        release: &mut PendingRelease,
+        resolve_target: impl FnOnce(CocTarget) -> io::Result<HWND>,
+        release_key: impl FnMut(HWND, u16, &HashSet<u16>) -> io::Result<()>,
+        release_button: impl FnMut(HWND, MouseButton, (i32, i32), &HeldInputs) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let target = release.target;
+        release_targeted_inputs_with(
+            || resolve_target(target),
+            &mut release.held,
+            release_key,
+            release_button,
         )
     }
 
@@ -2964,13 +3045,14 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::{
-            CocTarget, HeldInputs, MouseButton, NativeEvent, PlaybackFailure, PlaybackPauseResult,
-            RecordedMousePoint, Recording, ReplayWait, Shared, append_recording_key_event,
-            append_recording_mouse_button_event, current_foreground_coc_window,
-            finalized_playback_event, finish_guard_release, invalid_target_window, is_extended_key,
-            join_playback_task, key_release_order, pack_window_coordinates, parse_steps,
-            pause_after_release, playback_completion_event, playback_target, release_guard_on_drop,
-            release_targeted_inputs_with, run_playback, send_targeted_mouse_move,
+            CocTarget, HeldInputs, MouseButton, NativeEvent, PendingRelease, PlaybackFailure,
+            PlaybackPauseResult, RecordedMousePoint, Recording, ReplayWait, Shared,
+            append_recording_key_event, append_recording_mouse_button_event,
+            current_foreground_coc_window, finalized_playback_event, finish_guard_release,
+            invalid_target_window, is_extended_key, join_playback_task, key_release_order,
+            pack_window_coordinates, parse_steps, pause_after_release, playback_completion_event,
+            playback_target, release_guard_on_drop, release_targeted_inputs_with,
+            retry_pending_release_with, run_playback, send_targeted_mouse_move,
             shift_replay_timing, signal_playback_resume, single_background_target,
             target_is_foreground, target_visibility_allowed, wait_for_replay_step,
         };
@@ -3116,6 +3198,7 @@ mod win {
                 suppressed_hotkeys: std::sync::Mutex::new(HashMap::new()),
                 events,
                 playback: super::AsyncMutex::new(None),
+                pending_release: std::sync::Mutex::new(None),
                 next_playback_id: std::sync::atomic::AtomicU64::new(1),
             });
 
@@ -3150,6 +3233,63 @@ mod win {
             assert!(!posted.get());
             assert_eq!(held.keys, HashSet::from([0x41]));
             assert_eq!(held.buttons, HashMap::from([(MouseButton::Left, (10, 20))]));
+        }
+
+        #[test]
+        fn pending_release_retries_same_coc_window_after_two_failures() {
+            let target = CocTarget {
+                window: 0x1234,
+                process_id: 77,
+                process_created_at: 88,
+            };
+            let expected_window = target.window as super::HWND;
+            let mut release = PendingRelease {
+                target,
+                held: HeldInputs {
+                    keys: HashSet::from([0x41]),
+                    buttons: HashMap::new(),
+                },
+            };
+            let resolved_windows = RefCell::new(Vec::new());
+            let mut release_attempts = 0;
+
+            for attempt in 1..=3 {
+                let result = retry_pending_release_with(
+                    &mut release,
+                    |resolved_target| {
+                        assert_eq!(resolved_target.window, target.window);
+                        assert_eq!(resolved_target.process_id, target.process_id);
+                        assert_eq!(
+                            resolved_target.process_created_at,
+                            target.process_created_at
+                        );
+                        resolved_windows.borrow_mut().push(resolved_target.window);
+                        Ok(expected_window)
+                    },
+                    |window, key, _| {
+                        assert_eq!(window, expected_window);
+                        assert_eq!(key, 0x41);
+                        release_attempts += 1;
+                        if attempt < 3 {
+                            Err(std::io::Error::other("temporary release failure"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, _, _, _| panic!("no mouse button is held"),
+                );
+
+                if attempt < 3 {
+                    assert!(result.is_err());
+                    assert_eq!(release.held.keys, HashSet::from([0x41]));
+                } else {
+                    result.unwrap();
+                }
+            }
+
+            assert!(release.held.keys.is_empty());
+            assert_eq!(release_attempts, 3);
+            assert_eq!(*resolved_windows.borrow(), vec![target.window; 3]);
         }
 
         #[test]
@@ -3627,6 +3767,14 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_delta_rejects_values_that_do_not_fit_the_windows_message() {
+        assert_eq!(checked_wheel_delta(273).unwrap(), 32_760);
+        assert_eq!(checked_wheel_delta(-273).unwrap(), -32_760);
+        assert!(checked_wheel_delta(274).is_err());
+        assert!(checked_wheel_delta(-274).is_err());
+    }
 
     #[test]
     fn window_title_read_distinguishes_empty_title_from_api_error() {

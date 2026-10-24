@@ -40,7 +40,7 @@ La [matrice de régression desktop](docs/desktop-regression-matrix.md) distingue
 - Le CLI Tauri 2, installé une fois :
 
 ```powershell
-cargo install tauri-cli --version "^2.0.0" --locked
+cargo install tauri-cli --version "2.12.4" --locked
 ```
 
 Les prérequis Windows détaillés sont décrits dans la [documentation Tauri](https://v2.tauri.app/start/prerequisites/) et la [documentation Microsoft WebView2](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
@@ -89,6 +89,8 @@ cargo tauri build --bundles nsis --target x86_64-pc-windows-msvc
 `cargo tauri build` exécute aussi `npm run build` selon `frontend/src-tauri/tauri.conf.json`. L’installateur est produit sous `frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/` avec un nom se terminant par `-setup.exe`. L’option `--bundles nsis` limite cette commande à NSIS, même si la configuration permet aussi MSI.
 
 L’installateur NSIS utilise le mode d’installation par utilisateur par défaut. Les données AUTO-COC sont conservées dans `%LOCALAPPDATA%\AUTO-COC`; le token Telegram est protégé pour le compte Windows courant. Le runtime WebView2 peut être installé pendant l’installation si nécessaire.
+
+Les versions précédentes stockaient les macros et réglages dans le dossier `config/` de l’ancien projet. Cette version ne les importe pas automatiquement; conservez une copie de ces fichiers et recréez manuellement les macros ou réglages dont vous avez besoin.
 
 ## CI et publication
 

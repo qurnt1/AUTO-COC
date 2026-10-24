@@ -425,7 +425,22 @@ impl Store {
 
 fn read_settings(path: &Path) -> Result<PersistedSettings, StoreError> {
     let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(|_| StoreError::InvalidData)
+    let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| StoreError::InvalidData)?;
+    if let Some(settings) = value.get_mut("settings").and_then(Value::as_object_mut) {
+        let legacy_requirement = settings.remove("requireCocForeground");
+        if !settings.contains_key("allowCocBackgroundPlayback")
+            && let Some(require_foreground) = legacy_requirement
+        {
+            let require_foreground = require_foreground
+                .as_bool()
+                .ok_or(StoreError::InvalidData)?;
+            settings.insert(
+                "allowCocBackgroundPlayback".into(),
+                Value::Bool(!require_foreground),
+            );
+        }
+    }
+    serde_json::from_value(value).map_err(|_| StoreError::InvalidData)
 }
 
 fn validate_name(name: &str) -> Result<(), StoreError> {
@@ -566,12 +581,13 @@ fn macro_issue(data: &MacroFile) -> Option<String> {
                 .is_some()
         };
         match kind {
-            "mouse_move" if !integer("x") || !integer("y") => {
+            "mouse_move" if !integer("x") || !integer("y") || !valid_window_origin(payload) => {
                 return Some("La position de souris est invalide.".into());
             }
             "mouse_click"
                 if !integer("x")
                     || !integer("y")
+                    || !valid_window_origin(payload)
                     || !payload
                         .get("button")
                         .and_then(Value::as_str)
@@ -583,7 +599,13 @@ fn macro_issue(data: &MacroFile) -> Option<String> {
             {
                 return Some("Le clic de souris est invalide.".into());
             }
-            "scroll" if !integer("x") || !integer("y") || !integer("dx") || !integer("dy") => {
+            "scroll"
+                if !integer("x")
+                    || !integer("y")
+                    || !integer("dx")
+                    || !integer("dy")
+                    || !valid_window_origin(payload) =>
+            {
                 return Some("Le défilement est invalide.".into());
             }
             "key_down" | "key_up"
@@ -606,6 +628,20 @@ fn macro_issue(data: &MacroFile) -> Option<String> {
         }
     }
     None
+}
+
+fn valid_window_origin(payload: &serde_json::Map<String, Value>) -> bool {
+    match payload.get("windowOrigin") {
+        None => true,
+        Some(Value::Object(origin)) => ["x", "y"].into_iter().all(|key| {
+            origin
+                .get(key)
+                .and_then(Value::as_i64)
+                .and_then(|number| i32::try_from(number).ok())
+                .is_some()
+        }),
+        Some(_) => false,
+    }
 }
 
 fn validate_steps(steps: &[Value]) -> Result<(), StoreError> {
@@ -1070,6 +1106,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_foreground_setting_is_inverted_and_current_setting_wins() {
+        let dir = tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+
+        for (require_foreground, expected_background) in [(true, false), (false, true)] {
+            let mut value = serde_json::to_value(PersistedSettings::default()).unwrap();
+            let settings = value["settings"].as_object_mut().unwrap();
+            settings.remove("allowCocBackgroundPlayback");
+            settings.insert(
+                "requireCocForeground".into(),
+                Value::Bool(require_foreground),
+            );
+            fs::write(&settings_path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+            let migrated = read_settings(&settings_path).unwrap();
+            assert_eq!(
+                migrated.settings.allow_coc_background_playback,
+                expected_background
+            );
+        }
+
+        let mut value = serde_json::to_value(PersistedSettings::default()).unwrap();
+        value["settings"]["allowCocBackgroundPlayback"] = Value::Bool(false);
+        value["settings"]["requireCocForeground"] = Value::Bool(false);
+        fs::write(&settings_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            !read_settings(&settings_path)
+                .unwrap()
+                .settings
+                .allow_coc_background_playback
+        );
+    }
+
+    #[test]
     fn failed_selected_macro_persistence_restores_memory_state() {
         let dir = tempdir().unwrap();
         let mut store = Store::open_at(dir.path()).unwrap();
@@ -1167,6 +1237,35 @@ mod tests {
         drop(store);
         let store = Store::open_at(dir.path()).unwrap();
         assert_eq!(store.get_macro("Anchored").unwrap().steps, steps);
+    }
+
+    #[test]
+    fn rejects_invalid_recorded_window_origins_before_a_macro_is_saved() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open_at(dir.path()).unwrap();
+        store.create_macro("Invalid origin").unwrap();
+
+        for invalid_origin in [
+            Value::String("invalid".into()),
+            Value::Null,
+            json!({"x": 50}),
+            json!({"x": 50, "y": "60"}),
+            json!({"x": i64::from(i32::MAX) + 1, "y": 60}),
+        ] {
+            let steps = vec![json!({
+                "t": 0.1,
+                "type": "mouse_move",
+                "data": {
+                    "x": 1240,
+                    "y": 790,
+                    "windowOrigin": invalid_origin
+                }
+            })];
+            assert!(matches!(
+                store.save_recorded_steps("Invalid origin", &steps),
+                Err(StoreError::InvalidData)
+            ));
+        }
     }
 
     #[test]

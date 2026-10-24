@@ -234,11 +234,10 @@ function Get-NameDiagnostics {
 $window = $null
 try {
     $accentedE = [char]0x00E9
-    $accentedCircumflexE = [char]0x00EA
     $curlyApostrophe = [char]0x2019
     $createLabel = "Cr$($accentedE)er une macro"
     $createSubmitLabel = "Cr$($accentedE)er la macro"
-    $readyStateLabel = [string][char]0x00C9 + 'tat d' + $curlyApostrophe + 'AUTO-COC : Pr' + $accentedCircumflexE + 't'
+    $idleStateLabel = 'En attente'
     $cancelWaitLabel = 'Annuler l' + $curlyApostrophe + 'attente'
     $eventCountLabel = '0 ' + $accentedE + 'v' + $accentedE + 'nements'
     $renamedMacroEventCountLabel = $RenamedMacroName + ' ' + $eventCountLabel
@@ -327,8 +326,13 @@ try {
     $cancelWait = Wait-ForElement -Root $window -Name $cancelWaitLabel `
         -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds -RequireEnabled
     Invoke-Element -Element $cancelWait
-    $null = Wait-ForElement -Root $window -Name $readyStateLabel `
-        -ControlType ([System.Windows.Automation.ControlType]::Button) -Seconds $TimeoutSeconds `
+    $completeGuide = Find-VisibleElement -Root $window -Name 'Terminer le guide' `
+        -ControlType ([System.Windows.Automation.ControlType]::Button) -RequireEnabled
+    if ($null -ne $completeGuide) {
+        Invoke-Element -Element $completeGuide
+    }
+    $null = Wait-ForElement -Root $window -Name $idleStateLabel `
+        -ControlType ([System.Windows.Automation.ControlType]::Text) -Seconds $TimeoutSeconds `
         -StableForMilliseconds 1000
     $null = Wait-ForElementContainingName -Root $window -Name $renamedMacroEventCountLabel `
         -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Seconds $TimeoutSeconds

@@ -285,7 +285,7 @@ export function Settings({ api, snapshot, busy, run, online, initialTab = "gener
                       <label className="field-label" htmlFor="telegram-token">Token du bot</label>
                       <div className="token-entry"><input id="telegram-token" type="password" autoComplete="new-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenMessage(""); }} placeholder={telegram.tokenConfigured ? "Saisir le nouveau token" : "Coller le token de BotFather"} /><button className="button quiet" type="button" disabled={!online || !token.trim() || busy !== null} onClick={() => void saveToken()}>{busy === "telegram-token" ? "Enregistrement…" : "Enregistrer le token"}</button></div>
                       <p className="telegram-feedback" role="status">{tokenMessage}</p>
-                      <span className="field-note"><Icon name="shield" size={14} />Stocké dans le coffre Windows. Le token ne sera pas réaffiché.</span>
+                      <span className="field-note"><Icon name="shield" size={14} />Chiffré par Windows DPAPI dans les données d’AUTO-COC. Le token ne sera pas réaffiché.</span>
                       {telegram.tokenConfigured && <button className="text-button" type="button" onClick={() => { setToken(""); setEditingTelegramToken(false); }}>Annuler le remplacement</button>}
                     </> : <>
                       <span className="muted-copy">Token enregistré et protégé. Il reste masqué.</span>

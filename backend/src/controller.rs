@@ -389,7 +389,10 @@ impl Controller {
                     } => {
                         self.stop_playback_fully().await?;
                     }
-                    Operation::Idle => {}
+                    Operation::Idle => {
+                        let mut machine = self.machine.lock().await;
+                        let _ = self.retry_pending_release_when_idle(&mut machine).await;
+                    }
                 }
             }
             NativeEvent::Cycle { playback_id } => {
@@ -1400,6 +1403,37 @@ impl Controller {
         self.stop_playback_with_authority(None).await
     }
 
+    async fn retry_pending_release_when_idle(
+        &self,
+        machine: &mut Machine,
+    ) -> Result<Option<Snapshot>, ControllerError> {
+        let result = {
+            let native = self.native.lock().await;
+            let Some(native) = native.as_ref() else {
+                return Ok(None);
+            };
+            native.retry_pending_playback_release()
+        };
+        match result {
+            Ok(false) => Ok(None),
+            Ok(true) => {
+                machine.last_error = None;
+                machine.foreground_loss_handled = false;
+                self.changed(machine).await.map(Some)
+            }
+            Err(error) => {
+                machine.last_error = Some(if error.kind() == std::io::ErrorKind::NotFound {
+                    "La fenêtre Clash of Clans d’origine n’est plus valide. Aucune autre fenêtre n’a été ciblée.".into()
+                } else {
+                    "Une libération d’entrée reste en attente sur la fenêtre Clash of Clans d’origine. Réessayez avec le raccourci Arrêter tant que cette fenêtre est valide.".into()
+                });
+                machine.foreground_loss_handled = false;
+                self.changed(machine).await?;
+                Err(ControllerError::NativeInputFailed)
+            }
+        }
+    }
+
     async fn stop_playback_with_authority(
         &self,
         authority: Option<(&str, crate::telegram::TelegramOwner)>,
@@ -1419,6 +1453,11 @@ impl Controller {
             machine.last_error = None;
             machine.foreground_loss_handled = false;
             return self.changed(&mut machine).await;
+        }
+        if matches!(machine.operation, Operation::Idle)
+            && let Some(snapshot) = self.retry_pending_release_when_idle(&mut machine).await?
+        {
+            return Ok(snapshot);
         }
         if !matches!(
             machine.operation,
@@ -2362,6 +2401,7 @@ fn telegram_verification_failure(error: crate::telegram::TelegramError) -> Teleg
         crate::telegram::TelegramError::Request => TelegramStatus::NetworkError,
         crate::telegram::TelegramError::Rejected
         | crate::telegram::TelegramError::MessageNotModified
+        | crate::telegram::TelegramError::MessageNotEditable
         | crate::telegram::TelegramError::InvalidResponse => TelegramStatus::Error,
     }
 }
@@ -2425,6 +2465,10 @@ mod tests {
         );
         assert_eq!(
             telegram_verification_failure(crate::telegram::TelegramError::Rejected),
+            TelegramStatus::Error
+        );
+        assert_eq!(
+            telegram_verification_failure(crate::telegram::TelegramError::MessageNotEditable),
             TelegramStatus::Error
         );
         assert_eq!(
